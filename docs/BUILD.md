@@ -66,10 +66,6 @@ between generation modes.
   tool version). The checked-in CI path uses the community Lite image.
 - ~8 GB RAM; a full compile is 20–60 minutes.
 
-The project files cap Quartus at two parallel processors. Increase that only
-after validating the host's thermal, memory, and system stability; CI is the
-preferred path for a full fit.
-
 ### Steps
 
 1. Clone the repo and check out this branch.

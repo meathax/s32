@@ -54,7 +54,7 @@ jobs:
             --workdir /build \
             --volume "$GITHUB_WORKSPACE:/build" \
             raetro/quartus:17.0 \
-            bash -lc '
+            bash -c '
               qsys-script --script=tools/make_pll.tcl &&
               qsys-generate rtl/pll/pll.qsys --synthesis=VERILOG \
                 --output-directory=rtl/pll &&
