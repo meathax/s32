@@ -1,0 +1,53 @@
+<misterromdescription>
+  <name>Soreike Kokology (Rev A)</name>
+  <setname>kokoroj</setname>
+  <year>1992</year>
+  <manufacturer>Sega</manufacturer>
+  <rbf>SegaS32</rbf>
+  <rom index="0" zip="kokoroj.zip" md5="none">
+    <part>80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <part name="epr-15524a.ic8" crc="3b4cc0cf"/>
+    <interleave output="16">
+      <part name="epr-15521a.ic18" crc="24c02cf9" map="01"/>
+      <part name="epr-15520a.ic9" crc="bfbae875" map="10"/>
+    </interleave>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="epr-15523.ic36" crc="b3b9d29c"/>
+    <part name="mpr-15522.ic35" crc="fb68a351"/>
+    <part name="mpr-15522.ic35" crc="fb68a351"/>
+    <part repeat="2097152">FF</part>
+    <interleave output="16">
+      <part name="mpr-15526.ic14" crc="f6907c13" map="01"/>
+      <part name="mpr-15525.ic5" crc="8c0c876f" map="10"/>
+    </interleave>
+    <part repeat="2097152">FF</part>
+    <part repeat="4194304">FF</part>
+    <part repeat="65536">FF</part>
+    <interleave output="64">
+      <part name="mpr-15527.ic32" crc="132f91c6" map="00000021"/>
+      <part name="mpr-15529.ic30" crc="c1b826f7" map="00002100"/>
+      <part name="mpr-15531.ic28" crc="d624e05f" map="00210000"/>
+      <part name="mpr-15533.ic26" crc="aff0e9a8" map="21000000"/>
+    </interleave>
+    <interleave output="64">
+      <part name="mpr-15528.ic31" crc="2e4bc090" map="00000021"/>
+      <part name="mpr-15530.ic29" crc="307877a8" map="00002100"/>
+      <part name="mpr-15532.ic27" crc="923ba3e5" map="00210000"/>
+      <part name="mpr-15534.ic25" crc="4fa5c56d" map="21000000"/>
+    </interleave>
+  </rom>
+  <nvram index="3" size="128"/>
+</misterromdescription>

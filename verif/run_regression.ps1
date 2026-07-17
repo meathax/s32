@@ -1,0 +1,363 @@
+# Native Windows equivalent of run_regression.sh for ModelSim Intel FPGA.
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File verif/run_regression.ps1
+#   pwsh -File verif/run_regression.ps1 -Seeds 50 -KeepWork
+#
+# MODELSIM_BIN may point at the directory containing vlog.exe/vsim.exe.
+# A complete transcript is written to verif/modelsim-regression.log.
+
+#requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [ValidateRange(1, 10000)]
+    [int]$Seeds = 50,
+
+    [string]$ModelSimBin = "",
+
+    [string]$Python = "",
+
+    [string]$LogPath = "",
+
+    [switch]$KeepWork
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$Root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+if (-not $LogPath) {
+    $LogPath = Join-Path $PSScriptRoot "modelsim-regression.log"
+}
+elseif (-not [IO.Path]::IsPathRooted($LogPath)) {
+    $LogPath = [IO.Path]::GetFullPath((Join-Path $Root $LogPath))
+}
+
+$RunRoot = Join-Path ([IO.Path]::GetTempPath()) ("s32-modelsim-regression-" + [guid]::NewGuid().ToString("N"))
+$Completed = $false
+$Summary = [Collections.Generic.List[string]]::new()
+
+function Write-RunLine {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    Write-Host $Text
+    Add-Content -LiteralPath $script:LogPath -Value $Text
+}
+
+function Add-RawLog {
+    param([object[]]$Lines)
+    if ($null -ne $Lines -and $Lines.Count -gt 0) {
+        Add-Content -LiteralPath $script:LogPath -Value $Lines
+    }
+}
+
+function Invoke-NativeCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    Add-Content -LiteralPath $script:LogPath -Value ("`n> {0} {1}" -f $FilePath, ($ArgumentList -join " "))
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $lines = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { $_.ToString() })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    Add-RawLog $lines
+
+    if ($exitCode -ne 0) {
+        $lines | Select-Object -Last 120 | ForEach-Object { Write-Host $_ }
+        throw "$Label exited with code $exitCode. See $LogPath"
+    }
+    return [string[]]$lines
+}
+
+function Resolve-ModelSimDirectory {
+    $candidates = [Collections.Generic.List[string]]::new()
+    foreach ($candidate in @($ModelSimBin, $env:MODELSIM_BIN, $env:MODELSIM_HOME)) {
+        if ($candidate) { $candidates.Add($candidate) }
+    }
+
+    $vsimCommand = Get-Command "vsim.exe" -ErrorAction SilentlyContinue
+    if ($vsimCommand) { $candidates.Add((Split-Path -Parent $vsimCommand.Source)) }
+
+    $candidates.Add("D:\Q\modelsim_ase\win32aloem")
+    foreach ($candidate in $candidates) {
+        foreach ($directory in @($candidate, (Join-Path $candidate "win32aloem"))) {
+            if ((Test-Path -LiteralPath (Join-Path $directory "vlib.exe")) -and
+                (Test-Path -LiteralPath (Join-Path $directory "vlog.exe")) -and
+                (Test-Path -LiteralPath (Join-Path $directory "vsim.exe"))) {
+                return [IO.Path]::GetFullPath($directory)
+            }
+        }
+    }
+    throw "ModelSim was not found. Pass -ModelSimBin or set MODELSIM_BIN to the directory containing vlib.exe, vlog.exe, and vsim.exe."
+}
+
+function Resolve-PythonCommand {
+    foreach ($candidate in @($Python, "python3.exe", "python.exe")) {
+        if (-not $candidate) { continue }
+        if (Test-Path -LiteralPath $candidate) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+    }
+    throw "Python 3 was not found. Pass -Python with the Python 3 executable path."
+}
+
+function Resolve-Sources {
+    param([Parameter(Mandatory = $true)][string[]]$Sources)
+    $resolved = [Collections.Generic.List[string]]::new()
+    foreach ($source in $Sources) {
+        $path = if ([IO.Path]::IsPathRooted($source)) { $source } else { Join-Path $script:Root $source }
+        if (-not (Test-Path -LiteralPath $path)) { throw "RTL/test source not found: $source" }
+        $resolved.Add([IO.Path]::GetFullPath($path))
+    }
+    return [string[]]$resolved
+}
+
+function New-WorkLibrary {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $directory = Join-Path $script:RunRoot $Name
+    $library = Join-Path $directory "work"
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    [void](Invoke-NativeCapture $script:Vlib @($library) "vlib ($Name)")
+    return $library
+}
+
+function Assert-Marker {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Output,
+        [Parameter(Mandatory = $true)][string]$Marker,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not ($Output | Where-Object { $_.Contains($Marker) } | Select-Object -First 1)) {
+        $Output | Select-Object -Last 120 | ForEach-Object { Write-Host $_ }
+        throw "$Label did not emit expected marker '$Marker'. See $LogPath"
+    }
+    $script:Summary.Add($Marker)
+    Write-RunLine $Marker
+}
+
+function Run-HdlTest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Top,
+        [Parameter(Mandatory = $true)][string[]]$Sources,
+        [Parameter(Mandatory = $true)][string]$Marker,
+        [string[]]$Defines = @(),
+        [string[]]$VsimArguments = @()
+    )
+
+    $library = New-WorkLibrary $Name
+    $arguments = @("-sv", "-work", $library)
+    foreach ($define in $Defines) { $arguments += "+define+$define" }
+    $arguments += Resolve-Sources $Sources
+    [void](Invoke-NativeCapture $script:Vlog $arguments "vlog ($Name)")
+
+    $testDirectory = Split-Path -Parent $library
+    $simLog = Join-Path $testDirectory "vsim.log"
+    $wlf = Join-Path $testDirectory "vsim.wlf"
+    $arguments = @("-c", "-lib", $library, "-l", $simLog, "-wlf", $wlf, $Top) + $VsimArguments + @("-do", "run -all; quit -f")
+    $output = @(Invoke-NativeCapture $script:Vsim $arguments "vsim ($Name)")
+    Assert-Marker $output $Marker $Name
+}
+
+function Write-Tier {
+    param([int]$Number, [string]$Description)
+    Write-RunLine ("`n[{0}/25] {1}" -f $Number, $Description)
+}
+
+function Run-Differential {
+    param([int]$Count)
+
+    $name = "t05_v60_diff"
+    $library = New-WorkLibrary $name
+    $sources = Resolve-Sources @(
+        "rtl/cpu/v60/s32_v60.sv",
+        "rtl/cpu/v60/s32_v60_bus.sv",
+        "verif/v60/tb_v60_diff.sv"
+    )
+    [void](Invoke-NativeCapture $script:Vlog (@("-sv", "-work", $library) + $sources) "vlog ($name)")
+    [void](Invoke-NativeCapture $script:PythonExe @("verif/cosim/v60_ref.py") "V60 reference self-test")
+
+    $testDirectory = Split-Path -Parent $library
+    for ($seed = 1; $seed -le $Count; $seed++) {
+        $prefix = Join-Path $testDirectory ("p{0}" -f $seed)
+        [void](Invoke-NativeCapture $script:PythonExe @("verif/cosim/gen_diff_program.py", $seed.ToString(), $prefix) "generate differential seed $seed")
+
+        $hexPath = ($prefix + ".hex").Replace("\", "/")
+        $simLog = Join-Path $testDirectory ("seed-{0}.log" -f $seed)
+        $wlf = Join-Path $testDirectory ("seed-{0}.wlf" -f $seed)
+        $output = @(Invoke-NativeCapture $script:Vsim @(
+            "-c", "-lib", $library, "-l", $simLog, "-wlf", $wlf,
+            "tb_v60_diff", "+hex=$hexPath", "-do", "run -all; quit -f"
+        ) "vsim (differential seed $seed)")
+
+        $actual = @(
+            foreach ($line in $output) {
+                if ($line -match '^\s*#\s*([RM][0-9]+=[0-9a-fA-FxXzZ]+)\s*$') { $Matches[1] }
+            }
+        )
+        $expected = @(Get-Content -LiteralPath ($prefix + ".expected"))
+        if ([string]::Join("`n", $expected) -cne [string]::Join("`n", $actual)) {
+            Write-Host "SEED $seed DIVERGES:"
+            Write-Host "Expected:"
+            $expected | ForEach-Object { Write-Host "  $_" }
+            Write-Host "RTL:"
+            $actual | ForEach-Object { Write-Host "  $_" }
+            throw "V60 differential seed $seed diverged. Work retained at $RunRoot"
+        }
+        if (($seed % 10) -eq 0 -or $seed -eq $Count) {
+            Write-RunLine ("  differential seeds: {0}/{1}" -f $seed, $Count)
+        }
+    }
+
+    $marker = "V60 DIFF: PASS ($Count/$Count seeds match reference)"
+    $script:Summary.Add($marker)
+    Write-RunLine $marker
+}
+
+$ModelSimDirectory = Resolve-ModelSimDirectory
+$Vlib = Join-Path $ModelSimDirectory "vlib.exe"
+$Vlog = Join-Path $ModelSimDirectory "vlog.exe"
+$Vsim = Join-Path $ModelSimDirectory "vsim.exe"
+$PythonExe = Resolve-PythonCommand
+
+New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+Set-Content -LiteralPath $LogPath -Value @(
+    "System 32 ModelSim regression",
+    "Started: $([DateTime]::Now.ToString('o'))",
+    "ModelSim: $ModelSimDirectory",
+    "Python: $PythonExe",
+    "Work: $RunRoot"
+)
+
+$VideoSources = @(
+    Get-ChildItem -LiteralPath (Join-Path $Root "rtl/video") -Filter "*.sv" |
+        Sort-Object Name |
+        ForEach-Object { $_.FullName }
+)
+$FullCoreSources = @(
+    "rtl/s32_pkg.sv",
+    "rtl/cpu/v60/s32_v60.sv",
+    "rtl/cpu/v60/s32_v60_bus.sv"
+) + $VideoSources + @(
+    "rtl/audio/s32_rf5c68.sv",
+    "rtl/audio/s32_multipcm.sv",
+    "rtl/audio/s32_soundsys.sv",
+    "rtl/io/s32_io.sv",
+    "rtl/prot/s32_prot.sv",
+    "verif/common/jt12_stub.v",
+    "rtl/s32_core.sv"
+)
+$V60Sources = @("rtl/cpu/v60/s32_v60.sv", "rtl/cpu/v60/s32_v60_bus.sv")
+
+Push-Location $Root
+try {
+    Write-RunLine "ModelSim native regression (no Cygwin/Icarus dependency)"
+
+    Write-Tier 1 "full-core lint compile (universal + System32-only profile)"
+    Run-HdlTest "t01_lint_universal" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE UNIVERSAL LINT PASS" @("SIMULATION")
+    Run-HdlTest "t01_lint_ga2" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE S32-ONLY LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+    Write-RunLine "CORE BUILD PROFILES: PASS"
+
+    Write-Tier 2 "V60 smoke test"
+    Run-HdlTest "t02_v60_smoke" "tb_v60_smoke" ($V60Sources + "verif/v60/tb_v60_smoke.sv") "SMOKE PASS"
+
+    Write-Tier 3 "V60 directed suite"
+    Run-HdlTest "t03_v60_directed" "tb_v60_directed" ($V60Sources + "verif/v60/tb_v60_directed.sv") "DIRECTED PASS"
+
+    Write-Tier 4 "full-core integration boot (universal + System32-only profile)"
+    Run-HdlTest "t04_boot_universal" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION")
+    Run-HdlTest "t04_boot_ga2" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+    Write-RunLine "CORE BUILD-PROFILE BOOTS: PASS"
+
+    Write-Tier 5 "V60 differential co-sim vs independent reference ($Seeds seeds)"
+    Run-Differential $Seeds
+
+    Write-Tier 6 "full-core soak / simulator-tier acceptance (extended multi-frame)"
+    Run-HdlTest "t06_core_soak" "tb_core_soak" ($FullCoreSources + "verif/common/tb_core_soak.sv") "CORE SOAK PASS" @("SIMULATION")
+
+    Write-Tier 7 "V60 audit-fix directed tests (string/CALL/RET/RSR + SEARCH)"
+    Run-HdlTest "t07_v60_audit" "tb_v60_audit" ($V60Sources + "verif/v60/tb_v60_audit.sv") "AUDIT PASS"
+    Run-HdlTest "t07_v60_search" "tb_v60_search" ($V60Sources + "verif/v60/tb_v60_search.sv") "V60 SEARCH PASS"
+
+    Write-Tier 8 "GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
+    $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 release MRA check")
+    Assert-Marker $releaseOutput "GA2 RELEASE MRA PASS" "GA2 release MRA check"
+    Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+
+    Write-Tier 9 "framebuffer interface directed test (runs / shadow RMW / erase / read)"
+    Run-HdlTest "t09_fb_if" "tb_fb_if" @("rtl/mem/s32_fb_if.sv", "verif/common/tb_fb_if.sv") "FB IF PASS"
+
+    Write-Tier 10 "mixer directed test (priority / palette index / blend / shadow)"
+    Run-HdlTest "t10_mixer" "tb_mixer" @("rtl/video/s32_linebuf.sv", "rtl/video/s32_mixer.sv", "rtl/video/s32_palette.sv", "verif/common/tb_mixer.sv") "MIXER PASS"
+
+    Write-Tier 11 "sprite pixel-path directed test (pen rules / end codes / flip / zoom / indirect)"
+    Run-HdlTest "t11_sprite" "tb_sprite" @("rtl/video/s32_sprite.sv", "verif/common/tb_sprite.sv") "SPRITE PASS"
+
+    Write-Tier 12 "sprite scale divider exactness / fixed-latency test"
+    Run-HdlTest "t12_sprite_div" "tb_sprite_div" @("rtl/video/s32_sprite.sv", "verif/common/tb_sprite_div.sv") "SPRITE DIV PASS"
+
+    Write-Tier 13 "V60 DIVX/DIVUX iterative 64/32 exactness / latency test"
+    Run-HdlTest "t13_v60_divx" "tb_v60_divx" ($V60Sources + "verif/v60/tb_v60_divx.sv") "DIVX PASS"
+
+    Write-Tier 14 "V60 decimal group directed test (ADDDC/SUBDC/SUBRDC/CVTDPZ/CVTDZP)"
+    Run-HdlTest "t14_v60_decimal" "tb_v60_decimal" ($V60Sources + "verif/v60/tb_v60_decimal.sv") "DECIMAL PASS"
+
+    Write-Tier 15 "V60 bit string/field directed test (EXTBF/INSBF/SCHBS/MOVBS)"
+    Run-HdlTest "t15_v60_bits" "tb_v60_bits" ($V60Sources + "verif/v60/tb_v60_bits.sv") "BITS PASS"
+
+    Write-Tier 16 "V60 short backward-branch fetch performance"
+    Run-HdlTest "t16_v60_fetch" "tb_v60_fetch" ($V60Sources + "verif/v60/tb_v60_fetch.sv") "FETCH PERF PASS"
+
+    Write-Tier 17 "ROM loader reset / mapping / completion gating"
+    Run-HdlTest "t17_rom_loader" "tb_rom_loader" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader.sv") "ROM LOADER PASS"
+
+    Write-Tier 18 "EEPROM NVRAM upload byte order / dirty-state persistence"
+    Run-HdlTest "t18_eeprom" "tb_eeprom_nvram" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_eeprom_nvram.sv") "EEPROM NVRAM PASS"
+
+    Write-Tier 19 "V60 20-byte F1 / high fetch-buffer offset regression"
+    Run-HdlTest "t19_v60_long_ea" "tb_v60_long_ea" ($V60Sources + "verif/v60/tb_v60_long_ea.sv") "LONG EA PASS"
+
+    Write-Tier 20 "RF5C68 dual-port wave RAM / loop-fetch / channel cadence"
+    Run-HdlTest "t20_rf5c68" "tb_rf5c68" @("rtl/audio/s32_rf5c68.sv", "verif/common/tb_rf5c68.sv") "RF5C68 PASS"
+
+    Write-Tier 21 "palette RAM alias / byte-enable / write-both / dual-port timing"
+    Run-HdlTest "t21_palette" "tb_palette" @("rtl/video/s32_palette.sv", "verif/common/tb_palette.sv") "PALETTE PASS"
+
+    Write-Tier 22 "shared tile/bitmap line-buffer latency / layer / parity isolation"
+    Run-HdlTest "t22_linebuf" "tb_linebuf" @("rtl/video/s32_linebuf.sv", "verif/common/tb_linebuf.sv") "LINEBUF PASS"
+
+    Write-Tier 23 "tilemap synchronous VRAM fetch latency / NBG / TEXT / BITMAP"
+    Run-HdlTest "t23_tilemap_vram" "tb_tilemap_vram" @("rtl/video/s32_big_dpram.sv", "rtl/video/s32_vram.sv", "rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_vram.sv") "TILEMAP VRAM PASS" @("SIMULATION")
+
+    Write-Tier 24 "byte-wide true-dual-port BRAM timing / hold / collision semantics"
+    Run-HdlTest "t24_byte_dpram" "tb_byte_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_byte_dpram.sv") "BYTE DPRAM PASS"
+
+    Write-Tier 25 "V25 HLE mailbox BRAM timing / wakeup / protection overlays"
+    Run-HdlTest "t25_v25_dpram" "tb_v25_dpram" @("rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv", "rtl/prot/s32_prot.sv", "verif/common/tb_v25_dpram.sv") "V25 DPRAM PASS"
+
+    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (25/25 tiers)"
+    Write-RunLine "Detailed log: $LogPath"
+    $Completed = $true
+}
+finally {
+    Pop-Location
+    if ($Completed -and -not $KeepWork) {
+        # RunRoot is a GUID-named child created by this invocation only.
+        Remove-Item -LiteralPath $RunRoot -Recurse -Force
+    }
+    else {
+        Write-Host "ModelSim work retained at: $RunRoot"
+        Add-Content -LiteralPath $LogPath -Value "ModelSim work retained at: $RunRoot"
+    }
+}

@@ -1,0 +1,840 @@
+//============================================================================
+//  Real-ROM boot harness: runs an actual game image (built by
+//  tools/make_sim_images.py) on s32_core with full-size memory models.
+//
+//  Plusargs:
+//    +IMG=<dir>     image directory (maincpu.hex/soundcpu.hex/tiles.hex/
+//                   sprites.hex expected inside)
+//    +B0=<hex>      board descriptor byte 0 (flags), default 0
+//    +FRAMES=<n>    frames to run (804k clk_sys each), default 3
+//    +COINAT=<n>     assert P1 coin active-low starting at harness frame n
+//    +COINLEN=<n>    coin assertion length in frames, default 1
+//    +STARTAT=<n>    assert P1 start active-low starting at harness frame n
+//    +STARTLEN=<n>   start assertion length in frames, default 1
+//    +P1AT<n>=<f>    start P1 digital event slot n (0..3) at frame f
+//    +P1LEN<n>=<n>   event length in frames, default 1
+//    +P1MASK<n>=<h>  P1A bits to pull low: L/R/U/D=80/40/20/10,
+//                    B3/B2/B1 (Magic/Jump/Attack)=04/02/01
+//
+//  This is a diagnostic, not a pass/fail tier: it reports boot progress
+//  (PC movement, RAM/VRAM/palette/sprite/io write counts, IRQs taken,
+//  exceptions, framebuffer pixels) and flags a stuck PC.
+//============================================================================
+`timescale 1ns/1ps
+
+module tb_core_romboot;
+
+import s32_pkg::*;
+
+reg clk_sys = 0, clk_ram = 0, rst = 1;
+always #10.35 clk_sys = ~clk_sys;
+always #5.175 clk_ram = ~clk_ram;
+
+// clock enables
+reg ce_cpu = 0;  reg [1:0] cdiv = 0;
+always @(posedge clk_sys) begin
+    cdiv <= (cdiv == 2) ? 2'd0 : cdiv + 1'd1;
+    ce_cpu <= (cdiv == 0);
+end
+reg ce_z80 = 0;  reg [2:0] zdiv = 0;
+always @(posedge clk_sys) begin
+    zdiv <= (zdiv == 5) ? 3'd0 : zdiv + 1'd1;
+    ce_z80 <= (zdiv == 0);
+end
+reg ce_pcm = 0;  reg [1:0] pdiv = 0;
+always @(posedge clk_sys) begin
+    pdiv <= pdiv + 1'd1;
+    ce_pcm <= (pdiv == 0);
+end
+
+// board descriptor from plusargs
+board_desc_t board;
+integer b0;
+initial begin
+    if (!$value$plusargs("B0=%h", b0)) b0 = 0;
+    board = '0;
+    board.multi32     = b0[0];
+    board.has_v25     = b0[1];
+    board.v25_table   = b0[2];
+    board.has_adc     = b0[3];
+    board.has_track   = b0[4];
+    board.has_ppi     = b0[5];
+    board.has_dsp_hle = b0[6];
+end
+
+// ---------------------------------------------------------------------------
+// memory models (SDRAM layout per s32_pkg bases)
+// ---------------------------------------------------------------------------
+reg [15:0]  mc  [0:1048575];    // maincpu   base 0x000000, 2MB
+reg [15:0]  sc  [0:2097151];    // soundcpu  base 0x200000, 4MB
+reg [63:0]  tl  [0:524287];     // tiles     base 0x600000, 4MB
+reg [127:0] sp  [0:1048575];    // sprites   base 0x1000000, 16MB
+
+string imgdir;
+initial begin
+    if (!$value$plusargs("IMG=%s", imgdir)) imgdir = ".";
+    $readmemh({imgdir, "/maincpu.hex"},  mc);
+    $readmemh({imgdir, "/soundcpu.hex"}, sc);
+    $readmemh({imgdir, "/tiles.hex"},    tl);
+    $readmemh({imgdir, "/sprites.hex"},  sp);
+end
+
+// p0: V60 program (clk_sys single-cycle toggle ack)
+wire        p0_req;
+wire [24:1] p0_addr;
+reg  [15:0] p0_dout;
+reg         p0_ack = 0;
+always @(posedge clk_sys) begin
+    p0_ack  <= p0_req & ~p0_ack;
+    p0_dout <= mc[p0_addr[20:1]];
+end
+
+// p1: tile data, 64-bit (clk_ram)
+wire        p1_req;
+wire [24:3] p1_addr;
+reg  [63:0] p1_dout;
+reg         p1_ack = 0;
+always @(posedge clk_ram) begin
+    p1_ack  <= p1_req & ~p1_ack;
+    p1_dout <= tl[p1_addr[21:3] - SDR_TILES_BASE[21:3]];
+end
+
+// p2: sprite data, 128-bit (clk_ram)
+wire        p2_req;
+wire [24:4] p2_addr;
+reg [127:0] p2_dout;
+reg         p2_ack = 0;
+always @(posedge clk_ram) begin
+    p2_ack  <= p2_req & ~p2_ack;
+    p2_dout <= sp[p2_addr[23:4]];   // sprites base 0x1000000
+end
+
+// p3: Z80 program/banks (clk_sys)
+wire        p3_req;
+wire [24:1] p3_addr;
+reg  [15:0] p3_dout;
+reg         p3_ack = 0;
+always @(posedge clk_sys) begin
+    p3_ack  <= p3_req & ~p3_ack;
+    p3_dout <= sc[p3_addr[21:1]];   // soundcpu base 0x200000
+end
+
+// framebuffer service: behavioral model of the emu-top s32_fb_if
+// (4 buffers x 256 lines x 512 px; erased state = 0xFFFF = transparent,
+// shadow runs RMW dest &= 0x7FFF, reads serve the line latched at rd_req)
+wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req;
+wire  [1:0] fbw_buf, fbe_buf, fbr_buf;
+wire  [8:0] fbw_x, fbr_x;
+wire  [7:0] fbw_y, fbe_y, fbr_y;
+wire [15:0] fbw_pix;
+wire        fbw_shadow;
+reg  [15:0] fbmem [0:3][0:255][0:511];
+initial for (int b = 0; b < 4; b++)
+    for (int y = 0; y < 256; y++)
+        for (int x = 0; x < 512; x++) fbmem[b][y][x] = 16'hFFFF;
+reg fbe_ack;
+always @(posedge clk_ram) begin
+    fbe_ack <= fbe_req;
+    if (fbw_valid) begin
+        if (fbw_shadow) fbmem[fbw_buf][fbw_y][fbw_x][15] <= 1'b0;
+        else            fbmem[fbw_buf][fbw_y][fbw_x] <= fbw_pix;
+    end
+    if (fbe_req && !fbe_ack)
+        for (int x = 0; x < 512; x++) fbmem[fbe_buf][fbe_y][x] = 16'hFFFF;
+end
+// Read-line service uses a conditional acknowledge pulse.  Holding ack high
+// suppresses the core request entirely: s32_core only launches when ack is
+// low, then holds req/address until the service acknowledges it.
+reg fbr_ack = 0;
+integer fbr_accepts = 0;
+reg [1:0] fbr_buf_l; reg [7:0] fbr_y_l;
+always @(posedge clk_ram) begin
+    fbr_ack <= fbr_req && !fbr_ack;
+    if (fbr_req && !fbr_ack) begin
+        fbr_buf_l <= fbr_buf;
+        fbr_y_l <= fbr_y;
+        fbr_accepts = fbr_accepts + 1;
+    end
+end
+wire [15:0] fbr_pix = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+integer spr_px = 0;
+always @(posedge clk_ram) if (fbw_valid) spr_px = spr_px + 1;
+// Renderer liveness: accepted sprite-ROM bursts and valid draw commands.
+// These are harness-only probes; scale_start is asserted once per decoded
+// non-clip/non-end sprite command.
+integer spr_cmd_cnt = 0, srom_req_cnt = 0;
+reg [15:0] spr_jump_prev [0:1];
+reg        spr_jump_seen [0:1];
+initial begin
+    spr_jump_seen[0] = 1'b0;
+    spr_jump_seen[1] = 1'b0;
+end
+always @(posedge clk_ram) begin
+    if (core.sprite.scale_start) spr_cmd_cnt = spr_cmd_cnt + 1;
+    if (p2_req && !p2_ack)       srom_req_cnt = srom_req_cnt + 1;
+    // Report a command-list jump only when it changes for that framebuffer
+    // parity.  This keeps long real-ROM runs concise while exposing the exact
+    // list target consumed after each sprite-update pulse.
+    if (core.sprite.rs == core.sprite.R_DECODE &&
+        core.sprite.sw[0][15:14] == 2'b10) begin
+        if (!spr_jump_seen[core.sprite.disp_buf[0]] ||
+            spr_jump_prev[core.sprite.disp_buf[0]] != core.sprite.sw[0]) begin
+            $display("[spr-list] frame %0d buf=%0d jump@%04x word=%04x target=%04x",
+                cur_frame, core.sprite.disp_buf[0], core.sprite.list_idx,
+                core.sprite.sw[0], {3'b000, core.sprite.sw[0][12:0]});
+            spr_jump_seen[core.sprite.disp_buf[0]] = 1'b1;
+            spr_jump_prev[core.sprite.disp_buf[0]] = core.sprite.sw[0];
+        end
+    end
+end
+
+// Confirm that the CPU-side I/O transaction returned each active-low pulse.
+// P1A is C00000; MAME system32_generic puts P1 coin/start on port E
+// (C00008) bits 2/4.
+integer p1a_rd_cnt = 0, coin_rd_cnt = 0, start_rd_cnt = 0;
+integer p1a_active_samples = 0;
+integer coin_active_samples = 0, start_active_samples = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && !core.m_we && !core.ack_d) begin
+        if ({core.A[23:1], 1'b0} == 24'hc00000) begin
+            p1a_rd_cnt = p1a_rd_cnt + 1;
+            if (core.m_rdata[7:0] != 8'hff) begin
+                p1a_active_samples = p1a_active_samples + 1;
+                $display("[input-sampled] frame %0d: P1A read=%04x pc=%08x",
+                    cur_frame, core.m_rdata, core.v60.dbg_pc);
+            end
+        end
+        if ({core.A[23:1], 1'b0} == 24'hc00008) begin
+            coin_rd_cnt = coin_rd_cnt + 1;
+            start_rd_cnt = start_rd_cnt + 1;
+            if (!core.m_rdata[2]) begin
+                coin_active_samples = coin_active_samples + 1;
+                $display("[input-sampled] frame %0d: P1 coin read=%04x pc=%08x",
+                    cur_frame, core.m_rdata, core.v60.dbg_pc);
+            end
+            if (!core.m_rdata[4]) begin
+                start_active_samples = start_active_samples + 1;
+                $display("[input-sampled] frame %0d: P1 start read=%04x pc=%08x",
+                    cur_frame, core.m_rdata, core.v60.dbg_pc);
+            end
+        end
+    end
+end
+
+// input stubs
+reg  [7:0] in_p1a_r = 8'hff;
+reg  [7:0] in_portc_r = 8'hff;
+reg  [7:0] in_svc12_r = 8'hff;
+integer coin_at, coin_len, start_at, start_len;
+integer p1_at [0:3];
+integer p1_len [0:3];
+integer p1_mask [0:3];
+integer p1_event_count;
+initial begin
+    if (!$value$plusargs("COINAT=%d", coin_at)) coin_at = -1;
+    if (!$value$plusargs("COINLEN=%d", coin_len)) coin_len = 1;
+    if (!$value$plusargs("STARTAT=%d", start_at)) start_at = -1;
+    if (!$value$plusargs("STARTLEN=%d", start_len)) start_len = 1;
+    if (!$value$plusargs("P1AT0=%d", p1_at[0])) p1_at[0] = -1;
+    if (!$value$plusargs("P1LEN0=%d", p1_len[0])) p1_len[0] = 1;
+    if (!$value$plusargs("P1MASK0=%h", p1_mask[0])) p1_mask[0] = 0;
+    if (!$value$plusargs("P1AT1=%d", p1_at[1])) p1_at[1] = -1;
+    if (!$value$plusargs("P1LEN1=%d", p1_len[1])) p1_len[1] = 1;
+    if (!$value$plusargs("P1MASK1=%h", p1_mask[1])) p1_mask[1] = 0;
+    if (!$value$plusargs("P1AT2=%d", p1_at[2])) p1_at[2] = -1;
+    if (!$value$plusargs("P1LEN2=%d", p1_len[2])) p1_len[2] = 1;
+    if (!$value$plusargs("P1MASK2=%h", p1_mask[2])) p1_mask[2] = 0;
+    if (!$value$plusargs("P1AT3=%d", p1_at[3])) p1_at[3] = -1;
+    if (!$value$plusargs("P1LEN3=%d", p1_len[3])) p1_len[3] = 1;
+    if (!$value$plusargs("P1MASK3=%h", p1_mask[3])) p1_mask[3] = 0;
+    p1_event_count = (p1_at[0] >= 0) + (p1_at[1] >= 0) +
+                     (p1_at[2] >= 0) + (p1_at[3] >= 0);
+end
+wire [7:0] adc_a [0:7];
+wire       tdv_a [0:2];
+wire signed [8:0] tdx_a [0:2], tdy_a [0:2];
+wire [7:0] tbt_a [0:2];
+generate
+    for (genvar gi = 0; gi < 8; gi = gi + 1) assign adc_a[gi] = 8'h80;
+    for (genvar gj = 0; gj < 3; gj = gj + 1) begin
+        assign tdv_a[gj] = 1'b0;
+        assign tdx_a[gj] = 9'sd0;
+        assign tdy_a[gj] = 9'sd0;
+        assign tbt_a[gj] = 8'hff;
+    end
+endgenerate
+
+wire hs, vs, hb, vb;
+wire [23:0] rgb_a;
+wire        ce_pix;
+
+s32_core core (
+    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .board(board),
+    .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_z80), .ce_pcm(ce_pcm),
+    .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
+    .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr), .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
+    .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr), .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
+    .sdr_p3_req(p3_req), .sdr_p3_addr(p3_addr), .sdr_p3_dout(p3_dout), .sdr_p3_ack(p3_ack),
+    .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
+    .fb_wr_start(fbw_start), .fb_wr_buf(fbw_buf), .fb_wr_x(fbw_x), .fb_wr_y(fbw_y),
+    .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
+    .fb_wr_shadow(fbw_shadow), .fb_wr_busy(1'b0),
+    .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
+    .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
+    .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
+    .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),
+    .eep_ld_wr(1'b0), .eep_ld_addr(6'h0), .eep_ld_data(16'h0), .eep_rd_addr(6'h0),
+    .eep_rd_data(), .eep_upload(1'b0), .eep_modified(),
+    .in_p1a(in_p1a_r), .in_p2a(8'hff), .in_portc(in_portc_r),
+    .in_svc12(in_svc12_r), .in_svc34(8'hff),
+    .in_p1b(8'hff), .in_p2b(8'hff), .in_portc_b(8'hff),
+    .in_svc12_b(8'hff), .in_svc34_b(8'hff),
+    .adc_ch(adc_a),
+    .trk_dv(tdv_a), .trk_dx(tdx_a), .trk_dy(tdy_a),
+    .trk_btn(tbt_a),
+    .ppi_pa(8'hff), .ppi_pb(8'hff), .ppi_pc(8'hff),
+    .rgb_a(rgb_a), .rgb_b(), .ce_pix(ce_pix), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
+    .audio_l(), .audio_r(), .out_lamps()
+);
+
+// MAME's v60_device::device_start() gives R0..R30 a deterministic zero
+// startup value (SP and the architectural reset registers are handled
+// separately).  FPGA configuration also gives these flops a known power-up
+// state, while a four-state RTL simulator otherwise leaves them as X because
+// the CPU's architectural reset deliberately does not rewrite every GPR.
+// Mirror the one-time device-start state here so real-ROM diagnostics do not
+// poison game RAM when GA2 uses R26 as its startup zero register.
+integer v60_start_i;
+initial begin
+    for (v60_start_i = 0; v60_start_i < 31; v60_start_i = v60_start_i + 1)
+        core.v60.r[v60_start_i] = 32'h0000_0000;
+end
+
+// ---------------------------------------------------------------------------
+// progress instrumentation
+// ---------------------------------------------------------------------------
+integer n_vram_wr = 0, n_pal_wr = 0, n_spr_wr = 0, n_io_wr = 0;
+integer n_intc_wr = 0, n_wram_wr = 0, n_exc = 0, n_irq = 0;
+integer vs_count = 0;
+reg vs_d;
+always @(posedge clk_sys) begin
+    vs_d <= vs;
+    if (vs & ~vs_d) vs_count = vs_count + 1;
+    if (core.m_req && core.m_ack && core.m_we && !core.ack_d) begin
+        case (core.A[23:20])
+            4'h2: n_wram_wr = n_wram_wr + 1;
+            4'h3: n_vram_wr = n_vram_wr + 1;
+            4'h4: n_spr_wr  = n_spr_wr + 1;
+            4'h6: n_pal_wr  = n_pal_wr + 1;
+            4'hC: n_io_wr   = n_io_wr + 1;
+            4'hD: n_intc_wr = n_intc_wr + 1;
+            default: ;
+        endcase
+    end
+end
+
+// exception / irq counters (state-entry edges)
+reg exc_d, irq_d;
+always @(posedge clk_sys) begin
+    exc_d <= (core.v60.st == core.v60.S_EXC_PUSH1);
+    if ((core.v60.st == core.v60.S_EXC_PUSH1) && !exc_d) begin
+        if (core.v60.exc_vector >= 8'h40) n_irq = n_irq + 1;
+        else n_exc = n_exc + 1;
+    end
+end
+
+// stuck-PC watchdog (+ one-shot deep state dump on a long freeze)
+reg [31:0] last_pc = 0;
+integer same_pc = 0;
+reg dumped = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.dbg_pc == last_pc) same_pc = same_pc + 1;
+    else begin same_pc = 0; last_pc = core.v60.dbg_pc; end
+    if (same_pc == 500000 && !dumped) begin
+        dumped = 1;
+        $display("[FROZEN] pc=%08x st=%0d cur_op=%02x subop=%02x cls=%0d",
+            core.v60.dbg_pc, core.v60.st, core.v60.cur_op, core.v60.subop, core.v60.cls);
+        $display("[FROZEN] str_cnt=%08x str_src=%08x str_dst=%08x bit_len=%08x",
+            core.v60.str_cnt, core.v60.str_src, core.v60.str_dst, core.v60.bit_len);
+        $display("[FROZEN] op1=%08x op2=%08x r0=%08x r1=%08x r3=%08x r26=%08x sp=%08x",
+            core.v60.op1, core.v60.op2, core.v60.r[0], core.v60.r[1],
+            core.v60.r[3], core.v60.r[26], core.v60.r[31]);
+    end
+end
+
+// frame capture: with +DUMPAT=<frame#> (+DUMPN=<count>, default 1) write
+// active-video pixels of those frames as PPM files (dump<frame>.ppm in cwd)
+integer dump_at, dump_n, dump_fd = 0, dump_x, dump_y;
+reg dumping = 0;
+initial begin
+    if (!$value$plusargs("DUMPAT=%d", dump_at)) dump_at = -1;
+    if (!$value$plusargs("DUMPN=%d", dump_n)) dump_n = 1;
+end
+reg vb_d, hb_d;
+integer cur_frame = 0;
+always @(posedge clk_sys) begin
+    vb_d <= vb;
+    if (vb & ~vb_d) begin              // end of visible field
+        cur_frame = cur_frame + 1;
+        if (dumping) begin
+            // pad short frames so the PPM is always complete
+            while (dump_y < 224) begin
+                for (dump_x = 0; dump_x < 416; dump_x = dump_x + 1)
+                    $fwrite(dump_fd, "0 0 0\n");
+                dump_y = dump_y + 1;
+            end
+            $fclose(dump_fd);
+            dumping = 0;
+            $display("[dump] wrote frame %0d", cur_frame-1);
+        end
+        if (dump_at >= 0 && cur_frame >= dump_at && cur_frame < dump_at + dump_n) begin
+            dump_fd = $fopen($sformatf("dump%0d.ppm", cur_frame), "w");
+            // 52*8=416 wide, 224 high fixed header (PPM allows trailing slack)
+            $fwrite(dump_fd, "P3\n416 224\n255\n");
+            dumping = 1; dump_x = 0; dump_y = 0;
+        end
+    end
+    hb_d <= hb;
+    if (dumping && hb & ~hb_d && dump_x != 0) begin
+        // pad/truncate each line to exactly 416 pixels
+        while (dump_x < 416) begin
+            $fwrite(dump_fd, "0 0 0\n");
+            dump_x = dump_x + 1;
+        end
+        dump_x = 0;
+        dump_y = dump_y + 1;
+    end
+    if (dumping && ce_pix && !hb && !vb && dump_y < 224) begin
+        if (dump_x < 416) begin
+            $fwrite(dump_fd, "%0d %0d %0d\n", rgb_a[23:16], rgb_a[15:8], rgb_a[7:0]);
+            dump_x = dump_x + 1;
+        end
+    end
+end
+
+// instruction trace window (+TRLO/+TRHI plusargs): pc, opcode, key regs
+integer tr_lo, tr_hi, tr_at, tr_n = 0;
+initial begin
+    if (!$value$plusargs("TRLO=%h", tr_lo)) tr_lo = -1;
+    if (!$value$plusargs("TRHI=%h", tr_hi)) tr_hi = -1;
+    if (!$value$plusargs("TRAT=%d", tr_at)) tr_at = 0;
+end
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (cur_frame >= tr_at && core.v60.st == core.v60.S_DECODE && core.v60.pc >= tr_lo &&
+        core.v60.pc < tr_hi && tr_n < 400) begin
+        tr_n = tr_n + 1;
+        $display("[tr] pc=%08x op=%02x r0=%08x r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x z=%b",
+            core.v60.pc, core.v60.opcode, core.v60.r[0], core.v60.r[1],
+            core.v60.r[3], core.v60.r[4], core.v60.r[5], core.v60.r[6], core.v60.f_z);
+    end
+end
+
+// GA2 object-list investigation trace.  Enable with +OBJTRAT=<frame> and
+// optionally +OBJTRMAX=<n>.  It follows only the transition initializer
+// (0x130600-0x130680) and object-list builder (0x132900-0x1329B0), recording
+// the raw fetch bytes/registers at decode plus accepted non-ROM data cycles.
+// This stays out of production RTL and is inert unless the plusarg is used.
+integer obj_tr_at, obj_tr_max, obj_i_n = 0, obj_bus_n = 0;
+initial begin
+    if (!$value$plusargs("OBJTRAT=%d", obj_tr_at)) obj_tr_at = -1;
+    if (!$value$plusargs("OBJTRMAX=%d", obj_tr_max)) obj_tr_max = 2000;
+end
+wire obj_pc_range = ((core.v60.pc >= 32'h00130600 && core.v60.pc < 32'h00130680) ||
+                     (core.v60.pc >= 32'h00132900 && core.v60.pc < 32'h001329b0));
+wire obj_dbgpc_range = ((core.v60.dbg_pc >= 32'h00130600 && core.v60.dbg_pc < 32'h00130680) ||
+                        (core.v60.dbg_pc >= 32'h00132900 && core.v60.dbg_pc < 32'h001329b0));
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (obj_tr_at >= 0 && cur_frame >= obj_tr_at && obj_pc_range &&
+        core.v60.st == core.v60.S_DECODE && obj_i_n < obj_tr_max) begin
+        obj_i_n = obj_i_n + 1;
+        $display("[obji] f=%0d pc=%08x b=%02x%02x%02x%02x%02x%02x%02x%02x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x sp=%08x z=%b s=%b cy=%b",
+            cur_frame, core.v60.pc,
+            core.v60.fb[0], core.v60.fb[1], core.v60.fb[2], core.v60.fb[3],
+            core.v60.fb[4], core.v60.fb[5], core.v60.fb[6], core.v60.fb[7],
+            core.v60.r[0], core.v60.r[1], core.v60.r[2], core.v60.r[3],
+            core.v60.r[4], core.v60.r[5], core.v60.r[6], core.v60.r[7],
+            core.v60.r[8], core.v60.r[9], core.v60.r[10], core.v60.r[11],
+            core.v60.r[31], core.v60.f_z, core.v60.f_s, core.v60.f_cy);
+    end
+end
+always @(posedge clk_sys) begin
+    if (obj_tr_at >= 0 && cur_frame >= obj_tr_at && obj_dbgpc_range &&
+        core.m_req && core.m_ack && !core.ack_d &&
+        core.A[23:20] >= 4'h2 && core.A[23:20] < 4'hf &&
+        obj_bus_n < obj_tr_max) begin
+        obj_bus_n = obj_bus_n + 1;
+        if (core.m_we)
+            $display("[objbus] f=%0d pc=%08x W [%06x] data=%04x be=%b",
+                cur_frame, core.v60.dbg_pc, core.A[23:0], core.m_wdata, core.m_be);
+        else
+            $display("[objbus] f=%0d pc=%08x R [%06x] data=%04x be=%b",
+                cur_frame, core.v60.dbg_pc, core.A[23:0], core.m_rdata, core.m_be);
+    end
+end
+
+// io-chip write log + EEPROM pin trace (holo boot loop diagnosis)
+integer io_log_n = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && core.m_we && !core.ack_d &&
+        core.A[23:16] == 8'hC0 && io_log_n < 120) begin
+        io_log_n = io_log_n + 1;
+        $display("[io] pc=%08x wr [%06x] = %04x be=%b",
+            core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata, core.m_be);
+    end
+end
+integer eep_log_n = 0, eep_skip;
+reg [3:0] eep_prev = 0;
+initial if (!$value$plusargs("EEPSKIP=%d", eep_skip)) eep_skip = 0;
+always @(posedge clk_sys) begin
+    if ({core.eeprom.cs, core.eeprom.sk, core.eeprom.di, core.eeprom.dout} != eep_prev) begin
+        eep_log_n = eep_log_n + 1;
+        if (eep_log_n >= eep_skip && eep_log_n < eep_skip + 30000)
+            $display("[eep] cs=%b sk=%b di=%b do=%b es=%0d bitcnt=%0d",
+                core.eeprom.cs, core.eeprom.sk, core.eeprom.di, core.eeprom.dout,
+                core.eeprom.es, core.eeprom.bitcnt);
+        eep_prev = {core.eeprom.cs, core.eeprom.sk, core.eeprom.di, core.eeprom.dout};
+    end
+end
+
+// intc write log: what vectors/mask does the game program?
+integer intc_log_n = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && core.m_we && !core.ack_d &&
+        core.A[23:16] == 8'hD0 && intc_log_n < 40) begin
+        intc_log_n = intc_log_n + 1;
+        $display("[intc] pc=%08x wr [%06x] = %04x be=%b",
+            core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata, core.m_be);
+    end
+end
+
+// log LDPR executions: which privileged register gets which value?
+integer ldpr_n = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.st == core.v60.S_EXEC && core.v60.cur_op == 8'h12 && ldpr_n < 16) begin
+        ldpr_n = ldpr_n + 1;
+        $display("[ldpr] pc=%08x op1=%08x op2=%08x", core.v60.dbg_pc, core.v60.op1, core.v60.op2);
+    end
+end
+
+// privileged-register visibility: log every SBR change (LDPR target check)
+reg [31:0] sbr_prev = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.sbr != sbr_prev) begin
+        $display("[sbr] pc=%08x sbr %08x -> %08x", core.v60.dbg_pc, sbr_prev, core.v60.sbr);
+        sbr_prev = core.v60.sbr;
+    end
+end
+
+// IRQ/exception entry detail: vector, base register, stack, fetched handler
+integer exc_log_n = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.st == core.v60.S_EXC_VEC && core.v60.bus_ack &&
+        (exc_log_n < 12 || core.v60.exc_vector < 8'h40)) begin
+        exc_log_n = exc_log_n + 1;
+        $display("[exc] vec=%02x sbr=%08x sp=%08x retpc=%08x handler=[%08x]=%08x cur_op=%02x",
+            core.v60.exc_vector, core.v60.sbr, core.v60.r[31], core.v60.exc_retpc,
+            (core.v60.sbr & ~32'hfff) + {22'b0, core.v60.exc_vector, 2'b00},
+            core.v60.bus_rdata, core.v60.cur_op);
+    end
+end
+
+// derail trap: PC escaping the 24-bit bus space is always a wrong jump
+reg derailed = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (!derailed && core.v60.dbg_pc[31:24] != 8'h00) begin
+        derailed = 1;
+        $display("[DERAIL] pc=%08x sp=%08x sbr=%08x psw=%08x", core.v60.dbg_pc,
+            core.v60.r[31], core.v60.sbr, core.v60.psw);
+        dump_trace;
+        $display("ROMBOOT DONE");
+        $finish;
+    end
+end
+
+// jump trace: record discontinuous PC transitions (ring of 48)
+reg [31:0] jt_from [0:47];
+reg [31:0] jt_to   [0:47];
+integer jt_n = 0;
+reg [31:0] prev_pc = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.dbg_pc != prev_pc) begin
+        if ((core.v60.dbg_pc > prev_pc + 24) || (core.v60.dbg_pc < prev_pc)) begin
+            jt_from[jt_n % 48] <= prev_pc;
+            jt_to[jt_n % 48]   <= core.v60.dbg_pc;
+            jt_n = jt_n + 1;
+        end
+        prev_pc <= core.v60.dbg_pc;
+    end
+end
+
+// watch one word address: log every write (who sets the polled flag?)
+integer watch_a;
+initial if (!$value$plusargs("WATCH=%h", watch_a)) watch_a = -1;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && core.m_we && !core.ack_d &&
+        {core.A[23:1],1'b0} == watch_a[23:0])
+        $display("[watch] pc=%08x wr [%06x] = %04x be=%b",
+            core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata, core.m_be);
+end
+
+// ModelSim X-provenance aid for GA2's object-state setup.  The behavioural
+// work RAM is zero-filled, so an unknown at these locations must have arrived
+// on a CPU write.  Keep this diagnostic inert unless +XDIAG is requested.
+integer xdiag_n = 0;
+always @(posedge clk_sys) begin
+    if ($test$plusargs("XDIAG") && core.m_req && core.m_ack && core.m_we &&
+        !core.ack_d && ({core.A[23:1],1'b0} == 24'h20ad54 ||
+                        {core.A[23:1],1'b0} == 24'h20ad56 ||
+                        {core.A[23:1],1'b0} == 24'h20ac2c)) begin
+        xdiag_n = xdiag_n + 1;
+        $display("[xdiag] f=%0d pc=%08x W [%06x] data=%04x be=%b r0=%08x r1=%08x r26=%08x",
+            cur_frame, core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata,
+            core.m_be, core.v60.r[0], core.v60.r[1], core.v60.r[26]);
+    end
+end
+
+// bus-hang detector: a request that never acks is a core deadlock
+integer hang_cnt = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && !core.m_ack) begin
+        hang_cnt = hang_cnt + 1;
+        if (hang_cnt == 20000)
+            $display("[HANG] pc=%08x A=%06x we=%b be=%b st=%0d rom_ready=%b rom_filling=%b ic_hit=%b p0req=%b",
+                core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_we, core.m_be,
+                core.v60.st, core.rom_ready, core.rom_filling, core.ic_hit, p0_req);
+    end
+    else hang_cnt = 0;
+end
+
+// region read counters (prot/shared visibility)
+integer n_prot_rd = 0, n_sh_rd = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && !core.m_we && !core.ack_d) begin
+        if (core.A[23:20] == 4'hA) n_prot_rd = n_prot_rd + 1;
+        if (core.A[23:20] == 4'h7) n_sh_rd = n_sh_rd + 1;
+    end
+end
+
+// Optional CPU-side sprite-RAM write trace.  +SPRLOG=<n> enables at most n
+// accepted writes; +SPRLOGAT=<frame> limits it to the state transition of
+// interest.  Logging after m_ack proves both V60 execution and core address
+// decode reached the physical sprite RAM write port.
+integer spr_log_max, spr_log_at, spr_log_n = 0;
+initial begin
+    if (!$value$plusargs("SPRLOG=%d", spr_log_max)) spr_log_max = 0;
+    if (!$value$plusargs("SPRLOGAT=%d", spr_log_at)) spr_log_at = 0;
+end
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && core.m_we && !core.ack_d &&
+        core.A[23:17] == 7'b0100000 && cur_frame >= spr_log_at &&
+        spr_log_n < spr_log_max) begin
+        spr_log_n = spr_log_n + 1;
+        $display("[sprw] f=%0d pc=%08x W [%06x] data=%04x be=%b r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x",
+            cur_frame, core.v60.dbg_pc, core.A[23:0], core.m_wdata,
+            core.m_be, core.v60.r[0], core.v60.r[1], core.v60.r[2],
+            core.v60.r[3], core.v60.r[4], core.v60.r[5]);
+    end
+end
+
+// Optional V25/MB8421 transaction trace.  +PROTLOG=<n> logs at most n
+// accepted V60 accesses in 0xA00000-0xA00FFF; +PROTSKIP=<n> skips the first
+// n accesses.  This is intentionally harness-only: it exposes whether the
+// game merely reads the fixed bootstrap table, or later submits mailbox
+// commands which require the real V25 to modify DPRAM asynchronously.
+integer prot_log_max, prot_log_skip, prot_txn_n = 0, prot_log_n = 0;
+initial begin
+    if (!$value$plusargs("PROTLOG=%d", prot_log_max)) prot_log_max = 0;
+    if (!$value$plusargs("PROTSKIP=%d", prot_log_skip)) prot_log_skip = 0;
+end
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && !core.ack_d &&
+        core.A[23:12] == 12'hA00) begin
+        if (prot_txn_n >= prot_log_skip && prot_log_n < prot_log_max) begin
+            prot_log_n = prot_log_n + 1;
+            if (core.m_we)
+                $display("[prot] f=%0d n=%0d pc=%08x W [%06x] data=%04x be=%b",
+                    cur_frame, prot_txn_n, core.v60.dbg_pc, core.A[23:0],
+                    core.m_wdata, core.m_be);
+            else
+                $display("[prot] f=%0d n=%0d pc=%08x R [%06x] data=%04x be=%b",
+                    cur_frame, prot_txn_n, core.v60.dbg_pc, core.A[23:0],
+                    core.m_rdata, core.m_be);
+        end
+        prot_txn_n = prot_txn_n + 1;
+    end
+end
+
+// non-ROM bus read log (ring of 24): what is the program polling?
+reg [23:0] rd_a [0:23];
+reg [15:0] rd_d [0:23];
+reg [31:0] rd_pc [0:23];
+integer rd_n = 0;
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_ack && !core.m_we && !core.ack_d &&
+        core.A[23:20] >= 4'h2 && core.A[23:20] < 4'hF) begin
+        rd_a[rd_n % 24]  <= core.A;
+        rd_d[rd_n % 24]  <= core.m_rdata;
+        rd_pc[rd_n % 24] <= core.v60.dbg_pc;
+        rd_n = rd_n + 1;
+    end
+end
+
+`ifdef FBDBG
+// fetch-buffer inspection at a trouble PC
+integer fbdbg_n = 0;
+always @(posedge clk_sys) if (ce_cpu) begin
+    if (core.v60.pc == 32'h100551 && core.v60.st == core.v60.S_DECODE && fbdbg_n < 4) begin
+        fbdbg_n = fbdbg_n + 1;
+        $display("[fbdbg] pc=%08x fb_base=%08x fb_valid=%0d fb=%02x %02x %02x %02x %02x %02x %02x %02x",
+            core.v60.pc, core.v60.fb_base, core.v60.fb_valid,
+            core.v60.fb[0], core.v60.fb[1], core.v60.fb[2], core.v60.fb[3],
+            core.v60.fb[4], core.v60.fb[5], core.v60.fb[6], core.v60.fb[7]);
+    end
+    if (core.v60.pc == 32'h100551 && fbdbg_n == 1) begin
+        $display("[cyc] st=%0d fb_base=%08x fb_valid=%0d fb3=%02x fb=%02x%02x%02x%02x%02x%02x%02x%02x ea_ofs=%0d ea_addr=%08x eamodm=%b mreg=%02x mtop=%0d fbatofs=%02x dim=%0d want=%b",
+            core.v60.st, core.v60.fb_base, core.v60.fb_valid, core.v60.fb[3],
+            core.v60.fb[0], core.v60.fb[1], core.v60.fb[2], core.v60.fb[3],
+            core.v60.fb[4], core.v60.fb[5], core.v60.fb[6], core.v60.fb[7],
+            core.v60.ea_ofs, core.v60.ea_addr, core.v60.ea_modm,
+            core.v60.modreg, core.v60.modtop, core.v60.fb[core.v60.ea_ofs],
+            core.v60.ea_dim, core.v60.ea_want_addr);
+    end
+    if (core.v60.pc == 32'h100551 && fbdbg_n > 0 && fbdbg_n < 3) begin
+        if (core.v60.st == core.v60.S_EA_DONE)
+            $display("[eadbg] EA_DONE tgt2=%b want=%b flag=%b ea_addr=%08x ea_out=%08x ea_len=%0d ret=%0d",
+                core.v60.ea_target2, core.v60.ea_want_addr, core.v60.ea_flag,
+                core.v60.ea_addr, core.v60.ea_out, core.v60.ea_len, core.v60.ea_ret);
+        if (core.v60.st == core.v60.S_EXEC)
+            $display("[eadbg] EXEC op=%02x op1=%08x op2=%08x flag1=%b flag2=%b",
+                core.v60.cur_op, core.v60.op1, core.v60.op2, core.v60.flag1, core.v60.flag2);
+        if (core.v60.st == core.v60.S_WB_MEM)
+            $display("[eadbg] WB_MEM addr(op2)=%08x data(alu_r)=%08x", core.v60.op2, core.v60.alu_r);
+    end
+end
+`endif
+
+task dump_trace;
+    integer k, idx;
+    $display("--- last jumps (oldest first) ---");
+    for (k = (jt_n > 48 ? jt_n - 48 : 0); k < jt_n; k = k + 1) begin
+        idx = k % 48;
+        $display("  %08x -> %08x", jt_from[idx], jt_to[idx]);
+    end
+    $display("--- last non-ROM reads (oldest first) ---");
+    for (k = (rd_n > 24 ? rd_n - 24 : 0); k < rd_n; k = k + 1) begin
+        idx = k % 24;
+        $display("  pc=%08x rd [%06x] = %04x", rd_pc[idx], rd_a[idx], rd_d[idx]);
+    end
+endtask
+
+// per-frame video liveness: nonblack pixels in the active window
+integer nb_pix = 0;
+always @(posedge clk_sys)
+    if (ce_pix && !hb && !vb && rgb_a != 24'h0) nb_pix = nb_pix + 1;
+// prefetch/kick/mixer liveness
+integer rdreq_cnt = 0, kick_cnt = 0, spr_opq_cnt = 0;
+always @(posedge clk_sys) if (core.fb_rd_req) rdreq_cnt = rdreq_cnt + 1;
+always @(posedge clk_ram) if (core.line_start_r) kick_cnt = kick_cnt + 1;
+always @(posedge clk_sys) if (ce_pix && !hb && !vb && core.mix0.spr_opaque)
+    spr_opq_cnt = spr_opq_cnt + 1;
+// mixer register write log
+integer mixw_n = 0;
+always @(posedge clk_sys) begin
+    if (core.mix0.reg_we && mixw_n < 80) begin
+        mixw_n = mixw_n + 1;
+        $display("[mixw] pc=%08x mreg[%02x] <= %04x (byte ofs %03x) busA=%06x",
+            core.v60.dbg_pc, core.mix0.reg_addr, core.mix0.reg_wdata,
+            {core.mix0.reg_addr, 1'b0}, {core.A[23:1],1'b0});
+    end
+end
+
+// pixel-path trace at opaque sprite pixels (few per run)
+integer pixlog_n = 0;
+always @(posedge clk_sys) begin
+    if (ce_pix && !hb && !vb && core.mix0.spr_opaque && cur_frame > 55 && pixlog_n < 10) begin
+        pixlog_n = pixlog_n + 1;
+        $display("[pix] f=%0d x=%0d y=%0d sprpix=%04x best=%0d idx=%04x palq=%04x rgb=%06x grp=%0d sprreg=%04x r4c=%04x",
+            cur_frame, core.hcnt, core.vcnt, core.mix0.spr_pix,
+            core.mix0.bestsel, core.mix0.pal_addr,
+            core.pal0.sim_peek(core.mix0.pal_addr), rgb_a,
+            core.mix0.spr_group, core.mix0.sprreg, core.mix0.r4c);
+    end
+end
+
+integer frames, f, p1_ev;
+initial begin
+    if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
+    repeat (20) @(posedge clk_sys);
+    rst = 0;
+    for (f = 0; f < frames; f = f + 1) begin
+        in_p1a_r = 8'hff;
+        in_portc_r = 8'hff;
+        in_svc12_r = 8'hff;
+        for (p1_ev = 0; p1_ev < 4; p1_ev = p1_ev + 1) begin
+            if (p1_at[p1_ev] >= 0 && p1_len[p1_ev] > 0 &&
+                f >= p1_at[p1_ev] && f < p1_at[p1_ev] + p1_len[p1_ev]) begin
+                in_p1a_r = in_p1a_r & ~p1_mask[p1_ev][7:0];
+                if (f == p1_at[p1_ev])
+                    $display("[input] frames %0d..%0d: P1A mask %02x low",
+                        p1_at[p1_ev], p1_at[p1_ev] + p1_len[p1_ev] - 1,
+                        p1_mask[p1_ev][7:0]);
+            end
+        end
+        if (coin_at >= 0 && coin_len > 0 &&
+            f >= coin_at && f < coin_at + coin_len) begin
+            in_svc12_r[2] = 1'b0;
+            if (f == coin_at)
+                $display("[input] frames %0d..%0d: P1 coin low (port E bit 2)",
+                    coin_at, coin_at + coin_len - 1);
+        end
+        if (start_at >= 0 && start_len > 0 &&
+            f >= start_at && f < start_at + start_len) begin
+            in_svc12_r[4] = 1'b0;
+            if (f == start_at)
+                $display("[input] frames %0d..%0d: P1 start low (port E bit 4)",
+                    start_at, start_at + start_len - 1);
+        end
+        repeat (804000) @(posedge clk_sys);
+        $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
+            f, core.v60.dbg_pc, core.v60.dbg_halted,
+            n_wram_wr, n_vram_wr, n_pal_wr, n_spr_wr, n_io_wr, n_intc_wr,
+            n_irq, n_exc, vs_count, spr_px, same_pc, n_prot_rd, n_sh_rd,
+            core.io0_cnt1, nb_pix,
+            core.r1ff02, core.tilemap.r1ff8e, core.r1ff00, core.tilemap.layer_off);
+        $display("   mix: txt=%04x n0=%04x bg=%04x spr0=%04x pxt=%04x den=%b | wbuf=%0d rbuf=%0d disp=%0d wr_pix=%04x rd_pix=%04x",
+            core.mix0.mreg[6'h10], core.mix0.mreg[6'h11],
+            core.mix0.mreg[6'h16], core.mix0.mreg[6'h00],
+            core.mix0.px_text, core.mix0.display_en,
+            fbw_buf, fbr_buf_l, core.disp_buf, fbw_pix, fbr_pix);
+        $display("   vid: m416=%b rdreq/frame=%0d kick/frame=%0d wr_y_last=%0d rd_y=%0d spr_cmd=%0d srom=%0d spr_opq=%0d inrd=%0d/%0d p1a=%0d",
+            core.mode_416, rdreq_cnt, kick_cnt, fbw_y, fbr_y_l,
+            spr_cmd_cnt, srom_req_cnt, spr_opq_cnt, coin_rd_cnt, start_rd_cnt,
+            p1a_rd_cnt);
+        rdreq_cnt = 0; kick_cnt = 0; spr_cmd_cnt = 0; srom_req_cnt = 0; spr_opq_cnt = 0;
+        p1a_rd_cnt = 0; coin_rd_cnt = 0; start_rd_cnt = 0;
+    end
+    dump_trace;
+    if ($test$plusargs("SPRDUMP")) begin
+        $display("--- sprite list entries 0..3 ---");
+        for (int sd = 0; sd < 32; sd = sd + 1)
+            $display("  spr[%04x]=%04x", sd, core.sprite_ram.sim_peek(sd));
+        $display("--- sprite list entries 0x800..0x803 ---");
+        for (int sd = 16'h4000; sd < 16'h4020; sd = sd + 1)
+            $display("  spr[%04x]=%04x", sd, core.sprite_ram.sim_peek(sd));
+    end
+    if (fbr_accepts == 0)
+        $fatal(1, "ROMBOOT framebuffer read handshake never accepted a line");
+    if (coin_at >= 0 || start_at >= 0 || p1_event_count > 0)
+        $display("[input-summary] active CPU samples: coin=%0d start=%0d p1a=%0d",
+            coin_active_samples, start_active_samples, p1a_active_samples);
+    if (coin_at >= 0 && coin_active_samples == 0)
+        $fatal(1, "ROMBOOT P1 coin was never returned on SERVICE12 bit 2");
+    if (start_at >= 0 && start_active_samples == 0)
+        $fatal(1, "ROMBOOT P1 start was never returned on SERVICE12 bit 4");
+    if (p1_event_count > 0 && p1a_active_samples == 0)
+        $fatal(1, "ROMBOOT P1 digital event was never returned on P1A");
+    $display("ROMBOOT DONE");
+    $finish;
+end
+
+endmodule
