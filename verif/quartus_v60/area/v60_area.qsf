@@ -3,7 +3,7 @@ set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name TOP_LEVEL_ENTITY v60_probe
 set_global_assignment -name SYSTEMVERILOG_FILE ../../../rtl/cpu/v60/s32_v60.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../top.sv
-set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 2
 set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE AREA"
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE ON
 set_global_assignment -name OPTIMIZATION_TECHNIQUE AREA

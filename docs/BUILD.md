@@ -15,9 +15,10 @@ every push and uploads the `.rbf` as a build artifact.
 2. When the job finishes, download the **`SegaS32-rbf`** artifact from the run.
 3. It contains `SegaS32.rbf`, already named for the MRAs.
 
-The workflow uses a community Quartus 17.0 Standard container. If your fork
-runs on self-hosted runners or a different image, adjust the `container:`
-line — see the comments in the workflow.
+The workflow reclaims unused SDK space on the disposable runner, then runs the
+build in the community `raetro/quartus:17.0` container. The cleanup must happen
+before Docker pulls the image because the image is larger than the free space
+left on an unmodified hosted runner.
 
 ---
 
@@ -61,10 +62,13 @@ between generation modes.
 
 ### Prerequisites
 
-- **Quartus Prime 17.0.2 Standard Edition** (the MiSTer-standard version).
-  Use **Standard**, not Lite: the project mixes VHDL (the T80 Z80 core) with
-  SystemVerilog, and the `.qsf` pins 17.0.2.
+- **Quartus Prime 17.0.2** with Cyclone V device support (the MiSTer-standard
+  tool version). The checked-in CI path uses the community Lite image.
 - ~8 GB RAM; a full compile is 20–60 minutes.
+
+The project files cap Quartus at two parallel processors. Increase that only
+after validating the host's thermal, memory, and system stability; CI is the
+preferred path for a full fit.
 
 ### Steps
 

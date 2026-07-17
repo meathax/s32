@@ -714,6 +714,10 @@ wire         bob_deint;
 	ascal 
 	#(
 		.RAMBASE(32'h20000000),
+		// System 32 is at most 416 pixels wide.  Keep the scaler's maximum
+		// input-line width bounded even if downscaling is enabled in a later
+		// build; the default 2048-pixel width wastes RAM on this core.
+		.IHRES(512),
 	`ifdef MISTER_SMALL_VBUF
 		.RAMSIZE(32'h00200000),
 	`else
@@ -728,6 +732,9 @@ wire         bob_deint;
 	`endif
 	`ifdef MISTER_DISABLE_ADAPTIVE
 		.ADAPTIVE("false"),
+	`endif
+	`ifdef MISTER_DISABLE_DOWNSCALE
+		.DOWNSCALE("false"),
 	`endif
 	`ifdef MISTER_DOWNSCALE_NN
 		.DOWNSCALE_NN("true"),

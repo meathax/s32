@@ -33,7 +33,7 @@ set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
 set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE AREA"
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 2.0
-set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 2
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE ON
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
 set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
@@ -53,7 +53,7 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 5
 
 # This revision deliberately targets single-screen Sega System 32.  It keeps
 # the future Multi 32 RTL path in source, but compiles out the second palette /
@@ -75,6 +75,11 @@ set_global_assignment -name VERILOG_MACRO "S32_GA2_ONLY=1"
 
 # disable bilinear filtering when downscaling
 set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
+
+# GA2's native image is at most 416x224.  Disable only scaler output modes
+# smaller than the source image to remove the remaining input-line RAM and
+# downscale routing; normal HDMI upscale and direct video remain available.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
 
 # disable adaptive scanline filtering
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"

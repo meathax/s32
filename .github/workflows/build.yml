@@ -4,12 +4,11 @@ name: build-rbf
 # artifact. See docs/BUILD.md.
 #
 # Quartus is large and its license/container availability varies; this
-# workflow uses a community Quartus 17.0 Standard image. If it is unavailable
+# workflow uses a community Quartus 17.0 image. If it is unavailable
 # for your fork, either:
 #   - switch `container.image` to another Quartus 17.0.x Standard image, or
 #   - move this job to a self-hosted runner with Quartus installed and drop
-#     the `container:` block (the steps below work unchanged with quartus_sh
-#     on PATH).
+#     the Docker steps (the compile command itself is unchanged).
 
 on:
   push:
@@ -23,23 +22,45 @@ permissions:
 jobs:
   quartus:
     runs-on: ubuntu-latest
-    # Community Quartus 17.0 Standard container. Pin/replace as needed.
-    container:
-      image: raetro/quartus:17.0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate PLL IP (96.648 / 48.324 MHz from 50 MHz)
+      # The Quartus 17.0 image is larger than the free space left on a stock
+      # hosted runner. Reclaim only preinstalled SDKs on this disposable VM,
+      # before Docker pulls the image. Running the job itself in the container
+      # would pull it before any cleanup step could execute.
+      - name: Reclaim runner disk for Quartus
         run: |
-          qsys-script --script=tools/make_pll.tcl
-          qsys-generate rtl/pll/pll.qsys --synthesis=VERILOG \
-            --output-directory=rtl/pll
-          test -f rtl/pll/synthesis/pll.qip
+          echo "Disk before cleanup:"
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          sudo apt-get clean
+          docker system prune --all --force
+          echo "Disk after cleanup:"
+          df -h /
 
-      - name: Compile
+      - name: Pull Quartus 17.0 image
+        run: docker pull raetro/quartus:17.0
+
+      - name: Generate PLL and compile
         run: |
-          quartus_sh --flow compile Arcade-SegaSystem32
+          docker run --rm \
+            --workdir /build \
+            --volume "$GITHUB_WORKSPACE:/build" \
+            raetro/quartus:17.0 \
+            bash -lc '
+              qsys-script --script=tools/make_pll.tcl &&
+              qsys-generate rtl/pll/pll.qsys --synthesis=VERILOG \
+                --output-directory=rtl/pll &&
+              test -f rtl/pll/synthesis/pll.qip &&
+              quartus_sh --flow compile Arcade-SegaSystem32
+            '
           test -f output_files/Arcade-SegaSystem32.rbf
 
       - name: Stage RBF under the MRA name
