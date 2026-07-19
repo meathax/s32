@@ -5,6 +5,8 @@
 //     (byte-enable mask; untouched neighbours keep 0xFFFF)
 //  3. shadow run -> dest &= 0x7fff ONLY on the run's pixels (V-10 RMW)
 //  4. line read-back through the rd port matches DDR contents
+//  5. display read wins over a simultaneous deferred sprite flush, and the
+//     sprite write remains queued and completes afterward
 //
 //  The DDR model applies deterministic pseudo-random backpressure and
 //  variable read-response latency/bubbles.  Writes are deliberately modelled
@@ -201,6 +203,8 @@ endtask
 integer i;
 integer erase_write_start;
 integer line_read_start;
+integer arb_read_start;
+integer arb_write_start;
 initial begin
     repeat (5) @(posedge clk);
     rst <= 0;
@@ -290,10 +294,36 @@ initial begin
         $display("  FAIL held line-read accepted %0d requests, expected exactly 1",
                  read_accepts - line_read_start);
     end
-    rd_x = 9'd3; #1; check(rd_pix, 16'h8003, 3);
-    rd_x = 9'd5; #1; check(rd_pix, 16'h0005, 5);
-    rd_x = 9'd9; #1; check(rd_pix, 16'h8009, 9);
-    rd_x = 9'd10; #1; check(rd_pix, 16'hFFFF, 10);
+    rd_x = 9'd3;  @(posedge clk); #1; check(rd_pix, 16'h8003, 3);
+    rd_x = 9'd5;  @(posedge clk); #1; check(rd_pix, 16'h0005, 5);
+    rd_x = 9'd9;  @(posedge clk); #1; check(rd_pix, 16'h8009, 9);
+    rd_x = 9'd10; @(posedge clk); #1; check(rd_pix, 16'hFFFF, 10);
+
+    // 5: present a completed sprite run and a display-line request together.
+    // Scanout must launch first, but deferring the run must not drop it.
+    arb_read_start  = read_accepts;
+    arb_write_start = write_accepts;
+    @(posedge clk); wr_start <= 1; wr_y <= 8'd6; wr_buf <= 0; wr_shadow <= 0;
+    @(posedge clk); wr_start <= 0;
+    wr_valid <= 1; wr_x <= 9'd30; wr_pix <= 16'hABCD; @(posedge clk);
+    wr_valid <= 0; wr_end <= 1;
+    rd_y <= 8'd5; rd_buf <= 0; rd_req <= 1;
+    @(posedge clk); wr_end <= 0;
+
+    wait (read_accepts > arb_read_start);
+    if (write_accepts != arb_write_start) begin
+        errors = errors + 1;
+        $display("  FAIL sprite flush reached DDR before display read");
+    end
+    @(posedge rd_ack); rd_req <= 0;
+    wait (!rd_ack);
+    wait (!wr_busy); repeat (4) @(posedge clk);
+    if ((write_accepts - arb_write_start) != 1) begin
+        errors = errors + 1;
+        $display("  FAIL deferred sprite flush accepted %0d writes, expected 1",
+                 write_accepts - arb_write_start);
+    end
+    check(ddr_pix(6, 30), 16'hABCD, 30);
 
     if (stalled_request_cycles == 0) begin
         errors = errors + 1;

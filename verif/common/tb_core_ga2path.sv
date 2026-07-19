@@ -72,7 +72,7 @@ integer spr_px_writes = 0;
 always @(posedge clk_ram) if (fbw_valid) spr_px_writes = spr_px_writes + 1;
 
 s32_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .board(board),
+    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .video_rst(rst), .board(board),
     .ce_cpu(ce_cpu), .ce_z80(1'b0), .ce_fm(1'b0), .ce_pcm(1'b0),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(), .sdr_p1_addr(), .sdr_p1_dout(64'h0), .sdr_p1_ack(1'b1),
@@ -97,7 +97,8 @@ s32_core core (
     .trk_btn(tbt_a),
     .ppi_pa(8'hff), .ppi_pb(8'hff), .ppi_pc(8'hff),
     .rgb_a(), .rgb_b(), .ce_pix(), .hs(), .vs(), .hb(), .vb(),
-    .audio_l(), .audio_r(), .out_lamps()
+    .audio_l(), .audio_r(), .out_lamps(),
+    .debug_pc(), .debug_halted(), .debug_status(), .debug_first_rom(), .debug_hcnt()
 );
 
 // ---------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # Scratch/reference material used during design research — not part of the core.
-# (MAME reference sources are GPL-licensed and must not be committed here.)
+# (Pinned MAME sources stay local; provenance and hashes are documented.)
 undefined/
 scratch/
 roms/
@@ -43,6 +43,13 @@ verif/**/msim/
 verif/**/output/
 verif/tools/*_tmp/
 /verif/quartus_v60/s32_v60_twoport.sv
+
+# Local screenshots, simulator transcripts, and crash diagnostics
+/ga2-*.png
+/c5_pin_model_dump.txt
+/console_history
+verif/modelsim-*.log
+*.vstf
 
 # Quartus diagnostics contain machine-specific crash/build details
 cr_ie_info.json

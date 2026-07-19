@@ -142,7 +142,8 @@ endmodule
 
 module s32_byte_dpram #(
     parameter integer ADDR_WIDTH = 13,
-    parameter integer NUM_WORDS  = (1 << ADDR_WIDTH)
+    parameter integer NUM_WORDS  = (1 << ADDR_WIDTH),
+    parameter         POWER_UP_UNINITIALIZED = "TRUE"
 ) (
     input                       clock,
 
@@ -205,7 +206,7 @@ defparam
     ram.outdata_aclr_b = "NONE",
     ram.outdata_reg_a = "UNREGISTERED",
     ram.outdata_reg_b = "UNREGISTERED",
-    ram.power_up_uninitialized = "TRUE",
+    ram.power_up_uninitialized = POWER_UP_UNINITIALIZED,
     ram.read_during_write_mode_mixed_ports = "OLD_DATA",
     // Cyclone V true-dual-port M10Ks require new data on a port's own write
     // cycle.  Both clients discard q on their own writes; mixed-port reads,

@@ -29,29 +29,31 @@ Current verification evidence:
   delivers a vblank interrupt to its handler, and soaks the render/audio
   pipeline over an
   extended multi-frame window with zero X-propagation
-- The regression script now contains **25 tiers**. The final tiers cover
-  ROM-loader completion/mapping, EEPROM index-3
-  upload byte order and dirty-state persistence, and the V60's legal 20-byte
-  F1 double-displacement instruction, followed by RF5C68, palette,
-  line-buffer, tilemap, dual-port BRAM, and V25-mailbox timing coverage. The
-  V60 audit tier also executes ga2's exact encoded `SKPCUH` search case. The
-  native Windows ModelSim runner (`verif/run_regression.ps1`) completes the
-  combined matrix with **25/25 tiers PASS** and **50/50 V60 differential
-  seeds PASS**; its detailed transcript is `verif/modelsim-regression.log`.
+- The regression script now contains **35 tiers**. In addition to the CPU,
+  full-core boot/soak, ROM-loader, EEPROM, video, BRAM, and V25 coverage, the
+  final tiers exercise SDRAM input capture, an integrated sprite renderer
+  under DDR backpressure, interrupt reset/source-ack/timer behavior, and
+  signed audio-route saturation, MultiPCM semantics, V60 rotate/bus behavior,
+  top-level map decode, and genuine V25 firmware. The native Windows ModelSim
+  runner completes the combined matrix with **35/35 tiers PASS** and **10/10 V60 differential
+  seeds PASS**; its detailed transcript is
+  `verif/modelsim-regression.log`.
 - The ga2-only Quartus profile completes Analysis & Synthesis at a **map-only
-  estimate of 40,434 / 41,910 ALMs**. This is not a fitter resource or timing
+  estimate of 26,851 / 41,910 ALMs**. This is not a fitter resource or timing
   result.
 
 ## Real-ROM simulation milestones
 
 `tools/make_sim_images.py` now consumes MAME ZIPs directly and constructs the
-same descriptor/region layout streamed by an MRA. Locally available `holo`,
-`ga2`, and `svf` sets have been used; the ZIPs and generated images remain
+same descriptor/region layout streamed by an MRA. Locally available `holo`, `ga2`, `svf`, `arabfgt`, and `spidman` sets
+have been used; the ZIPs and generated images remain
 under the ignored `roms/` tree.
 
 | Set | Evidence from the full-core real-ROM harness | Current limit |
 |---|---|---|
 | `holo` | EEPROM initialization completes, IRQs run, sprites reach the mixer, and about 36K non-black pixels/frame render. | No hardware/audio or extended-play certification. |
+| `arabfgt` | An eight-frame universal-RTL probe reaches mixer, VRAM, palette, and sprite-list writes by frames 2–5 and completes without simulator errors. | Early initialization evidence only; no recognizable frame or sustained-play result yet. |
+| `spidman` | An eight-frame universal-RTL probe executes real code and I/O traffic without simulator errors. | Still in an early I/O polling sequence at frame 7; retained as a non-V25 diagnostic, not promoted to `sim`. |
 | `ga2` | V25 wake-up/protection passes and interrupts enable. Scripted coin is sampled at frames 41/42 and Start at 51/52; after the Start transition, frame 63 reaches the first populated sprite list (`spr_cmd=4`, `srom=5968`, `sprpx=52722`). Frame 64 reports `spr_opq=42393` with real pixels reaching the mixer. A 90-frame run (0–89) completes with `ROMBOOT DONE`, zero errors/warnings; rendering remains stable through frame 89 at four commands and about 5.8–6.0K sprite-ROM requests/frame (`sprpx=1374558` cumulative). The frame-80 capture visibly resolves the skull/candle Golden Axe character-select screen, `STERN`, a player sprite, and `Credits 0`. | Recognizable renderer output in simulation only: no pixel/audio equivalence, full play-through, or hardware result yet. |
 | `svf` | Startup delay exits around frame 46 versus about 45 expected; display/rendering is active by frame 79; an 82-frame run and frame-80 PPM completed. | Harness does not validate real DDR/audio timing. |
 
@@ -75,13 +77,13 @@ play on a physical DE10-Nano. No set is hardware-`gold` yet.
 |---|---|---|---|---|
 | arescue (+2) | Air Rescue | dual-direct + DSP | DSP HLE + bridge | rtl |
 | alien3 (+2) | Alien3: The Gun | analog | — | rtl |
-| arabfgt (+2) | Arabian Fight | V25 (arf table) | V25 HLE | rtl |
+| arabfgt (+2) | Arabian Fight | V25 (arf table) | real V25 CPU | rtl |
 | brival (+1) | Burning Rival | 4-player | string DMA HLE | rtl |
 | darkedge (+1) | Dark Edge | 4-player | FD1149 vblank HLE | rtl |
 | dbzvrvs | Dragon Ball Z V.R.V.S. | analog | copy HLE | rtl |
 | f1en (+2) | F1 Exhaust Note | dual-direct | bridge responder | rtl |
 | f1lap (+2) | F1 Super Lap | analog | FD1149 vblank HLE (f1lapt: none) | rtl |
-| ga2 (+2) | Golden Axe: Revenge of Death Adder | V25 (ga2 table) | V25 HLE | sim |
+| ga2 (+2) | Golden Axe: Revenge of Death Adder | V25 (ga2 table) | real V25 CPU | sim |
 | holo | Holosseum | regular | — | sim |
 | jpark (+3) | Jurassic Park | analog | MRA patch | rtl |
 | kokoroj (+1), kokoroj2 | Soreike Kokology 1/2 | CD | SCSI stubs; CD audio stretch | wip |
@@ -100,12 +102,13 @@ play on a physical DE10-Nano. No set is hardware-`gold` yet.
 ## Remaining release and compatibility gaps
 
 - **Quartus:** Analysis & Synthesis completes for the ga2-only profile at an
-  estimated 40,434 / 41,910 ALMs. That is a **map-only estimate**; no
+  estimated 26,851 / 41,910 ALMs. That is a **map-only estimate**; no
   successful fitter resource report or timing-closure result is recorded
   yet, and a release RBF is not available for deployment.
-- **MiSTer:** no physical game has been launched from this core yet. SDRAM,
-  DDR3 backpressure/bandwidth, controls, scaler output, and sustained audio
-  all require board validation.
+- **MiSTer:** GA2 has reached attract mode and controllable gameplay; Start,
+  movement, attack, and jump were confirmed. That run used the earlier V25/HLE
+  candidate and exposed video/sprite faults, so the new real-V25 and MAME-audited
+  RTL still requires a fitted, timing-clean RBF and sustained board validation.
 - **Persistence:** index-2 defaults and index-3 saves load; enabled EEPROM
   writes/erases raise `ioctl_upload_req`, survive soft reset, and upload the
   64×16 shadow as 128 little-endian bytes. The shadow now infers an explicit

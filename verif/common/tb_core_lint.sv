@@ -1,7 +1,7 @@
 // elaboration-only top: instantiates s32_core to keep the full design honest
 module tb_core_lint;
     import s32_pkg::*;
-    board_desc_t bd;
+    board_desc_t bd = '0;
     wire [7:0] zeros8 = 8'h00;
     wire [7:0] adc [0:7];
     for (genvar i=0;i<8;i++) assign adc[i] = 8'h80;
@@ -12,7 +12,7 @@ module tb_core_lint;
         assign dv[i]=0; assign dx[i]=0; assign dy[i]=0; assign tb[i]=8'hff;
     end
     s32_core core (
-        .clk_sys(1'b0), .clk_ram(1'b0), .rst(1'b1), .board(bd),
+        .clk_sys(1'b0), .clk_ram(1'b0), .rst(1'b1), .video_rst(1'b1), .board(bd),
         .ce_cpu(1'b0), .ce_z80(1'b0), .ce_fm(1'b0), .ce_pcm(1'b0),
         .sdr_p0_dout(16'h0), .sdr_p0_ack(1'b0),
         .sdr_p1_dout(64'h0), .sdr_p1_ack(1'b0),

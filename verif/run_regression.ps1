@@ -169,9 +169,46 @@ function Run-HdlTest {
     Assert-Marker $output $Marker $Name
 }
 
-function Write-Tier {
-    param([int]$Number, [string]$Description)
-    Write-RunLine ("`n[{0}/25] {1}" -f $Number, $Description)
+function Run-SoundZ80Test {
+    $name = "t30_soundsys_z80"
+    $library = New-WorkLibrary $name
+    $vhdlSources = Resolve-Sources @(
+        "rtl/audio/T80/T80_ALU.vhd",
+        "rtl/audio/T80/T80_MCode.vhd",
+        "rtl/audio/T80/T80_Reg.vhd",
+        "rtl/audio/T80/T80.vhd",
+        "rtl/audio/T80/T80s.vhd"
+    )
+    [void](Invoke-NativeCapture $script:Vcom (@("-2008", "-work", $library) + $vhdlSources) "vcom ($name)")
+
+    $svSources = Resolve-Sources @(
+        "rtl/s32_pkg.sv",
+        "rtl/video/s32_big_dpram.sv",
+        "rtl/audio/s32_rf5c68.sv",
+        "rtl/audio/s32_multipcm.sv",
+        "rtl/audio/s32_audio_mix.sv",
+        "rtl/audio/s32_soundsys.sv",
+        "verif/common/jt12_stub.v",
+        "verif/common/tb_soundsys_z80.sv"
+    )
+    [void](Invoke-NativeCapture $script:Vlog (@(
+        "-sv", "-work", $library,
+        "+define+SIMULATION", "+define+S32_REAL_Z80_SIM"
+    ) + $svSources) "vlog ($name)")
+
+    $testDirectory = Split-Path -Parent $library
+    $output = @(Invoke-NativeCapture $script:Vsim @(
+        "-c", "-lib", $library,
+        "-l", (Join-Path $testDirectory "vsim.log"),
+        "-wlf", (Join-Path $testDirectory "vsim.wlf"),
+        "tb_soundsys_z80", "-do",
+        "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run -all; quit -f"
+    ) "vsim ($name)")
+    Assert-Marker $output "SOUNDSYS Z80 PASS" $name
+}
+
+function Write-Tier {    param([int]$Number, [string]$Description)
+    Write-RunLine ("`n[{0}/35] {1}" -f $Number, $Description)
 }
 
 function Run-Differential {
@@ -227,6 +264,7 @@ function Run-Differential {
 $ModelSimDirectory = Resolve-ModelSimDirectory
 $Vlib = Join-Path $ModelSimDirectory "vlib.exe"
 $Vlog = Join-Path $ModelSimDirectory "vlog.exe"
+$Vcom = Join-Path $ModelSimDirectory "vcom.exe"
 $Vsim = Join-Path $ModelSimDirectory "vsim.exe"
 $PythonExe = Resolve-PythonCommand
 
@@ -252,6 +290,7 @@ $FullCoreSources = @(
 ) + $VideoSources + @(
     "rtl/audio/s32_rf5c68.sv",
     "rtl/audio/s32_multipcm.sv",
+    "rtl/audio/s32_audio_mix.sv",
     "rtl/audio/s32_soundsys.sv",
     "rtl/io/s32_io.sv",
     "rtl/prot/s32_prot.sv",
@@ -276,15 +315,15 @@ try {
     Run-HdlTest "t03_v60_directed" "tb_v60_directed" ($V60Sources + "verif/v60/tb_v60_directed.sv") "DIRECTED PASS"
 
     Write-Tier 4 "full-core integration boot (universal + System32-only profile)"
-    Run-HdlTest "t04_boot_universal" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION")
-    Run-HdlTest "t04_boot_ga2" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+    Run-HdlTest "t04_boot_universal" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION") @("-novopt")
+    Run-HdlTest "t04_boot_ga2" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY") @("-novopt")
     Write-RunLine "CORE BUILD-PROFILE BOOTS: PASS"
 
     Write-Tier 5 "V60 differential co-sim vs independent reference ($Seeds seeds)"
     Run-Differential $Seeds
 
     Write-Tier 6 "full-core soak / simulator-tier acceptance (extended multi-frame)"
-    Run-HdlTest "t06_core_soak" "tb_core_soak" ($FullCoreSources + "verif/common/tb_core_soak.sv") "CORE SOAK PASS" @("SIMULATION")
+    Run-HdlTest "t06_core_soak" "tb_core_soak" ($FullCoreSources + "verif/common/tb_core_soak.sv") "CORE SOAK PASS" @("SIMULATION") @("-novopt")
 
     Write-Tier 7 "V60 audit-fix directed tests (string/CALL/RET/RSR + SEARCH)"
     Run-HdlTest "t07_v60_audit" "tb_v60_audit" ($V60Sources + "verif/v60/tb_v60_audit.sv") "AUDIT PASS"
@@ -293,7 +332,7 @@ try {
     Write-Tier 8 "GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
     $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 release MRA check")
     Assert-Marker $releaseOutput "GA2 RELEASE MRA PASS" "GA2 release MRA check"
-    Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+    Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY") @("-novopt")
 
     Write-Tier 9 "framebuffer interface directed test (runs / shadow RMW / erase / read)"
     Run-HdlTest "t09_fb_if" "tb_fb_if" @("rtl/mem/s32_fb_if.sv", "verif/common/tb_fb_if.sv") "FB IF PASS"
@@ -329,7 +368,7 @@ try {
     Run-HdlTest "t19_v60_long_ea" "tb_v60_long_ea" ($V60Sources + "verif/v60/tb_v60_long_ea.sv") "LONG EA PASS"
 
     Write-Tier 20 "RF5C68 dual-port wave RAM / loop-fetch / channel cadence"
-    Run-HdlTest "t20_rf5c68" "tb_rf5c68" @("rtl/audio/s32_rf5c68.sv", "verif/common/tb_rf5c68.sv") "RF5C68 PASS"
+    Run-HdlTest "t20_rf5c68" "tb_rf5c68" @("rtl/video/s32_big_dpram.sv", "rtl/audio/s32_rf5c68.sv", "verif/common/tb_rf5c68.sv") "RF5C68 PASS"
 
     Write-Tier 21 "palette RAM alias / byte-enable / write-both / dual-port timing"
     Run-HdlTest "t21_palette" "tb_palette" @("rtl/video/s32_palette.sv", "verif/common/tb_palette.sv") "PALETTE PASS"
@@ -346,7 +385,50 @@ try {
     Write-Tier 25 "V25 HLE mailbox BRAM timing / wakeup / protection overlays"
     Run-HdlTest "t25_v25_dpram" "tb_v25_dpram" @("rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv", "rtl/prot/s32_prot.sv", "verif/common/tb_v25_dpram.sv") "V25 DPRAM PASS"
 
-    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (25/25 tiers)"
+    Write-Tier 26 "SDRAM CL2 centred input capture / first-word freshness / burst ordering"
+    Run-HdlTest "t26_sdram" "tb_sdram" @("rtl/mem/sdram.sv", "verif/common/tb_sdram.sv") "SDRAM CAPTURE PASS"
+
+    Write-Tier 27 "integrated sprite renderer / backpressured DDR framebuffer stress"
+    Run-HdlTest "t27_sprite_fb" "tb_sprite_fb" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_fb.sv") "SPRITE FB PASS"
+
+    Write-Tier 28 "interrupt controller reset / source+ack collision / timers / doorbell"
+    Run-HdlTest "t28_intc" "tb_intc" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_intc.sv") "INTC PASS"
+
+    Write-Tier 29 "audio route arithmetic width / stereo mapping / saturation"
+    Run-HdlTest "t29_audio_mix" "tb_audio_mix" @("rtl/audio/s32_audio_mix.sv", "verif/common/tb_audio_mix.sv") "AUDIO MIX PASS"
+
+    Write-Tier 30 "sound map/bank/IRQ/CNT2 reset + production T80 RF5C68 boot"
+    Run-HdlTest "t30_soundsys_bus" "tb_soundsys_bus" @(
+        "rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv",
+        "rtl/audio/s32_rf5c68.sv", "rtl/audio/s32_multipcm.sv",
+        "rtl/audio/s32_audio_mix.sv", "rtl/audio/s32_soundsys.sv",
+        "verif/common/jt12_stub.v", "verif/common/tb_soundsys_bus.sv"
+    ) "SOUNDSYS BUS PASS" @("SIMULATION")
+    Run-SoundZ80Test
+
+    Write-Tier 31 "MAME-backed MultiPCM descriptor / pitch / pan / loop / ACK semantics"
+    Run-HdlTest "t31_multipcm" "tb_multipcm" @(
+        "rtl/audio/s32_multipcm.sv", "verif/common/tb_multipcm.sv"
+    ) "MULTIPCM PASS"
+
+    Write-Tier 32 "V60 ROT/ROTC carry and active-width semantics"
+    Run-HdlTest "t32_v60_rotate" "tb_v60_rotate" ($V60Sources + "verif/v60/tb_v60_rotate.sv") "V60 ROTATE PASS"
+
+    Write-Tier 33 "V60 external bus byte/half/dword lane and alignment cycles"
+    Run-HdlTest "t33_v60_bus_lanes" "tb_v60_bus_lanes" @(
+        "rtl/cpu/v60/s32_v60_bus.sv", "verif/v60/tb_v60_bus_lanes.sv"
+    ) "V60 BUS LANES PASS"
+
+    Write-Tier 34 "System32 palette/mixer/I-O/V25 mirrored address decode"
+    Run-HdlTest "t34_core_map" "tb_core_map_decode" ($FullCoreSources + "verif/common/tb_core_map_decode.sv") "CORE MAP DECODE PASS" @("SIMULATION")
+
+    Write-Tier 35 "real encrypted GA2 V25 firmware and exact 10 MHz CE cadence"
+    $v25Output = @(& (Join-Path $Root "verif/v25/run_v25_firmware.ps1") 2>&1)
+    foreach ($line in $v25Output) { Write-RunLine $line }
+    Assert-Marker $v25Output "V25_FIRMWARE RUNNER: PASS" "real V25 firmware"
+    Assert-Marker $v25Output "V25_FIRMWARE CE: PASS" "V25 clock enable cadence"
+
+    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (35/35 tiers)"
     Write-RunLine "Detailed log: $LogPath"
     $Completed = $true
 }

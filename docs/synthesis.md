@@ -47,11 +47,11 @@ Quartus 17 Analysis & Synthesis. The current `.map.rpt` reports:
 
 | Mapping metric | Result |
 |---|---:|
-| Estimated logic utilization | **40,434 / 41,910 ALMs** (96.5%) |
-| Combinational ALUTs | 63,251 |
-| Dedicated logic registers | 23,981 |
-| Block-memory bits | 3,993,510 |
-| DSP blocks | 52 |
+| Estimated logic utilization | **26,851 / 41,910 ALMs** (64.1%) |
+| Combinational ALUTs | 41,440 |
+| Dedicated logic registers | 23,171 |
+| Block-memory bits | 3,934,136 |
+| DSP blocks | 42 |
 | PLLs | 3 |
 
 These are **map-only estimates**, not fitted resource utilization. The map

@@ -40,10 +40,14 @@ s32_vram vram (
 );
 
 reg         line_start = 0;
+reg  [8:0]  render_line = 0;
 wire        line_done;
 wire        tile_req;
 wire [21:3] tile_addr;
-reg  [63:0] tile_data = 64'hAAAA_AAAA_AAAA_AAAA;
+// Bytes 12 34 56 78 9A BC DE F0 exercise every nibble and the non-linear
+// MAME bgcharlayout byte order.  Pixels x0..15 must decode as
+// 1,2,5,6,3,4,7,8,9,A,D,E,B,C,F,0.
+reg  [63:0] tile_data = 64'hF0DE_BC9A_7856_3412;
 reg         tile_ack = 0;
 wire        lb_we;
 wire  [2:0] lb_layer;
@@ -51,7 +55,7 @@ wire  [8:0] lb_x;
 wire [13:0] lb_pix;
 
 s32_tilemap dut (
-    .clk(clk_ram), .rst(rst), .line(9'd0), .line_start(line_start),
+    .clk(clk_ram), .rst(rst), .line(render_line), .line_start(line_start),
     .line_done(line_done), .mode_416(1'b0), .ext_tilebank(2'b00),
     .r1ff00(r1ff00), .r1ff02(r1ff02), .r1ff04(r1ff04),
     .r1ff06(r1ff06), .r1ff5c(r1ff5c), .r1ff5e(r1ff5e),
@@ -93,6 +97,9 @@ reg found;
 task automatic expect_first_tile(input [18:0] want_addr,
                                  input [2:0] want_layer,
                                  input [13:0] want_pix);
+integer pixels;
+reg [3:0] want_pen;
+reg [13:0] decoded_pix;
 begin
     found = 0;
     for (timeout = 0; timeout < 2000 && !found; timeout = timeout + 1) begin
@@ -119,6 +126,38 @@ begin
         end
     end
     if (!found) begin $display("FAIL no first tile pixel"); errors = errors + 1; end
+
+    // The old test filled every nibble with A, which let an even/odd nibble
+    // reversal pass.  Check the remaining row against MAME's exact
+    // bgcharlayout x offsets: 0,4,16,20,8,12,24,28,...
+    pixels = 1; // x=0 was consumed by the first-pixel check above
+    while (pixels < 16 && timeout < 4000) begin
+        @(posedge clk_ram);
+        timeout = timeout + 1;
+        if (lb_we && lb_layer == want_layer && lb_x == pixels[8:0]) begin
+            case (pixels)
+                1: want_pen = 4'h2;  2: want_pen = 4'h5;
+                3: want_pen = 4'h6;  4: want_pen = 4'h3;
+                5: want_pen = 4'h4;  6: want_pen = 4'h7;
+                7: want_pen = 4'h8;  8: want_pen = 4'h9;
+                9: want_pen = 4'ha; 10: want_pen = 4'hd;
+               11: want_pen = 4'he; 12: want_pen = 4'hb;
+               13: want_pen = 4'hc; 14: want_pen = 4'hf;
+                default: want_pen = 4'h0;
+            endcase
+            decoded_pix = (want_pen == 0) ? 14'h0000 : (14'h2000 | want_pen);
+            if (lb_pix !== decoded_pix) begin
+                $display("FAIL tile pixel x=%0d: got %04x want %04x",
+                         pixels, lb_pix, decoded_pix);
+                errors = errors + 1;
+            end
+            pixels = pixels + 1;
+        end
+    end
+    if (pixels != 16) begin
+        $display("FAIL incomplete decoded tile row (%0d/16 pixels)", pixels);
+        errors = errors + 1;
+    end
 end
 endtask
 
@@ -144,6 +183,26 @@ begin
 end
 endtask
 
+task automatic expect_first_request(input [18:0] want_addr);
+begin
+    found = 0;
+    for (timeout = 0; timeout < 3000 && !found; timeout = timeout + 1) begin
+        @(posedge clk_ram);
+        if (tile_req) begin
+            found = 1;
+            if (tile_addr !== want_addr) begin
+                $display("FAIL first tile request: got %05x want %05x", tile_addr, want_addr);
+                errors = errors + 1;
+            end
+        end
+    end
+    if (!found) begin
+        $display("FAIL no tile request (want %05x)", want_addr);
+        errors = errors + 1;
+    end
+end
+endtask
+
 task automatic wait_done;
 begin
     found = 0;
@@ -160,11 +219,43 @@ initial begin
     repeat (4) @(posedge clk_ram);
     rst = 0;
 
+    // Register-map regression: rect 5 at byte $1FF80..$1FF86 must map to
+    // clips[16..19], not alias rect 3 at clips[8..11].
+    cpu_write(16'hffb8, 16'h8108);
+    cpu_write(16'hffb9, 16'h9109);
+    cpu_write(16'hffba, 16'ha10a);
+    cpu_write(16'hffbb, 16'hb10b);
+    cpu_write(16'hffc0, 16'h5a10);
+    cpu_write(16'hffc1, 16'h5a11);
+    cpu_write(16'hffc2, 16'h5a12);
+    cpu_write(16'hffc3, 16'h5a13);
+    if (clips[8] !== 16'h8108 || clips[9] !== 16'h9109 ||
+        clips[10] !== 16'ha10a || clips[11] !== 16'hb10b) begin
+        $display("FAIL fifth clip rectangle overwrote rect 3");
+        errors = errors + 1;
+    end
+    if (clips[16] !== 16'h5a10 || clips[17] !== 16'h5a11 ||
+        clips[18] !== 16'h5a12 || clips[19] !== 16'h5a13) begin
+        $display("FAIL fifth clip rectangle address map");
+        errors = errors + 1;
+    end
+
+    // Register shadows must merge byte writes exactly like the backing VRAM.
+    cpu_be = 2'b01;
+    cpu_write(16'hffc0, 16'h00aa);
+    cpu_be = 2'b10;
+    cpu_write(16'hffc0, 16'hbb00);
+    cpu_be = 2'b11;
+    if (clips[16] !== 16'hbbaa) begin
+        $display("FAIL clip byte-enable merge: got %04x want bbaa", clips[16]);
+        errors = errors + 1;
+    end
+
     // NBG0 name word 1 must request code 1, row 0 (address 0x10).
     cpu_write(16'h0000, 16'h0001);
     cpu_write(16'hff81, 16'h003e); // only NBG0 enabled
     start_render;
-    expect_first_tile(19'h00010, 3'd1, 14'h200a);
+    expect_first_tile(19'h00010, 3'd1, 14'h2001);
     wait_done;
 
     // TEXT name and glyph are two distinct synchronous VRAM reads.
@@ -182,6 +273,73 @@ initial begin
     expect_first_pixel(3'd5, 14'h2001);
     wait_done;
 
+
+    // MAME update_tilemap_rowscroll uses distinct rowscroll (+0x000) and
+    // rowselect (+0x200) tables. NBG2 x scroll also subtracts its X origin.
+    cpu_write(16'h0042, 16'h0003); // src (x=0x20,y=0x25) -> code 3
+    cpu_write(16'h0403, 16'h0010); // NBG2 rowscroll, ylookup 3
+    cpu_write(16'h0603, 16'h0025); // NBG2 rowselect, ylookup 3
+    cpu_write(16'hff82, 16'h0405); // table page 1, row scroll+select
+    cpu_write(16'hff91, 16'h0020); // NBG2 X scroll
+    cpu_write(16'hff93, 16'h0000); // NBG2 Y scroll
+    cpu_write(16'hff9c, 16'h0010); // NBG2 X origin
+    cpu_write(16'hff81, 16'h003b); // only NBG2 enabled
+    render_line = 9'd3;
+    start_render;
+    expect_first_request(19'h00035);
+    wait_done;
+
+    // $1FF04 bit (bg+2) disables both per-row features. The screen-wide
+    // offset remains active: x=0x20-0x10, y=3 -> name[1], code 4 row 3.
+    cpu_write(16'h0001, 16'h0004);
+    cpu_write(16'hff82, 16'h0415); // same enables plus NBG2 row disable
+    start_render;
+    expect_first_request(19'h00043);
+    wait_done;
+
+    // With independent-Y disabled, MAME uses zoom X on both axes. Enabling
+    // $1FF00 bit 14 switches Y to its own 0x100 factor (2 source px/dest px).
+    cpu_write(16'h0000, 16'h0001);
+    cpu_write(16'hff82, 16'h0000);
+    cpu_write(16'hff89, 16'h0000);
+    cpu_write(16'hff8b, 16'h0000);
+    cpu_write(16'hff98, 16'h0000);
+    cpu_write(16'hff99, 16'h0000);
+    cpu_write(16'hffa8, 16'h0200);
+    cpu_write(16'hffa9, 16'h0100);
+    cpu_write(16'hff80, 16'h0000);
+    cpu_write(16'hff81, 16'h003e); // only NBG0 enabled
+    render_line = 9'd2;
+    start_render;
+    expect_first_request(19'h00012);
+    wait_done;
+    cpu_write(16'hff80, 16'h4000);
+    start_render;
+    expect_first_request(19'h00014);
+    wait_done;
+
+    // NBG layer flip follows MAME compute_tilemap_flips. NBG2 layer flip at
+    // dest (0,0) samples source (319,223): name word 0x1b3, code 5 row 15.
+    cpu_write(16'h01b3, 16'h0005);
+    cpu_write(16'hff80, 16'h0004);
+    cpu_write(16'hff81, 16'h003b);
+    cpu_write(16'hff91, 16'h0000);
+    cpu_write(16'hff93, 16'h0000);
+    cpu_write(16'hff9c, 16'h0000);
+    render_line = 9'd0;
+    start_render;
+    expect_first_request(19'h0005f);
+    wait_done;
+
+    // Global flip maps the 64x32 text tilemap's first destination pixel to
+    // source (511,255), including the character-internal X/Y coordinates.
+    cpu_write(16'h07ff, 16'h0402); // palette 2, character 2
+    cpu_write(16'h002f, 16'h0a00); // char 2, row 7, x group 1, col 3 = A
+    cpu_write(16'hff80, 16'h0200);
+    cpu_write(16'hff81, 16'h002f); // only TEXT enabled
+    start_render;
+    expect_first_pixel(3'd0, 14'h202a);
+    wait_done;
     if (errors == 0) $display("TILEMAP VRAM PASS");
     else             $display("TILEMAP VRAM FAIL (%0d errors)", errors);
     $finish;

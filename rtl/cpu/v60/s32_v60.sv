@@ -311,12 +311,40 @@ function automatic zer(input [31:0] v, input [1:0] d);
     case (d) 2'd0: zer = v[7:0]==0; 2'd1: zer = v[15:0]==0; default: zer = v==0; endcase
 endfunction
 
+// Funnel every architectural-register update through two masked write ports.
+// The V60 can retire at most two register writes in one FSM cycle.  Keeping
+// the decoders here avoids rebuilding a 32-way write network at every
+// syntactic assignment site in the monolithic instruction FSM.
+reg        rf_we0, rf_we1;
+reg [4:0]  rf_waddr0, rf_waddr1;
+reg [31:0] rf_wdata0, rf_wdata1;
+reg [31:0] rf_wmask0, rf_wmask1;
+
+task automatic queue_reg_write(
+    input [4:0] rn,
+    input [31:0] v,
+    input [31:0] mask
+);
+    if (!rf_we0) begin
+        rf_we0 = 1'b1;
+        rf_waddr0 = rn;
+        rf_wdata0 = v;
+        rf_wmask0 = mask;
+    end
+    else begin
+        rf_we1 = 1'b1;
+        rf_waddr1 = rn;
+        rf_wdata1 = v;
+        rf_wmask1 = mask;
+    end
+endtask
+
 // merge result into register per dim (SETREG8/16 semantics)
 task automatic setreg(input [4:0] rn, input [31:0] v, input [1:0] d);
     case (d)
-        2'd0: r[rn][7:0]  <= v[7:0];
-        2'd1: r[rn][15:0] <= v[15:0];
-        default: r[rn]    <= v;
+        2'd0: queue_reg_write(rn, v, 32'h0000_00ff);
+        2'd1: queue_reg_write(rn, v, 32'h0000_ffff);
+        default: queue_reg_write(rn, v, 32'hffff_ffff);
     endcase
 endtask
 
@@ -344,7 +372,7 @@ task automatic write_psw_after_sp(input [31:0] v, input [31:0] sp_now);
             2'd0: l0sp <= sp_now; 2'd1: l1sp <= sp_now;
             2'd2: l2sp <= sp_now; 2'd3: l3sp <= sp_now;
         endcase
-        r[31] <= pick_stack(v);
+        queue_reg_write(5'd31, pick_stack(v), 32'hffff_ffff);
     end
     psw_rest <= v;
     f_z  <= v[0];
@@ -358,7 +386,7 @@ task automatic write_psw(input [31:0] v);
     if (((v ^ psw) & 32'h1000_0000) != 0 ||
         (!psw[28] && ((v ^ psw) & 32'h0300_0000) != 0)) begin
         save_stack(psw);
-        r[31] <= pick_stack(v);
+        queue_reg_write(5'd31, pick_stack(v), 32'hffff_ffff);
     end
     psw_rest <= v;
     f_z  <= v[0];
@@ -501,9 +529,18 @@ if (rst) begin
     bus_req <= 0; bus_we <= 0; irq_ack <= 0;
     halted <= 0;
     nmi_seen <= 0;
+    nmi_r <= 0;
     xdiv_active <= 0;
 end
 else if (ce) begin
+    rf_we0 = 1'b0;
+    rf_we1 = 1'b0;
+    rf_waddr0 = 5'd0;
+    rf_waddr1 = 5'd0;
+    rf_wdata0 = 32'd0;
+    rf_wdata1 = 32'd0;
+    rf_wmask0 = 32'd0;
+    rf_wmask1 = 32'd0;
     irq_ack <= 0;
     nmi_r <= ~nmi_n;
     if (~nmi_n & ~nmi_r) nmi_seen <= 1'b1;
@@ -666,7 +703,7 @@ else if (ce) begin
             bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
             bus_addr <= r[31] - 4;
             bus_wdata <= pc + 3;
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             wb_val <= pc + {{16{bd16[15]}}, bd16};
             st <= S_JSR1;
         end
@@ -692,7 +729,7 @@ else if (ce) begin
                     else pc <= pc + 4;
                 end
                 else begin
-                    r[fb[1][4:0]] <= rf_rdata_a - 1;
+                    queue_reg_write(fb[1][4:0], rf_rdata_a - 1, 32'hffff_ffff);
                     if (cond_true(cc4) && (rf_rdata_a - 1) != 0)
                          pc <= pc + {{16{bd16[15]}}, bd16};
                     else pc <= pc + 4;
@@ -897,7 +934,7 @@ else if (ce) begin
         8'h4d, 8'h4e, 8'h4f: begin instflags <= fb[1]; cls <= C_F12; st <= S_IF2; end // CHKA*
         8'h49: begin instflags <= fb[1]; cls <= C_F12; st <= S_IF2; end // CALL
         8'hcc: begin // DISPOSE: SP = FP (R30), pop FP
-            r[31] <= r[30];
+            queue_reg_write(5'd31, r[30], 32'hffff_ffff);
             bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[30];
             st <= S_DISP1;
         end
@@ -1104,13 +1141,13 @@ else if (ce) begin
             end
             3'd4: begin             // Autoincrement
                 ea_addr <= rf_rdata_a;
-                r[modreg] <= rf_rdata_a + dim_step(ea_dim);
+                queue_reg_write(modreg, rf_rdata_a + dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
                 st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
             end
             3'd5: begin             // Autodecrement
                 ea_addr <= rf_rdata_a - dim_step(ea_dim);
-                r[modreg] <= rf_rdata_a - dim_step(ea_dim);
+                queue_reg_write(modreg, rf_rdata_a - dim_step(ea_dim), 32'hffff_ffff);
                 ea_len <= 5'd1;
                 st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
             end
@@ -1289,8 +1326,8 @@ else if (ce) begin
         xdiv_shift <= xdiv_shift_next;
         xdiv_rem <= xdiv_rem_next;
         if (xdiv_cnt == 6'd63) begin
-            r[xdiv_dst]        <= xdiv_qresult;
-            r[xdiv_dst + 5'd1] <= xdiv_rresult;
+            queue_reg_write(xdiv_dst, xdiv_qresult, 32'hffff_ffff);
+            queue_reg_write(xdiv_dst + 5'd1, xdiv_rresult, 32'hffff_ffff);
             f_z <= (xdiv_qresult == 0);
             f_s <= xdiv_qresult[31];
             f_ov <= 1'b0;
@@ -1315,14 +1352,28 @@ else if (ce) begin
             logic msb;
             d2l = f12_dim2(cur_op);
             msb = sgn(rotc_val, d2l);
-            rotc_val <= {rotc_val[30:0], f_cy};
+            // MAME opROTC*: the carry bit enters the active operand's LSB;
+            // bits above a byte/halfword operand are not part of the ring.
+            case (d2l)
+                2'd0: rotc_val <= {24'b0, rotc_val[6:0], f_cy};
+                2'd1: rotc_val <= {16'b0, rotc_val[14:0], f_cy};
+                default: rotc_val <= {rotc_val[30:0], f_cy};
+            endcase
             f_cy <= msb;
             rotc_cnt <= rotc_cnt - 1;
         end
         else begin
+            logic [1:0] d2l;
             logic ls;
+            d2l = f12_dim2(cur_op);
             ls = rotc_val[0];
-            rotc_val <= {f_cy, rotc_val[31:1]};
+            // Right rotate-through-carry enters at bit 7/15/31 according
+            // to the destination width (op12.hxx opROTCB/H/W).
+            case (d2l)
+                2'd0: rotc_val <= {24'b0, f_cy, rotc_val[7:1]};
+                2'd1: rotc_val <= {16'b0, f_cy, rotc_val[15:1]};
+                default: rotc_val <= {f_cy, rotc_val[31:1]};
+            endcase
             f_cy <= ls;
             rotc_cnt <= rotc_cnt + 1;
         end
@@ -1434,7 +1485,7 @@ else if (ce) begin
             bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
             bus_addr <= r[31] - 4;
             bus_wdata <= wb_val;          // return PC
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         end
         else if (bus_ack) begin           // return-PC push done
             bus_req <= 0; bus_we <= 0;
@@ -1447,7 +1498,7 @@ else if (ce) begin
     S_RET1: if (bus_ack) begin
         bus_req <= 0;
         pc <= bus_rdata;
-        r[31] <= r[31] + 4;
+        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         st <= S_RET2;
     end
     S_RET2: begin
@@ -1457,8 +1508,8 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0;
-            r[29] <= bus_rdata;              // AP (R29)
-            r[31] <= r[31] + 4 + wb_val;     // wb_val = frame-size operand
+            queue_reg_write(5'd29, bus_rdata, 32'hffff_ffff); // AP (R29)
+            queue_reg_write(5'd31, r[31] + 4 + wb_val, 32'hffff_ffff);
             st <= S_FILL; st_after_fill <= S_DECODE;
         end
     end
@@ -1483,7 +1534,7 @@ else if (ce) begin
     S_RETI3: begin
         // pops (8) + frame-destroy operand (MAME: SP += amout), then the
         // PSW write may bank-switch SP — order matters: adjust THEN switch.
-        r[31] <= r[31] + 8 + xch_addr;
+        queue_reg_write(5'd31, r[31] + 8 + xch_addr, 32'hffff_ffff);
         write_psw_after_sp(alu_r, r[31] + 8 + xch_addr);
         pc <= wb_val;
         st <= S_FILL; st_after_fill <= S_DECODE;
@@ -1492,8 +1543,8 @@ else if (ce) begin
     // DISPOSE: FP fetched
     S_DISP1: if (bus_ack) begin
         bus_req <= 0;
-        r[30] <= bus_rdata;   // FP = R30
-        r[31] <= r[31] + 4;
+        queue_reg_write(5'd30, bus_rdata, 32'hffff_ffff); // FP = R30
+        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         pc <= pc + 1;
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
@@ -1502,7 +1553,7 @@ else if (ce) begin
     S_RSR: if (bus_ack) begin
         bus_req <= 0;
         pc <= bus_rdata;
-        r[31] <= r[31] + 4;
+        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
 
@@ -1518,7 +1569,7 @@ else if (ce) begin
             bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
             bus_addr <= r[31] - 4;
             bus_wdata <= rf_rdata_a;
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             reg_ptr <= pushm_index(op1);
         end
         else if (bus_ack) begin
@@ -1539,8 +1590,8 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0;
-            r[reg_ptr] <= bus_rdata;
-            r[31] <= r[31] + 4;
+            queue_reg_write(reg_ptr, bus_rdata, 32'hffff_ffff);
+            queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
             op1[reg_ptr] <= 1'b0;
         end
     end
@@ -1572,8 +1623,8 @@ else if (ce) begin
     // PREPARE: push FP, FP=SP, SP-=imm
     S_PREP1: if (bus_ack) begin
         bus_req <= 0; bus_we <= 0;
-        r[30] <= r[31] - 4;   // FP = R30
-        r[31] <= r[31] - 4 - op1;
+        queue_reg_write(5'd30, r[31] - 4, 32'hffff_ffff); // FP = R30
+        queue_reg_write(5'd31, r[31] - 4 - op1, 32'hffff_ffff);
         st <= S_NEXT;
     end
 
@@ -1628,8 +1679,8 @@ else if (ce) begin
             // separate from this completion/flag correction.
             if (subop[4:0] >= 5'h18) begin
                 f_z <= 1'b1;
-                r[27] <= str_len1;
-                r[28] <= str_src;
+                queue_reg_write(5'd27, str_len1, 32'hffff_ffff);
+                queue_reg_write(5'd28, str_src, 32'hffff_ffff);
             end
             st <= S_NEXT;
         end
@@ -1650,8 +1701,8 @@ else if (ce) begin
                 eq = (cur_op[1] ? (bus_rdata[15:0]==str_dst[15:0]) : (bus_rdata[7:0]==str_dst[7:0]));
                 if (eq == (subop[1] ? 1'b0 : 1'b1)) begin
                     f_z <= 1'b0;
-                    r[27] <= str_len1 - str_cnt;
-                    r[28] <= str_src;
+                    queue_reg_write(5'd27, str_len1 - str_cnt, 32'hffff_ffff);
+                    queue_reg_write(5'd28, str_src, 32'hffff_ffff);
                     st <= S_NEXT;
                 end
                 else begin
@@ -1690,7 +1741,8 @@ else if (ce) begin
                 if (a != b) begin
                     f_z <= 0;
                     f_s <= (a < b);
-                    r[28] <= str_src; r[27] <= str_dst;
+                    queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+                    queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
                     st <= S_NEXT;
                 end
                 else begin f_z <= 1; st <= S_STR_NEXT; end
@@ -1765,7 +1817,7 @@ else if (ce) begin
             if (sum != 0 || cyo) f_z <= 1'b0;      // Z sticky-clears only
             resb = bin2bcd(sum[6:0]);
             if (flag2) begin
-                r[op2[4:0]][7:0] <= resb;
+                queue_reg_write(op2[4:0], resb, 32'h0000_00ff);
                 st <= S_NEXT;
             end
             else begin
@@ -1778,7 +1830,7 @@ else if (ce) begin
                     ({4'b0, op1[7:4]} | dec_pat)};
             if (op1[7:0] != 0) f_z <= 1'b0;
             if (flag2) begin
-                r[op2[4:0]][15:0] <= resh;
+                queue_reg_write(op2[4:0], resh, 32'h0000_ffff);
                 st <= S_NEXT;
             end
             else begin
@@ -1790,7 +1842,7 @@ else if (ce) begin
             resb = {op1[3:0], op1[11:8]};
             if (resb != 0) f_z <= 1'b0;
             if (flag2) begin
-                r[op2[4:0]][7:0] <= resb;
+                queue_reg_write(op2[4:0], resb, 32'h0000_00ff);
                 st <= S_NEXT;
             end
             else begin
@@ -1884,13 +1936,21 @@ else if (ce) begin
             3'd4: begin             // autoincrement (+1 strings, +4 fields)
                 bam_base <= rf_rdata_a;
                 bam_off  <= 32'd0;
-                r[modreg] <= rf_rdata_a + ((cur_op == 8'h5b) ? 32'd1 : 32'd4);
+                queue_reg_write(
+                    modreg,
+                    rf_rdata_a + ((cur_op == 8'h5b) ? 32'd1 : 32'd4),
+                    32'hffff_ffff
+                );
                 bam_fill_len(5'd1);
                 st <= bam_next();
             end
             3'd5: begin             // autodecrement
                 bam_base <= rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4);
-                r[modreg] <= rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4);
+                queue_reg_write(
+                    modreg,
+                    rf_rdata_a - ((cur_op == 8'h5b) ? 32'd1 : 32'd4),
+                    32'hffff_ffff
+                );
                 bam_off  <= 32'd0;
                 bam_fill_len(5'd1);
                 st <= bam_next();
@@ -1958,7 +2018,7 @@ else if (ce) begin
             default: res = v << (6'd32 - {1'b0, bit_len[4:0]});         // L
         endcase
         if (flag2) begin
-            r[op2[4:0]] <= res;
+            queue_reg_write(op2[4:0], res, 32'hffff_ffff);
             total_len <= 5'd3 + len1 + len2;
             st <= S_NEXT;
         end
@@ -2048,7 +2108,7 @@ else if (ce) begin
         end
     end
     S_BS_SCHB: begin
-        r[28] <= str_src;
+        queue_reg_write(5'd28, str_src, 32'hffff_ffff);
         if (bs_sdata[bs_soff] == subop[1]) begin   // sub 0 finds 0, sub 2 finds 1
             f_z <= 1'b0;
             bit_val <= str_cnt;
@@ -2149,8 +2209,8 @@ else if (ce) begin
         nd = bs_ddata;
         nd[bs_doff] = bs_sdata[bs_soff];
         bs_ddata <= nd;
-        r[28] <= str_src;
-        r[27] <= str_dst;
+        queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+        queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
         wrap_s = subop[0] ? (bs_soff == 3'd0) : (bs_soff == 3'd7);
         wrap_d = subop[0] ? (bs_doff == 3'd0) : (bs_doff == 3'd7);
         bit_len <= bit_len - 1;
@@ -2202,7 +2262,8 @@ else if (ce) begin
         end
         str_cnt <= str_cnt - 1;
         if (str_cnt == 1) begin
-            r[28] <= str_src; r[27] <= str_dst;   // final pointers (MAME R27/R28)
+            queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+            queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
             st <= S_NEXT;
         end
         else st <= S_STR_RD;
@@ -2230,7 +2291,7 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_PUSH2;
         end
     end
@@ -2242,7 +2303,7 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_JMP;   // reused as "push PC" state
         end
     end
@@ -2254,7 +2315,7 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
-            r[31] <= r[31] - 4;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_VEC;
         end
     end
@@ -2278,7 +2339,7 @@ else if (ce) begin
     S_POP: if (bus_ack) begin
         bus_req <= 0;
         if (flag1) begin
-            r[op1[4:0]] <= bus_rdata;
+            queue_reg_write(op1[4:0], bus_rdata, 32'hffff_ffff);
             st <= S_NEXT;
         end
         else begin
@@ -2286,7 +2347,7 @@ else if (ce) begin
             wb_val <= bus_rdata;
             st <= S_WB_MEM;
         end
-        r[31] <= r[31] + 4;
+        queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
     end
 
     S_HALT: begin
@@ -2299,6 +2360,15 @@ else if (ce) begin
 
     default: st <= S_RESET;
     endcase
+
+    // Port 1 is applied second so the final queued write retains the original
+    // nonblocking-assignment priority when both ports address the same bit.
+    for (int rf_wbit = 0; rf_wbit < 32; rf_wbit = rf_wbit + 1) begin
+        if (rf_we0 && rf_wmask0[rf_wbit])
+            r[rf_waddr0][rf_wbit] <= rf_wdata0[rf_wbit];
+        if (rf_we1 && rf_wmask1[rf_wbit])
+            r[rf_waddr1][rf_wbit] <= rf_wdata1[rf_wbit];
+    end
 end
 end
 
@@ -2524,16 +2594,33 @@ task automatic exec_op;
         wb_op2(res, d2);
     end
     8'h89, 8'h8b, 8'h8d: begin      // ROT: CY = bit rotated around
+        logic signed [7:0] cnt;
+        cnt = a[7:0];
         res = rot_res(b, a[7:0], d2);
-        f_cy <= ($signed(a[7:0]) >= 0) ? sgn(res, d2) : res[0]; // last bit moved
+        // MAME defines CY from the post-rotate wrap bit: LSB after a
+        // positive (left) rotate, MSB after a negative (right) rotate.
+        // A zero count explicitly clears CY.
+        if (cnt > 0)      f_cy <= res[0];
+        else if (cnt < 0) f_cy <= sgn(res, d2);
+        else              f_cy <= 1'b0;
         f_ov <= 0;
         set_zs(res, d2);
         wb_op2(res, d2);
     end
     8'h99, 8'h9b, 8'h9d: begin      // ROTC: rotate through carry, iterative
-        rotc_cnt  <= a[7:0];
-        rotc_val  <= dimext(b, d2);
-        st <= S_ROTC;
+        // MAME clears CY for a zero count; nonzero counts retain the final
+        // shifted-out bit, so only bypass the iterative state for zero.
+        if ($signed(a[7:0]) == 0) begin
+            f_cy <= 1'b0;
+            f_ov <= 1'b0;
+            set_zs(b, d2);
+            wb_op2(b, d2);
+        end
+        else begin
+            rotc_cnt <= a[7:0];
+            rotc_val <= dimext(b, d2);
+            st <= S_ROTC;
+        end
     end
 
     // ------------ bit ops (register or memory dest in op2) ------------
@@ -2546,9 +2633,9 @@ task automatic exec_op;
             f_z  <= ~rf_rdata_b[bi];
             f_cy <=  rf_rdata_b[bi];
             case (cur_op)
-                8'h97: r[op2[4:0]][bi] <= 1'b1;
-                8'ha7: r[op2[4:0]][bi] <= 1'b0;
-                8'hb7: r[op2[4:0]][bi] <= ~rf_rdata_b[bi];
+                8'h97: queue_reg_write(op2[4:0], 32'hffff_ffff, 32'h1 << bi);
+                8'ha7: queue_reg_write(op2[4:0], 32'h0000_0000, 32'h1 << bi);
+                8'hb7: queue_reg_write(op2[4:0], ~rf_rdata_b, 32'h1 << bi);
                 default: ;
             endcase
             st <= S_NEXT;
@@ -2609,8 +2696,8 @@ task automatic exec_op;
         p = mul_signed ? $signed({{32{op1[31]}}, op1}) * $signed({{32{b[31]}}, b})
                        : {32'b0, op1} * {32'b0, b};
         if (flag2) begin
-            r[op2[4:0]]        <= p[31:0];
-            r[op2[4:0] + 5'd1] <= p[63:32];
+            queue_reg_write(op2[4:0], p[31:0], 32'hffff_ffff);
+            queue_reg_write(op2[4:0] + 5'd1, p[63:32], 32'hffff_ffff);
         end
         f_z <= (p == 0); f_s <= p[63]; f_ov <= 0;
         st <= S_NEXT;
@@ -2688,8 +2775,8 @@ task automatic exec_op;
         bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
         bus_addr <= r[31] - 4;
         bus_wdata <= r[29];          // push AP (R29) first
-        r[31] <= r[31] - 4;
-        r[29] <= op2;                // AP (R29) = op2
+        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+        queue_reg_write(5'd29, op2, 32'hffff_ffff); // AP (R29) = op2
         wb_val <= pc + total_len;    // return PC, pushed in S_CALL1
         alu_r  <= op1;               // target
         st <= S_CALL1;
@@ -2765,7 +2852,7 @@ task automatic exec_op;
         bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
         bus_addr <= r[31] - 4;
         bus_wdata <= pc + 5'd1 + len1;
-        r[31] <= r[31] - 4;
+        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         wb_val <= op1;
         st <= S_JSR1;
     end
@@ -2783,7 +2870,7 @@ task automatic exec_op;
         bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
         bus_addr <= r[31] - 4;
         bus_wdata <= op1;
-        r[31] <= r[31] - 4;
+        queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         total_len <= 5'd1 + len1;
         st <= S_PUSH;
     end
@@ -2893,11 +2980,20 @@ endfunction
 function automatic [31:0] rot_res(input [31:0] v, input [7:0] cnt, input [1:0] d);
     logic signed [7:0] c;
     logic [31:0] x;
-    int w;
-    c = cnt; w = (d==2'd0) ? 8 : (d==2'd1) ? 16 : 32;
+    logic [7:0] mag;
+    logic [5:0] sh, w;
+    logic [31:0] mask;
+    c = cnt;
     x = dimext(v, d);
-    if (c >= 0) rot_res = ((x << (c % w)) | (x >> (w - (c % w)))) & ((w==32) ? 32'hffffffff : (32'h1 << w) - 1);
-    else        rot_res = ((x >> ((-c) % w)) | (x << (w - ((-c) % w)))) & ((w==32) ? 32'hffffffff : (32'h1 << w) - 1);
+    mag = c[7] ? (8'h00 - cnt) : cnt;
+    case (d)
+        2'd0: begin w = 6'd8;  sh = {3'b0, mag[2:0]}; mask = 32'h0000_00ff; end
+        2'd1: begin w = 6'd16; sh = {2'b0, mag[3:0]}; mask = 32'h0000_ffff; end
+        default: begin w = 6'd32; sh = {1'b0, mag[4:0]}; mask = 32'hffff_ffff; end
+    endcase
+    if (sh == 0)     rot_res = x & mask;
+    else if (!c[7])  rot_res = ((x << sh) | (x >> (w - sh))) & mask;
+    else             rot_res = ((x >> sh) | (x << (w - sh))) & mask;
 endfunction
 function automatic [31:0] rotc_res(input [31:0] v, input [7:0] cnt, input [1:0] d);
     rotc_res = rot_res(v, cnt, d); // TODO exact rotate-through-carry

@@ -6,7 +6,8 @@
 //    [sprites up to 16MB]
 //  The MRA pads every region to its fixed size so offsets are constant.
 //  mcu bytes are address-descrambled into the V25 program BRAM here
-//  (bitswap<16>(14,11,15,12,13,4,3,7,5,10,2,8,9,6,1,0) — DESIGN.md §8.1).
+//  by applying the inverse of MAME's destination-to-source address lookup
+//  (see v25_stream_to_dst below and DESIGN.md §8.1).
 //  ioctl index 2 = 93C46 default image (128 bytes).
 //============================================================================
 
@@ -65,10 +66,15 @@ integer    desc_i;
 
 assign ioctl_wait = busy;
 
-// V25 address descramble: dst = bitswap16(src,14,11,15,12,13,4,3,7,5,10,2,8,9,6,1,0)
-function automatic [15:0] v25_descramble(input [15:0] i);
-    v25_descramble = { i[14], i[11], i[15], i[12], i[13], i[4], i[3], i[7],
-                       i[5],  i[10], i[2],  i[8],  i[9],  i[6], i[1], i[0] };
+// MAME describes the ROM as:
+//   descrambled[dst] = raw[bitswap(dst, 14,11,15,12,13,4,3,7,
+//                                        5,10,2,8,9,6,1,0)]
+// The ioctl loader visits raw source addresses in ascending order, so the
+// BRAM write address must use the inverse permutation: dst = inverse(src).
+// In particular, raw 0xFDDC (the GA2 reset-vector source) maps to 0xFFF0.
+function automatic [15:0] v25_stream_to_dst(input [15:0] i);
+    v25_stream_to_dst = { i[13], i[15], i[11], i[12], i[14], i[6], i[3], i[4],
+                          i[8],  i[2],  i[7],  i[10], i[9],  i[5], i[1], i[0] };
 endfunction
 
 // map stream offset -> sdram byte address
@@ -126,7 +132,7 @@ always @(posedge clk) begin
                     // the 64-byte stream descriptor before permuting the
                     // MCU-local address bits.
                     v25_wr    <= 1'b1;
-                    v25_waddr <= v25_descramble(ioctl_addr[15:0] - OFF_MCU[15:0]);
+                    v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
                     v25_wdata <= ioctl_dout;
                 end
                 else begin

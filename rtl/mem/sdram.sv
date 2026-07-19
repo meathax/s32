@@ -65,6 +65,10 @@ module sdram (
     output reg        p4_ack
 );
 
+reg [15:0] dq_out;
+reg        dq_oe;
+reg  [1:0] dqm;
+
 assign SDRAM_CKE  = 1'b1;
 assign SDRAM_DQML = dqm[0];
 assign SDRAM_DQMH = dqm[1];
@@ -84,9 +88,6 @@ localparam CMD_MRS   = 4'b0000;
 reg  [3:0] cmd = CMD_NOP;
 assign {SDRAM_nCS, SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} = cmd;
 
-reg [15:0] dq_out;
-reg        dq_oe;
-reg  [1:0] dqm;
 assign SDRAM_DQ = dq_oe ? dq_out : 16'hZZZZ;
 
 // init sequencer
@@ -117,16 +118,43 @@ reg [1:0]  ack_stretch;     // acks held 2 clk_ram cycles (clk_sys is /2 sync)
 
 reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
 
-// request latches (edge -> level held until ack)
+// Request mailboxes.  Capture every transaction's metadata with its request;
+// arbitration may delay a lower-priority port long after the producer pulses
+// req or moves on to its next address.  This mirrors the latched per-slot
+// request interfaces used by mature MiSTer SDRAM frameworks.
 reg p0_pend, p1_pend, p2_pend, p3_pend, p4_pend, wr_pend;
+reg [24:1] p0_addr_p, p3_addr_p, p4_addr_p, wr_addr_p;
+reg [24:3] p1_addr_p;
+reg [24:4] p2_addr_p;
+reg [15:0] wr_din_p;
+reg  [1:0] wr_be_p;
+
 always @(posedge clk) begin
-    if (p0_req)  p0_pend <= 1'b1;
-    if (p1_req)  p1_pend <= 1'b1;
-    if (p2_req)  p2_pend <= 1'b1;
-    if (p3_req)  p3_pend <= 1'b1;
-    if (p4_req)  p4_pend <= 1'b1;
-    if (wr_req)  wr_pend <= 1'b1;
-    if (init) {p0_pend,p1_pend,p2_pend,p3_pend,p4_pend,wr_pend} <= '0;
+    if (p0_req && !p0_pend && !p0_ack) begin
+        p0_pend <= 1'b1; p0_addr_p <= p0_addr;
+    end
+    if (p1_req && !p1_pend && !p1_ack) begin
+        p1_pend <= 1'b1; p1_addr_p <= p1_addr;
+    end
+    if (p2_req && !p2_pend && !p2_ack) begin
+        p2_pend <= 1'b1; p2_addr_p <= p2_addr;
+    end
+    if (p3_req && !p3_pend && !p3_ack) begin
+        p3_pend <= 1'b1; p3_addr_p <= p3_addr;
+    end
+    if (p4_req && !p4_pend && !p4_ack) begin
+        p4_pend <= 1'b1; p4_addr_p <= p4_addr;
+    end
+    if (wr_req && !wr_pend && !wr_ack) begin
+        wr_pend <= 1'b1; wr_addr_p <= wr_addr;
+        wr_din_p <= wr_din; wr_be_p <= wr_be;
+    end
+    if (init) begin
+        {p0_pend,p1_pend,p2_pend,p3_pend,p4_pend,wr_pend} <= '0;
+        p0_addr_p <= '0; p1_addr_p <= '0; p2_addr_p <= '0;
+        p3_addr_p <= '0; p4_addr_p <= '0; wr_addr_p <= '0;
+        wr_din_p <= '0; wr_be_p <= '0;
+    end
     if (p0_ack) p0_pend <= 1'b0;
     if (p1_ack) p1_pend <= 1'b0;
     if (p2_ack) p2_pend <= 1'b0;
@@ -135,18 +163,28 @@ always @(posedge clk) begin
     if (wr_ack) wr_pend <= 1'b0;
 end
 
-// CL=2 capture pipeline: bit i set = a READ was issued i cycles ago
-reg [1:0]  cl_pipe;
+// Centre the SDRAM board interface with SDRAM_CLK forwarded at 180 degrees.
+// Commands and write data launched here have half a cycle of setup at the
+// chip. CL2 read data returns to this direct pin-to-register sample under the
+// SDC input-delay and multicycle constraints, so Quartus can place dq_in in
+// the input IOE. The fourth pipe tap transfers the already-registered word
+// into the response buffer one cycle later without a pin-to-core critical path.
+reg [15:0] dq_in;
+reg [3:0]  cl_pipe;
 reg [15:0] cap_buf [0:7];
 
-task automatic deliver;
+always @(posedge clk) dq_in <= SDRAM_DQ;
+
+task automatic deliver(input [15:0] final_word);
     case (grant)
-        3'd0: begin p0_dout <= cap_buf[0]; p0_ack <= 1'b1; end
-        3'd1: begin p1_dout <= {cap_buf[3], cap_buf[2], cap_buf[1], cap_buf[0]}; p1_ack <= 1'b1; end
-        3'd2: begin p2_dout <= {cap_buf[7], cap_buf[6], cap_buf[5], cap_buf[4],
+        // The final buffer write and delivery share an edge.  Use the staged
+        // word directly for the last lane instead of returning stale cap_buf.
+        3'd0: begin p0_dout <= final_word; p0_ack <= 1'b1; end
+        3'd1: begin p1_dout <= {final_word, cap_buf[2], cap_buf[1], cap_buf[0]}; p1_ack <= 1'b1; end
+        3'd2: begin p2_dout <= {final_word, cap_buf[6], cap_buf[5], cap_buf[4],
                                 cap_buf[3], cap_buf[2], cap_buf[1], cap_buf[0]}; p2_ack <= 1'b1; end
-        3'd3: begin p3_dout <= cap_buf[0]; p3_ack <= 1'b1; end
-        3'd4: begin p4_dout <= cap_buf[0]; p4_ack <= 1'b1; end
+        3'd3: begin p3_dout <= final_word; p3_ack <= 1'b1; end
+        3'd4: begin p4_dout <= final_word; p4_ack <= 1'b1; end
         default: ;
     endcase
 endtask
@@ -170,7 +208,7 @@ always @(posedge clk) begin
         ref_pend <= 1'b0;
         ref_cnt  <= 10'd0;
         dqm      <= 2'b11;
-        cl_pipe  <= 2'b00;
+        cl_pipe  <= 4'b0000;
         ack_stretch <= 0;
     end
     else if (!init_done) begin
@@ -196,13 +234,13 @@ always @(posedge clk) begin
         ref_cnt <= ref_cnt + 1'd1;
         if (ref_cnt == 10'd700) begin ref_cnt <= 0; ref_pend <= 1'b1; end
 
-        // read capture (CL2: data valid 2 cycles after READ)
-        cl_pipe <= {cl_pipe[0], 1'b0};
-        if (cl_pipe[1]) begin
-            cap_buf[rd_captured[2:0]] <= SDRAM_DQ;
+        // Read capture after CL2 and the centred IOE register above.
+        cl_pipe <= {cl_pipe[2:0], 1'b0};
+        if (cl_pipe[3]) begin
+            cap_buf[rd_captured[2:0]] <= dq_in;
             rd_captured <= rd_captured + 1'd1;
             if (rd_captured + 1'd1 == rd_total) begin
-                deliver();
+                deliver(dq_in);
                 ack_stretch <= 2'd1;   // hold ack this cycle + next
             end
         end
@@ -216,15 +254,15 @@ always @(posedge clk) begin
             end
             else if (wr_pend | p0_pend | p1_pend | p2_pend | p3_pend | p4_pend) begin
                 logic [24:1] a;
-                if      (wr_pend) begin grant <= 3'd7; a = wr_addr;           rd_total <= 4'd1; is_write <= 1'b1; end
-                else if (p0_pend) begin grant <= 3'd0; a = p0_addr;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else if (p1_pend) begin grant <= 3'd1; a = {p1_addr, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
-                else if (p2_pend) begin grant <= 3'd2; a = {p2_addr, 3'b000}; rd_total <= 4'd8; is_write <= 1'b0; end
-                else if (p3_pend) begin grant <= 3'd3; a = p3_addr;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else              begin grant <= 3'd4; a = p4_addr;           rd_total <= 4'd1; is_write <= 1'b0; end
+                if      (wr_pend) begin grant <= 3'd7; a = wr_addr_p;           rd_total <= 4'd1; is_write <= 1'b1; end
+                else if (p0_pend) begin grant <= 3'd0; a = p0_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
+                else if (p1_pend) begin grant <= 3'd1; a = {p1_addr_p, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
+                else if (p2_pend) begin grant <= 3'd2; a = {p2_addr_p, 3'b000}; rd_total <= 4'd8; is_write <= 1'b0; end
+                else if (p3_pend) begin grant <= 3'd3; a = p3_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
+                else              begin grant <= 3'd4; a = p4_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
                 xfer_addr <= a;
-                din_r     <= wr_din;
-                be_r      <= wr_be;
+                din_r     <= wr_din_p;
+                be_r      <= wr_be_p;
                 cmd       <= CMD_ACT;
                 SDRAM_BA  <= a[24:23];
                 SDRAM_A   <= a[22:10];

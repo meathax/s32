@@ -5,7 +5,8 @@
 //  3. blend: NBG0 over NBG1 with blendmask + factor -> exact MAME arithmetic
 //  4. sprite shadow pen -> halves the layer beneath
 //  5. synchronous line-RAM launch latency and parity-bank alignment
-//  6. all four color-offset modes select bank 0/1/none correctly
+//  6. raw sprite group (not OR-adjusted effective group) controls blending
+//  7. all four color-offset modes select bank 0/1/none correctly
 //============================================================================
 `timescale 1ns/1ps
 
@@ -34,6 +35,7 @@ s32_palette pal (
 reg         reg_we = 0;
 reg  [5:0]  reg_addr = 0;
 reg  [15:0] reg_wdata = 0;
+reg   [1:0] reg_be = 2'b11;
 reg  [8:0]  disp_x = 0, disp_y = 0;
 reg         lb_we = 0;
 reg  [2:0]  lb_layer = 0;
@@ -56,7 +58,7 @@ s32_linebuf lbuf (
 
 s32_mixer mix (
     .clk(clk_ram), .rst(rst),
-    .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata),
+    .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_be(reg_be),
     .reg_rdata(), .reg_raddr(6'h0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1), .display_en(1'b1),
     .layer_off(6'b000000),
@@ -70,6 +72,12 @@ s32_mixer mix (
 task wreg(input [5:0] a, input [15:0] d);
     @(posedge clk_ram); reg_we <= 1; reg_addr <= a; reg_wdata <= d;
     @(posedge clk_ram); reg_we <= 0;
+endtask
+task wreg_lanes(input [5:0] a, input [15:0] d, input [1:0] lanes);
+    @(negedge clk_ram);
+    reg_we = 1'b1; reg_addr = a; reg_wdata = d; reg_be = lanes;
+    @(negedge clk_ram);
+    reg_we = 1'b0; reg_be = 2'b11;
 endtask
 task wpal(input [14:0] a, input [15:0] d);
     @(posedge clk_sys); cpu_we <= 1; cpu_addr <= a; cpu_wdata <= d;
@@ -110,6 +118,15 @@ initial begin
     repeat (4) @(posedge clk_ram);
     rst = 0;
     repeat (2) @(posedge clk_ram);
+
+    // Mixer register writes must preserve disabled byte lanes.
+    wreg_lanes(6'h3f, 16'h1234, 2'b11);
+    wreg_lanes(6'h3f, 16'h00aa, 2'b01);
+    wreg_lanes(6'h3f, 16'hbb00, 2'b10);
+    if (mix.mreg[6'h3f] !== 16'hbbaa) begin
+        $display("  FAIL mixer byte-enable merge: got %04x want bbaa", mix.mreg[6'h3f]);
+        errors = errors + 1;
+    end
 
     // palette: [0]=black [1]=white [2]=xBGR blue=8 [3]=mid grey
     // [0x21]=red-ish 15
@@ -161,8 +178,9 @@ initial begin
     wlb(3'd1, 1'b1, 9'd20, 14'h2021);
     wlb(3'd1, 1'b0, 9'd22, 14'h2003);
 
-    // A disp_x transition must issue the RAM read first and launch palette
-    // selection exactly one clk_ram later, once the registered pixels exist.
+    // A disp_x transition issues the RAM read first.  The timing-closed mixer
+    // then snapshots candidates and resolves winner/partner/index on three
+    // successive clocks before launching the first palette lookup.
     @(posedge clk_ram); disp_x <= 9'd511;
     repeat (14) @(posedge clk_ram);
     disp_x <= 9'd10;
@@ -172,12 +190,27 @@ initial begin
         $display("  FAIL synchronous RAM launch was not deferred by one clock");
     end
     @(posedge clk_ram); #1;
-    if (mix.launch_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
+    if (mix.winner_pending !== 1'b1 || mix.ph !== 4'hf) begin
         errors = errors + 1;
-        $display("  FAIL delayed launch misaligned: pending=%b ph=%0d addr=%04x",
-                 mix.launch_pending, mix.ph, mix_addr);
+        $display("  FAIL candidate snapshot stage misaligned");
     end
-    repeat (10) @(posedge clk_ram); #1;
+    @(posedge clk_ram); #1;
+    if (mix.second_pending !== 1'b1 || mix.ph !== 4'hf) begin
+        errors = errors + 1;
+        $display("  FAIL winner stage misaligned");
+    end
+    @(posedge clk_ram); #1;
+    if (mix.resolve_pending !== 1'b1 || mix.ph !== 4'hf) begin
+        errors = errors + 1;
+        $display("  FAIL partner stage misaligned");
+    end
+    @(posedge clk_ram); #1;
+    if (mix.resolve_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
+        errors = errors + 1;
+        $display("  FAIL palette launch misaligned: pending=%b ph=%0d addr=%04x",
+                 mix.resolve_pending, mix.ph, mix_addr);
+    end
+    repeat (7) @(posedge clk_ram); #1;
     check(rgb, 24'hF8F8F8, 9'd10);
 
     // --- 1: winner pixel ---
@@ -222,7 +255,22 @@ initial begin
     check(rgb, 24'hF8F8F8, 9'd10);
     spr_pix = 16'hffff;
 
-    // --- 5: line parity selects the matching synchronous RAM bank ---
+    // --- 5: blend mask uses raw sprite group, not effective register group ---
+    // Mode 1: raw group 0 is OR-adjusted to effective group 2 for priority
+    // and palette selection. MAME still tests sprite-blend bit 0. With a
+    // half blend, white NBG0 over blue sprite produces 78/78/98.
+    wreg(6'h26, 16'h0001);             // shift14 mask1, effective OR=2
+    wreg(6'h02, 16'h0007);             // effective sprite group 2 priority 7
+    wreg(6'h27, 16'h0B00);             // blend enable, factor 3
+    wreg(6'h19, 16'h1000);             // NBG0 blends with sprite; code=raw group 0
+    spr_pix = 16'h8002;                // raw group 0, palette[2] blue
+    px(9'd10);
+    check(rgb, 24'h787898, 9'd10);
+    spr_pix = 16'hffff;
+    wreg(6'h27, 16'h0000);
+    wreg(6'h19, 16'h0000);
+
+    // --- 6: line parity selects the matching synchronous RAM bank ---
     disp_y = 9'd0;
     px(9'd20);
     check(rgb, 24'hF8F8F8, 9'd20);     // even line -> bank 0, white
@@ -233,7 +281,7 @@ initial begin
     px(9'd20);
     check(rgb, 24'hF8F8F8, 9'd20);     // switch back without stale bank data
 
-    // --- 6: color-offset mode/bank decode ---
+    // --- 7: color-offset mode/bank decode ---
     // Bank 0 offsets RGB=(+1,+2,+3); bank 1=(-1,-2,-3). Applied to
     // palette[3]=(16,16,16), the distinct outputs are bank0=88/90/98,
     // bank1=78/70/68, and bank2(no offset)=80/80/80.

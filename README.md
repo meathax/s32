@@ -14,22 +14,20 @@ FPGA implementation of this processor family.
 
 ## Current status
 
-🔩 **Simulation bring-up and Quartus integration. Real game ROMs now boot
-and render in simulation; a fitted/timing-clean RBF and MiSTer gameplay are
-still pending.**
+🕹️ **First GA2 hardware gameplay reached. The real World Rev B ROM boots on
+MiSTer and physical Start/movement/attack/jump controls work; video color and
+sprites are still incorrect, and the demo can stutter and visibly freeze.**
 
-The regression now has **25 tiers** (`verif/run_regression.sh`, plus the
+The regression now has **35 tiers** (`verif/run_regression.sh`, plus the
 native Windows ModelSim runner `verif/run_regression.ps1`): RTL lint, V60
-smoke/directed/differential suites,
-full-core boot and soak, ga2 boot path, framebuffer/mixer/sprite tests,
-decimal and bit-string groups, V60 fetch performance, ROM-loader/reset
-gating, EEPROM NVRAM save/upload semantics, the legal 20-byte F1
-effective-address case, and focused RF5C68, palette, line-buffer, tilemap,
-dual-port BRAM, and V25-mailbox timing tests. The V60 audit tier also runs
-the exact encoded ga2 `SKPCUH` search case. A complete native Windows
-ModelSim invocation now passes **25/25 tiers**, including **50/50 V60
-differential seeds**. Its detailed transcript is
-`verif/modelsim-regression.log`.
+smoke/directed/differential suites, full-core boot and soak, ga2 boot path,
+framebuffer/mixer/sprite tests, decimal and bit-string groups, V60 fetch
+performance, ROM-loader/reset gating, EEPROM NVRAM semantics, SDRAM capture,
+integrated sprite/DDR backpressure, interrupt-controller collision/timer
+coverage, and signed audio-route saturation. The latest complete native
+Windows run passes **35/35 tiers** with **10/10 V60 differential seeds**.
+The ga2-only profile also passes an independent Verilator 5.032 structural
+elaboration.
 
 The copyrighted ROMs are kept locally under ignored `roms/`. The image
 builder (`tools/make_sim_images.py`) reads MAME ZIPs directly and has produced
@@ -58,6 +56,22 @@ full SDRAM-layout images for `holo`, `ga2`, and `svf`:
 - **svf:** its million-iteration startup delay now exits around frame 46
   (the real-machine expectation is about frame 45), display/rendering becomes
   active by frame 79, and an 82-frame run completed with a frame-80 PPM dump.
+
+On physical MiSTer hardware, GA2 now reaches attract mode and controllable
+gameplay. Two normal screenshots five seconds apart confirm a displayed-frame
+stall, while PC diagnostic captures continue changing across hundreds of V60
+addresses; the CPU is still running when the picture freezes. The palette
+alias bit mapping has since been corrected, the sprite list is bounded to
+8,192 commands so a bad JUMP/missing END cannot trap rendering forever, and a
+raw framebuffer/DDR diagnostic is included for the next approved hardware
+run. These fixes are locally verified but not yet deployed.
+
+A subsequent RTL audit also corrected the fifth tilemap clip-rectangle index,
+byte-enable handling in VRAM and mixer register shadows, interrupt reset/
+source-ack/timer races, invalid high-byte accesses to low-byte peripherals,
+and full-scale audio-mix polarity wrap. All are covered by directed tests;
+none of these new changes is claimed as hardware-proven until a fresh
+timing-qualified RBF is exercised on MiSTer.
 
 The real-ROM testbench initializes V60 R0–R30 once at simulation startup,
 matching MAME's deterministic device-start state and preventing four-state
@@ -99,8 +113,10 @@ Implemented RTL includes:
   dual-port Cyclone V M10K (zero power-up still reads as erased `0xFFFF`),
   and the focused serial/NVRAM persistence test passes.
 - **Protection** (`rtl/prot/`) — sonic/brival/darkedge/f1lap/dbzvrvs/
-  jleague HLE, arescue DSP HLE, dual-PCB bridge, V25 subsystem with the
-  real opcode-decrypt tables staged for the full-core swap.
+  jleague HLE, arescue DSP HLE, and the dual-PCB bridge.
+- **Real V25 CPU** (`rtl/cpu/v25/`) — vendored GPL-3.0 s80x86 execution core,
+  GA2/Arabian Fight opcode-only decryption, mixed-width ROM/mailbox memories,
+  and an exact 10 MHz fractional clock-enable with stretched bus acknowledgements.
 - **Platform** — SDRAM 5-port controller, DDR3 framebuffer service, ioctl
   ROM loader (including corrected V25 address descramble), ROM-complete reset
   gating, MiSTer `emu` top, generated Cyclone V PLL integration, and **59
@@ -127,12 +143,14 @@ HPS DDR3, which every MiSTer has — it is not an add-on.
 
 ## Building
 
-To produce `SegaS32.rbf` see **[docs/BUILD.md](docs/BUILD.md)** — build in CI
-or locally with Quartus 17.0.2 Standard. The generated PLL now elaborates
-through the Quartus project. The latest **map-only** result estimates 40,434
-of 41,910 ALMs; this is not a fitter utilization or timing result. A
-successful full fit, timing report, release RBF, and hardware deployment have
-not yet been recorded. Audit history and fixes:
+To produce `SegaS32.rbf` see **[docs/BUILD.md](docs/BUILD.md)** — the normal
+path is a local Docker build with Quartus Lite 17.0.2 Build 602, with CI and
+native Quartus available as fallbacks. The generated PLL now elaborates
+through the Quartus project. A pre-R15 candidate fitted at 27,793 / 41,910
+ALMs, used 492 / 553 RAM blocks, met setup/hold timing, and booted GA2 on the
+DE10-Nano. The current palette/watchdog/DDR-diagnostic candidate is rebuilding
+locally and will not be deployed or launched until the user explicitly
+approves another MiSTer run. Audit history and fixes:
 [docs/audit.md](docs/audit.md).
 
 The complete engineering specification lives in

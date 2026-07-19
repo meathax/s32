@@ -17,6 +17,11 @@ module s32_sprite (
     input             vblank,       // start-of-vblank pulse
     output reg        rendering,
 
+    // Observation-only descriptor captured for the first production sprite
+    // ROM request after reset. No renderer state depends on these outputs.
+    output reg [127:0] debug_first_rom_desc,
+    output reg         debug_first_rom_valid,
+
     // sprite control registers (0x500000, byte regs 0..7)
     input             ctl_we,
     input       [2:0] ctl_addr,
@@ -57,13 +62,17 @@ module s32_sprite (
 reg [7:0] ctl [0:7];
 reg [7:0] ctl_latched [0:7];
 reg       frame_toggle;             // for 30Hz auto mode
+reg       render_after_erase;       // combined command: erase, then swap/render
+wire      erase_busy;
 
 always @(*) begin
     case (ctl_raddr)
-        3'd0: ctl_rdata = {6'h3f, 1'b0, disp_buf[0]};
+        3'd0: ctl_rdata = {6'h3f, erase_busy, disp_buf[0]};
         3'd1: ctl_rdata = {6'h3f, 2'd1};              // status: normal
         3'd2: ctl_rdata = {6'h3f, ctl_latched[2][1:0]};
         3'd3: ctl_rdata = {6'h3f, ctl_latched[3][1:0]};
+        3'd4: ctl_rdata = {6'h3f, ctl_latched[4][1:0]};
+        3'd5: ctl_rdata = {6'h3f, ctl_latched[5][1:0]};
         3'd6: ctl_rdata = {6'h3f, 1'b0, ctl_latched[6][0]};
         default: ctl_rdata = 8'hfc;
     endcase
@@ -74,15 +83,24 @@ typedef enum logic [4:0] {
     R_IDLE, R_SWAP, R_ERASE, R_ERASEW,
     R_FETCH, R_FETCHP, R_FETCHW, R_DECODE, R_SCALE,
     R_INDTAB, R_INDTABP, R_INDTABW,
-    R_ROW, R_ROWDATA, R_ROWDATAW, R_PIXEL, R_ROWEND,
+    R_ROW, R_ROWDATA, R_ROWDATAW,
+    R_RAMDATA, R_RAMDATAP, R_RAMDATAW,
+    R_PIXEL, R_EMIT, R_ROWEND,
     R_NEXT, R_DONE
 } rst_t;
 rst_t rs;
+assign erase_busy = (rs == R_ERASE || rs == R_ERASEW);
 
 // latched sprite entry
 reg [15:0] sw [0:7];
 reg [2:0]  swi;
 reg [12:0] list_idx;                 // entry index (16-byte units)
+// The hardware reports an overdraw condition when list processing runs past
+// its budget.  MAME's controller model bounds a frame to the 0x20000-byte
+// sprite RAM divided by one 16-byte command (8192 commands).  Without the
+// same bound, a missing END or a self-referential JUMP traps this FSM forever
+// and leaves the last displayed framebuffer frozen while the V60 keeps going.
+reg [13:0] list_count;
 reg [15:0] clip_l, clip_t, clip_r, clip_b;   // in-clip rect
 reg        clip_en, clipout_en;
 reg [15:0] cout_l, cout_t, cout_r, cout_b;
@@ -111,16 +129,19 @@ wire [19:0] d_addr   = {sw[2][15:12], sw[6]};
 wire [15:0] d_color  = 16'h8000 | (sw[7] & (d_bpp8 ? 16'h7f00 : 16'h7ff0));
 
 // scaling accumulators
-reg [19:0] yacc, ystep;   // src rows per dst row: srch*8 / dsth (10.10)
-reg [19:0] xacc, xstep;
+reg [24:0] yacc, ystep;   // MAME controller model uses 16.16 zoom
+reg [24:0] xacc, xstep;
 reg [9:0]  dy, dx;        // dest iterators
-reg [12:0] sy;            // source row (in pixels)
 reg [12:0] sx;
-reg signed [11:0] x0, y0; // screen origin after alignment
+reg signed [13:0] x0, y0; // wide MAME int-domain origin; no 12-bit wrap
 reg [15:0] indtab [0:15];
 reg [3:0]  indi;
 reg [127:0] pixrow;
 reg [23:4]  rowbase;
+reg [23:0] row_byte_base; // sprite base + source-row pitch, once per row
+reg [15:0] ram_fetch_base;
+reg [2:0]  ram_fetch_i;
+reg [15:0] ram_even;
 
 // simple per-row source fetch cache tag
 reg [23:4] rowtag;
@@ -133,20 +154,32 @@ reg [9:0]  last_word_r;    // last source 32-bit word visited (end codes)
 reg [1:0]  last_wic_r;     // its position within the 128-bit chunk
 reg        word_valid_r;
 
+// Pixel address/position stage.  R_PIXEL verifies the source cache and
+// registers these inexpensive coordinates; R_EMIT performs the wide dynamic
+// pen select, transparency/clip tests, and framebuffer write one clock later.
+// This removes the x-scale accumulator from the full decode/output path.
+reg signed [13:0] pixel_scrx;
+reg        [9:0]  pixel_sx_px;
+reg        [2:0]  pixel_piw, pixel_piw_last;
+reg        [9:0]  pixel_wordi;
+reg        [23:0] pixel_byteaddr;
+
 wire [8:0] hpix = mode_416 ? 9'd416 : 9'd320;
+wire [9:0] d_dstw_center = (d_dstw - 10'd1) >> 1;
+wire [9:0] d_dsth_center = (d_dsth - 10'd1) >> 1;
 
 // A combinational 20-by-10 divide here makes Quartus expand two very large
 // divider networks while elaborating the sprite engine.  Scaling setup is not
 // on the pixel-rate path, so share one restoring divider across Y then X.
-// The explicit 20-bit numerators preserve the original unsigned 10.10 math.
-wire [19:0] scale_ynum = {2'b0, d_srch, 10'b0};
-wire [19:0] scale_xnum = d_bpp8 ? {2'b0, d_srcw, 12'b0}
-                                     : {1'b0, d_srcw, 13'b0};
+// The 25-bit numerators preserve MAME's unsigned 16.16 controller math.
+wire [24:0] scale_ynum = {1'b0, d_srch, 16'b0};
+wire [24:0] scale_xnum = d_bpp8 ? {1'b0, d_srcw, 18'b0}
+                                     : {d_srcw, 19'b0};
 wire        scale_start = (rs == R_DECODE) && (sw[0][15:14] == 2'b00) &&
                           (d_srcw != 0) && (d_srch != 0) &&
                           (d_dstw != 0) && (d_dsth != 0);
 wire        scale_busy, scale_done;
-wire [19:0] scale_yquot, scale_xquot;
+wire [24:0] scale_yquot, scale_xquot;
 
 s32_sprite_scale_div scale_div (
     .clk(clk), .rst(rst), .start(scale_start),
@@ -177,10 +210,14 @@ endfunction
 always @(posedge clk) begin
     if (rst) begin
         rs <= R_IDLE; rendering <= 0; disp_buf <= 0;
+        debug_first_rom_desc <= 128'd0;
+        debug_first_rom_valid <= 1'b0;
+        list_count <= 0;
         srom_req <= 0; fb_er_req <= 0;
         fb_wr_valid <= 0; fb_wr_start <= 0; fb_wr_end <= 0;
         fb_wr_shadow <= 0;
-        frame_toggle <= 0;
+        frame_toggle <= 0; render_after_erase <= 0;
+        jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
         // uninitialized stalls the walker in R_IDLE until the game writes them
         for (int i = 0; i < 8; i++) begin
@@ -199,38 +236,52 @@ always @(posedge clk) begin
 
         case (rs)
         R_IDLE: if (vblank) begin
-            // automatic mode: swap every frame (or every other), manual: on demand
-            logic do_swap;
-            do_swap = 0;
-            if (!ctl[3][1]) begin            // auto
+            logic [1:0] command;
+            // reg0 bit1 erases the currently displayed buffer; bit0 swaps
+            // buffers and renders a new list. In automatic mode the
+            // controller synthesizes command 3 immediately, then every other
+            // frame when 30 Hz mode is selected.
+            command = ctl[0][1:0];
+            if (!ctl[3][1]) begin
+                command = (!ctl[3][0] || !frame_toggle) ? 2'b11 : 2'b00;
                 frame_toggle <= ~frame_toggle;
-                do_swap = ctl[3][0] ? frame_toggle : 1'b1;
             end
-            else do_swap = ctl[0][1];        // manual: pending swap bit
-            if (do_swap) rs <= R_SWAP;
+            ctl[0] <= 0;
+            if (command[1]) begin
+                render_after_erase <= command[0];
+                rendering <= 1'b0;
+                fb_er_y <= 0;
+                rs <= R_ERASE;
+            end
+            else if (command[0]) begin
+                render_after_erase <= 1'b0;
+                rs <= R_SWAP;
+            end
         end
 
         R_SWAP: begin
             disp_buf <= disp_buf + 1'd1;     // swap front/back
             for (int i = 0; i < 8; i++) ctl_latched[i] <= ctl[i];
             ctl[0] <= 0;
-            fb_er_y <= 0;
-            rs <= R_ERASE;
+            render_after_erase <= 1'b0;
+            rendering <= 1'b1;
+            list_idx <= 0;
+            list_count <= 0;
+            jump_xoff <= 0; jump_yoff <= 0;
+            clip_en <= 0; clipout_en <= 0;
+            clip_l <= 0; clip_t <= 0;
+            clip_r <= {7'b0, 9'd511}; clip_b <= 16'd255;
+            rs <= R_FETCH;
         end
         R_ERASE: begin
             fb_er_req <= 1'b1;
-            fb_er_buf <= {1'b0, ~disp_buf[0]};   // erase back buffer (screen A)
+            fb_er_buf <= {1'b0, disp_buf[0]}; // erase currently visible screen A
             rs <= R_ERASEW;
         end
         R_ERASEW: if (fb_er_ack) begin
             fb_er_req <= 0;
             if (fb_er_y == 8'd223) begin
-                rendering <= 1'b1;
-                list_idx <= 0;
-                clip_en <= 0; clipout_en <= 0;
-                clip_l <= 0; clip_t <= 0;
-                clip_r <= {7'b0, 9'd511}; clip_b <= 16'd255;
-                rs <= R_FETCH;
+                rs <= render_after_erase ? R_SWAP : R_DONE;
             end
             else begin
                 fb_er_y <= fb_er_y + 1'd1;
@@ -260,6 +311,14 @@ always @(posedge clk) begin
         end
 
         R_DECODE: begin
+            if (list_count == 14'd8192) begin
+                // Bounded-list overdraw: abandon this frame and return to
+                // R_IDLE so the next vblank can start a fresh sprite pass.
+                rendering <= 1'b0;
+                rs <= R_DONE;
+            end
+            else begin
+            list_count <= list_count + 1'd1;
             case (sw[0][15:14])
             2'b11: begin rendering <= 0; rs <= R_DONE; end       // end of list
             2'b10: begin                                          // jump
@@ -280,8 +339,10 @@ always @(posedge clk) begin
                     clip_l <= {{4{sw[2][11]}}, sw[2][11:0]};
                     clip_r <= {{4{sw[3][11]}}, sw[3][11:0]};
                 end
-                clipout_en <= sw[0][13];
+                // MAME changes clip-out only when bit 13 is set.  A later
+                // clip-in-only command leaves the previous exclusion active.
                 if (sw[0][13]) begin
+                    clipout_en <= 1'b1;
                     cout_t <= {{4{sw[4][11]}}, sw[4][11:0]};
                     cout_b <= {{4{sw[5][11]}}, sw[5][11:0]};
                     cout_l <= {{4{sw[6][11]}}, sw[6][11:0]};
@@ -292,22 +353,36 @@ always @(posedge clk) begin
             end
             default: begin                                        // draw sprite
                 if (d_srcw == 0 || d_srch == 0 || d_dstw == 0 || d_dsth == 0) begin
-                    list_idx <= list_idx + 1'd1;
+                    // Inline indirect tables occupy the following two list
+                    // entries even when the draw itself has zero dimensions.
+                    list_idx <= list_idx + 1'd1
+                              + (d_ind && d_indloc ? 13'd2 : 13'd0);
                     rs <= R_FETCH;
                 end
                 else begin
-                    // alignment: 00=center 10=start 01=end
-                    logic signed [11:0] xx, yy;
-                    xx = $signed(d_xpos) + (sw[0][4] ? $signed(jump_xoff[11:0]) : 12'sd0);
-                    yy = $signed(d_ypos) + (sw[0][5] ? $signed(jump_yoff[11:0]) : 12'sd0);
+                    // Hardware has two center encodings (00 and 11).  Center
+                    // uses (size-1)/2, which matters for even-width sprites.
+                    // 10=start, 01=end.
+                    logic signed [13:0] xx, yy;
+                    // MAME uses int arithmetic after sign-extending both
+                    // 12-bit values.  Explicitly widen before addition so
+                    // large negative offsets cannot wrap back onscreen.
+                    xx = {{2{d_xpos[11]}}, d_xpos}
+                       + (sw[0][4] ? {{2{jump_xoff[11]}}, jump_xoff[11:0]} : 14'sd0);
+                    yy = {{2{d_ypos[11]}}, d_ypos}
+                       + (sw[0][5] ? {{2{jump_yoff[11]}}, jump_yoff[11:0]} : 14'sd0);
                     case (d_ax)
-                        2'b00: xx = xx - $signed({2'b0, d_dstw[9:1]});
-                        2'b01: xx = xx - $signed({1'b0, d_dstw[9:0]}) + 1;
+                        2'b00, 2'b11:
+                            xx = xx - $signed({4'b0000, d_dstw_center});
+                        2'b01:
+                            xx = xx - $signed({4'b0000, d_dstw}) + 14'sd1;
                         default: ;
                     endcase
                     case (d_ay)
-                        2'b00: yy = yy - $signed({2'b0, d_dsth[9:1]});
-                        2'b01: yy = yy - $signed({1'b0, d_dsth[9:0]}) + 1;
+                        2'b00, 2'b11:
+                            yy = yy - $signed({4'b0000, d_dsth_center});
+                        2'b01:
+                            yy = yy - $signed({4'b0000, d_dsth}) + 14'sd1;
                         default: ;
                     endcase
                     x0 <= xx; y0 <= yy;
@@ -321,9 +396,10 @@ always @(posedge clk) begin
                 end
             end
             endcase
+            end
         end
 
-        // The shared divider produces both unsigned 10.10 steps exactly 40
+        // The shared divider produces both unsigned 16.16 steps exactly 50
         // clocks after scale_start.  One following clock transfers the pair
         // atomically before any row or indirect-table work can consume them.
         R_SCALE: if (scale_done) begin
@@ -352,16 +428,21 @@ always @(posedge clk) begin
         // source reads forward (hardware/MAME model) — end codes and word
         // transparency track source order regardless of flip.
         R_ROW: begin
-            logic signed [12:0] scry;
-            scry = d_flipy ? ($signed({y0[11], y0}) + $signed({3'b0, d_dsth})
-                              - 13'sd1 - $signed({3'b0, dy}))
-                           : ($signed({y0[11], y0}) + $signed({3'b0, dy}));
-            sy = {3'b0, yacc[19:10]};
+            logic signed [13:0] scry;
+            logic [12:0] sy_now;
+            scry = d_flipy ? (y0 + $signed({4'b0000, d_dsth})
+                              - 14'sd1 - $signed({4'b0000, dy}))
+                           : (y0 + $signed({4'b0000, dy}));
+            sy_now = {4'b0000, yacc[24:16]};
+            // The row multiply is invariant across every destination pixel.
+            // Register it here so R_PIXEL only performs a small offset add.
+            row_byte_base <= ({4'b0, d_addr} << 2)
+                           + (sy_now * {d_srcw, 2'b00});
             if (dy == d_dsth) begin
                 list_idx <= list_idx + 1'd1 + (d_ind && d_indloc ? 13'd2 : 13'd0);
                 rs <= R_FETCH;
             end
-            else if (scry < 0 || scry > 13'sd223 ||
+            else if (scry < 0 || scry > 14'sd223 ||
                      (clip_en && (scry < $signed(clip_t) ||
                                   scry > $signed(clip_b)))) begin
                 dy <= dy + 1'd1;               // row not visible: skip
@@ -377,7 +458,12 @@ always @(posedge clk) begin
                                              && scry <= $signed(cout_b);
                 fb_wr_start <= 1'b1;
                 fb_wr_buf <= {d_mon, ~disp_buf[0]};
-                fb_wr_y <= scry[7:0];
+                // MAME applies latched controller flip while scanning the
+                // displayed sprite framebuffer.  Mirroring writes into the
+                // back buffer is equivalent and keeps the framebuffer read
+                // interface sequential.
+                fb_wr_y <= ctl_latched[2][1] ? (8'd223 - scry[7:0])
+                                              : scry[7:0];
                 fb_wr_shadow <= d_shad;
                 rs <= R_PIXEL;
             end
@@ -385,6 +471,11 @@ always @(posedge clk) begin
 
         // fetch 128-bit chunk of source row when needed
         R_ROWDATA: begin
+            if (!debug_first_rom_valid) begin
+                debug_first_rom_desc <= {sw[7], sw[6], sw[5], sw[4],
+                                         sw[3], sw[2], sw[1], sw[0]};
+                debug_first_rom_valid <= 1'b1;
+            end
             srom_req <= 1'b1;
             srom_addr <= rowbase;
             rs <= R_ROWDATAW;
@@ -397,30 +488,62 @@ always @(posedge clk) begin
             rs <= R_PIXEL;
         end
 
+        // Pixel-from-sprite-RAM mode shares the list RAM read port while the
+        // draw command is active.  Four pairs of CPU-visible halfwords form a
+        // 16-byte cache line.  Repack each pair to the same byte layout as a
+        // sprite-ROM burst (matching the 315-5386/MAME controller model).
+        R_RAMDATA: begin
+            ram_fetch_i <= 0;
+            slist_addr <= ram_fetch_base;
+            rs <= R_RAMDATAP;
+        end
+        R_RAMDATAP: begin
+            slist_addr <= ram_fetch_base + 16'd1;
+            rs <= R_RAMDATAW;
+        end
+        R_RAMDATAW: begin
+            if (!ram_fetch_i[0]) begin
+                ram_even <= slist_data;
+            end
+            else begin
+                pixrow[{ram_fetch_i[2:1], 5'b00000} +: 32] <=
+                    {ram_even[7:0], ram_even[15:8],
+                     slist_data[7:0], slist_data[15:8]};
+            end
+
+            if (ram_fetch_i == 3'd7) begin
+                rowtag <= rowbase;
+                rowtag_v <= 1;
+                rs <= R_PIXEL;
+            end
+            else begin
+                ram_fetch_i <= ram_fetch_i + 1'd1;
+                slist_addr <= ram_fetch_base + {13'b0, ram_fetch_i} + 16'd2;
+            end
+        end
+
         R_PIXEL: begin
-            logic signed [12:0] scrx;
+            logic signed [13:0] scrx;
             logic [9:0]  sx_px;        // source pixel index within the row
             logic [2:0]  piw, piw_last;// position within the 32-bit word
             logic [9:0]  wordi;        // source 32-bit word index
             logic [23:0] byteaddr;
             logic [23:4] need;
-            logic [3:0]  pen4;
-            logic [7:0]  pen8, pix, trans_now;
-            logic [15:0] outpix, indpix;
-            logic        gate_clip, gate_draw;
 
-            scrx = d_flipx ? ($signed({x0[11], x0}) + $signed({3'b0, d_dstw})
-                              - 13'sd1 - $signed({3'b0, dx}))
-                           : ($signed({x0[11], x0}) + $signed({3'b0, dx}));
-            sx_px = xacc[19:10];
+            scrx = d_flipx ? (x0 + $signed({4'b0000, d_dstw})
+                              - 14'sd1 - $signed({4'b0000, dx}))
+                           : (x0 + $signed({4'b0000, dx}));
+            sx_px = {1'b0, xacc[24:16]};
             piw      = d_bpp8 ? {1'b0, sx_px[1:0]} : sx_px[2:0];
             piw_last = d_bpp8 ? 3'd3 : 3'd7;
             wordi    = d_bpp8 ? {2'b0, sx_px[9:2]} : {3'b0, sx_px[9:3]};
-            // byte address: addr is a 32-bit-word base; row pitch srcw words
-            byteaddr = ({4'b0, d_addr} << 2)
-                     + (sy * {d_srcw, 2'b00})
+            // byte address: row pitch was registered once in R_ROW.
+            byteaddr = row_byte_base
                      + (d_bpp8 ? {14'b0, sx_px} : {15'b0, sx_px[9:1]});
-            need = {d_bank, byteaddr[21:4]};
+            // Sprite RAM is 0x20000 bytes and wraps independently of the ROM
+            // bank.  Both sources use the same 16-byte pixrow cache layout.
+            need = d_fromram ? {7'b0, byteaddr[16:4]}
+                             : {d_bank, byteaddr[21:4]};
 
             if (dx == d_dstw) begin
                 fb_wr_end <= 1'b1;
@@ -443,58 +566,80 @@ always @(posedge clk) begin
             end
             else if (!rowtag_v || need != rowtag) begin
                 rowbase <= need;
-                rs <= R_ROWDATA;
+                if (d_fromram) begin
+                    ram_fetch_base <= {byteaddr[16:4], 3'b000};
+                    rs <= R_RAMDATA;
+                end
+                else begin
+                    rs <= R_ROWDATA;
+                end
             end
             else begin
-                // pen extract: bits 31:28 of the BE word = leftmost pixel;
-                // even source px = high nibble of its byte
-                pen8 = pixrow[{byteaddr[3:0], 3'b000} +: 8];
-                pen4 = sx_px[0] ? pen8[3:0] : pen8[7:4];
-                pix  = d_bpp8 ? pen8 : {4'b0, pen4};
-                // MAME: first/last pixel of each 32-bit word uses transp
-                // (0x0f/0xff, or 0 when opaque); middle pixels use 0
-                trans_now = (piw == 3'd0 || piw == piw_last)
-                          ? (d_opaque ? 8'h00 : (d_bpp8 ? 8'hff : 8'h0f))
-                          : 8'h00;
-                gate_clip = (scrx >= 0) && (scrx < $signed({4'b0, hpix})) &&
-                    (!clip_en || (scrx >= $signed(clip_l) &&
-                                  scrx <= $signed(clip_r))) &&
-                    (!do_clipout_row || !(scrx >= $signed(cout_l) &&
-                                          scrx <= $signed(cout_r)));
-                indpix = d_bpp8 ? (indtab[pen8[7:4]] | {8'b0, pen8[3:0]})
-                                : indtab[pen4];
-                if (d_ind) begin
-                    // indirect: table entry decides transparency via transmask
-                    gate_draw = (pix != trans_now) &&
-                                ((indpix & transmask_r) != transmask_r);
-                    outpix = indpix;
-                end
-                else begin
-                    // direct: pen 0 is never drawn (even opaque)
-                    gate_draw = (pix != trans_now) && (pix != 8'h00);
-                    outpix = d_color | {8'b0, pix};
-                end
-                if (gate_clip && gate_draw) begin
-                    fb_wr_valid <= 1'b1;
-                    fb_wr_pix   <= outpix;   // shadow runs RMW in fb_if
-                    fb_wr_x     <= scrx[8:0];
-                end
-                else fb_wr_valid <= 1'b0;
-                last_word_r  <= wordi;
-                last_wic_r   <= byteaddr[3:2];
-                word_valid_r <= 1'b1;
-                // end code seen directly at the word's final source pixel
-                if (piw == piw_last && !d_opaque &&
-                    (d_bpp8 ? (pen8 == 8'hff) : (pen4 == 4'hf))) begin
-                    fb_wr_end <= 1'b1;
-                    dy <= dy + 1'd1;
-                    yacc <= yacc + ystep;
-                    rs <= R_ROW;
-                end
-                else begin
-                    dx <= dx + 1'd1;
-                    xacc <= xacc + xstep;
-                end
+                pixel_scrx    <= scrx;
+                pixel_sx_px   <= sx_px;
+                pixel_piw     <= piw;
+                pixel_piw_last<= piw_last;
+                pixel_wordi   <= wordi;
+                pixel_byteaddr<= byteaddr;
+                rs <= R_EMIT;
+            end
+        end
+
+        R_EMIT: begin
+            logic [3:0]  pen4;
+            logic [7:0]  pen8, pix, trans_now;
+            logic [15:0] outpix, indpix;
+            logic        gate_clip, gate_draw;
+
+            // Pen extract: bits 31:28 of the BE word = leftmost pixel;
+            // even source px = high nibble of its byte.
+            pen8 = pixrow[{pixel_byteaddr[3:0], 3'b000} +: 8];
+            pen4 = pixel_sx_px[0] ? pen8[3:0] : pen8[7:4];
+            pix  = d_bpp8 ? pen8 : {4'b0, pen4};
+            // MAME: first/last pixel of each 32-bit word uses transp
+            // (0x0f/0xff, or 0 when opaque); middle pixels use 0.
+            trans_now = (pixel_piw == 3'd0 || pixel_piw == pixel_piw_last)
+                      ? (d_opaque ? 8'h00 : (d_bpp8 ? 8'hff : 8'h0f))
+                      : 8'h00;
+            gate_clip = (pixel_scrx >= 0) &&
+                (pixel_scrx < $signed({4'b0, hpix})) &&
+                (!clip_en || (pixel_scrx >= $signed(clip_l) &&
+                              pixel_scrx <= $signed(clip_r))) &&
+                (!do_clipout_row || !(pixel_scrx >= $signed(cout_l) &&
+                                      pixel_scrx <= $signed(cout_r)));
+            indpix = d_bpp8 ? (indtab[pen8[7:4]] | {8'b0, pen8[3:0]})
+                            : indtab[pen4];
+            if (d_ind) begin
+                // Indirect: table entry decides transparency via transmask.
+                gate_draw = (pix != trans_now) &&
+                            ((indpix & transmask_r) != transmask_r);
+                outpix = indpix;
+            end
+            else begin
+                // Direct: pen 0 is never drawn (even opaque).
+                gate_draw = (pix != trans_now) && (pix != 8'h00);
+                outpix = d_color | {8'b0, pix};
+            end
+            fb_wr_valid <= gate_clip && gate_draw;
+            fb_wr_pix   <= outpix;   // shadow runs RMW in fb_if
+            fb_wr_x     <= ctl_latched[2][0]
+                         ? (hpix - 9'd1 - pixel_scrx[8:0])
+                         : pixel_scrx[8:0];
+            last_word_r  <= pixel_wordi;
+            last_wic_r   <= pixel_byteaddr[3:2];
+            word_valid_r <= 1'b1;
+            // End code seen directly at the word's final source pixel.
+            if (pixel_piw == pixel_piw_last && !d_opaque &&
+                (d_bpp8 ? (pen8 == 8'hff) : (pen4 == 4'hf))) begin
+                fb_wr_end <= 1'b1;
+                dy <= dy + 1'd1;
+                yacc <= yacc + ystep;
+                rs <= R_ROW;
+            end
+            else begin
+                dx <= dx + 1'd1;
+                xacc <= xacc + xstep;
+                rs <= R_PIXEL;
             end
         end
 
@@ -509,8 +654,8 @@ endmodule
 //============================================================================
 // Shared unsigned sprite-scale divider.
 //
-// Computes ynum/yden followed by xnum/xden with one 20-bit restoring-divider
-// datapath.  Each quotient takes 20 clocks and truncates toward zero, matching
+// Computes ynum/yden followed by xnum/xden with one 25-bit restoring-divider
+// datapath.  Each quotient takes 25 clocks and truncates toward zero, matching
 // the unsigned SystemVerilog '/' previously used by s32_sprite.  Callers must
 // supply non-zero divisors (zero-sized sprites are rejected before start).
 //============================================================================
@@ -518,29 +663,29 @@ module s32_sprite_scale_div (
     input             clk,
     input             rst,
     input             start,
-    input      [19:0] ynum,
+    input      [24:0] ynum,
     input       [9:0] yden,
-    input      [19:0] xnum,
+    input      [24:0] xnum,
     input       [9:0] xden,
     output reg        busy,
     output reg        done,
-    output reg [19:0] yquot,
-    output reg [19:0] xquot
+    output reg [24:0] yquot,
+    output reg [24:0] xquot
 );
 
-reg [19:0] shift_r;
+reg [24:0] shift_r;
 reg [10:0] rem_r;
 reg  [9:0] den_r;
-reg [19:0] xnum_r;
+reg [24:0] xnum_r;
 reg  [9:0] xden_r;
 reg  [4:0] bit_count;
 reg        axis_x;
 
-wire [10:0] trial_raw = {rem_r[9:0], shift_r[19]};
+wire [10:0] trial_raw = {rem_r[9:0], shift_r[24]};
 wire        trial_ge  = trial_raw >= {1'b0, den_r};
 wire [10:0] trial_next = trial_ge ? trial_raw - {1'b0, den_r}
                                          : trial_raw;
-wire [19:0] shift_next = {shift_r[18:0], trial_ge};
+wire [24:0] shift_next = {shift_r[23:0], trial_ge};
 
 always @(posedge clk) begin
     if (rst) begin
@@ -571,7 +716,7 @@ always @(posedge clk) begin
         else if (busy) begin
             shift_r <= shift_next;
             rem_r <= trial_next;
-            if (bit_count == 5'd19) begin
+            if (bit_count == 5'd24) begin
                 if (!axis_x) begin
                     yquot <= shift_next;
                     shift_r <= xnum_r;

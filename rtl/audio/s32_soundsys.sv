@@ -13,7 +13,8 @@ module s32_soundsys #(
     input             ce_z80,       // 8.054 / 8.0 MHz
     input             ce_fm,        // YM3438 clock enable (chip-internal /6)
     input             ce_pcm,       // 12.5 MHz (RF5C68) / 10 MHz (MultiPCM)
-    input             rst,          // system reset OR io-chip CNT2 z80 reset
+    input             rst,          // board/system reset
+    input             z80_reset,    // I/O-chip CNT2: sound-CPU reset only
     input             is_multi32,
 
     // V60 side of shared RAM (byte-wide, low lanes of 0x700000 window)
@@ -45,18 +46,27 @@ module s32_soundsys #(
 );
 
 // ---------------------------------------------------------------------------
-// Z80 core (T80s, VHDL — mixed-language in Quartus; behavioral stub in sim)
+// Z80 core (T80s, VHDL). Fast all-Verilog core tests use a behavioral
+// stub, while S32_REAL_Z80_SIM enables the same mixed-language CPU used by
+// hardware for dedicated sound-ROM boot and bus-integration regressions.
 // ---------------------------------------------------------------------------
 wire [15:0] z_addr;
 wire [7:0]  z_dout;
+wire [229:0] z_reg_debug;
+wire [1:0]   z_iset_debug;
 reg  [7:0]  z_din;
 wire        z_mreq_n, z_iorq_n, z_rd_n, z_wr_n, z_m1_n;
 reg         z_int_n;
 wire        z_wait_n;
 
-`ifndef SIMULATION
+`ifdef SIMULATION
+`ifndef S32_REAL_Z80_SIM
+`define S32_Z80_STUB
+`endif
+`endif
+`ifndef S32_Z80_STUB
 T80s z80 (
-    .RESET_n (~rst),
+    .RESET_n (~(rst | z80_reset)),
     .CLK     (clk),
     .CEN     (ce_z80),
     .WAIT_n  (z_wait_n),
@@ -71,14 +81,22 @@ T80s z80 (
     .RFSH_n  (),
     .HALT_n  (),
     .BUSAK_n (),
+    .OUT0    (1'b0),
     .A       (z_addr),
     .DI      (z_din),
-    .DO      (z_dout)
+    .DO      (z_dout),
+    .REG     (z_reg_debug),
+    .DIRSet  (1'b0),
+    .DIR     (230'd0),
+    .ISet_out(z_iset_debug)
 );
 `else
 assign z_addr = 16'h0000; assign z_dout = 8'h00;
 assign z_mreq_n = 1'b1; assign z_iorq_n = 1'b1;
 assign z_rd_n = 1'b1; assign z_wr_n = 1'b1; assign z_m1_n = 1'b1;
+`endif
+`ifdef S32_Z80_STUB
+`undef S32_Z80_STUB
 `endif
 
 wire z_mem_rd = ~z_mreq_n & ~z_rd_n;
@@ -98,17 +116,18 @@ wire [23:0] rom_byte_addr = (z_addr < 16'ha000) ? {8'b0, z_addr}
 
 // ROM fetch through SDRAM word port with byte select + 1-deep cache
 reg        rreq;
-reg [23:1] raddr;
+reg [23:1] raddr;               // outstanding SDRAM request address
+reg [23:1] rtag;                // address associated with rdata_w
 reg [15:0] rdata_w;
 reg        rvalid;
 assign zrom_req  = rreq;
 assign zrom_addr = {raddr, 1'b0};
 wire rom_sel = (z_addr < 16'hc000);
-wire rom_hit = rvalid && (raddr == rom_byte_addr[23:1]);
+wire rom_hit = rvalid && (rtag == rom_byte_addr[23:1]);
 assign z_wait_n = ~(rom_sel && (z_mem_rd) && !rom_hit);
 
 always @(posedge clk) begin
-    if (rst) begin rreq <= 0; rvalid <= 0; end
+    if (rst) begin rreq <= 0; rvalid <= 0; rtag <= 0; end
     else begin
         if (rom_sel && z_mem_rd && !rom_hit && !rreq) begin
             rreq  <= 1'b1;
@@ -117,6 +136,7 @@ always @(posedge clk) begin
         if (zrom_ack) begin
             rreq <= 0;
             rdata_w <= zrom_data;
+            rtag <= raddr;
             rvalid <= 1'b1;
         end
     end
@@ -225,8 +245,13 @@ end
 always @(posedge clk) begin
     if (rst) begin
         snd_irq_input <= 0;
-        snd_irq_mask  <= 8'hff;
+        snd_irq_ctl[0] <= 8'h00;
+        snd_irq_ctl[1] <= 8'h00;
+        snd_irq_ctl[2] <= 8'h00;
+        snd_irq_mask  <= 8'h00;
         sound_bank    <= 0;
+        mpcm_bank_lo  <= 3'd0;
+        mpcm_bank_hi  <= 3'd0;
         irq_to_v60    <= 0;
         ym_irq_d      <= 0;
         doorbell_d    <= 0;
@@ -296,17 +321,16 @@ always @(*) begin
 end
 
 // ---------------------------------------------------------------------------
-// output mix (MAME route levels: YM 0.30 each / RF 0.40 ; M32: YM .15 X-routed,
-// MultiPCM .35)
+// Output mixer. Widen before arithmetic and saturate after route scaling so
+// full-scale legal samples cannot wrap around and reverse polarity.
 // ---------------------------------------------------------------------------
-wire signed [17:0] mix_l = is_multi32
-    ? (fm1_r <<< 1) + ({mp_l, 2'b0} + {mp_l, 1'b0})       // approx .15/.35 ratio
-    : (fm1_l + fm2_l) * 2 + (rf_l * 3);
-wire signed [17:0] mix_r = is_multi32
-    ? (fm1_l <<< 1) + ({mp_r, 2'b0} + {mp_r, 1'b0})
-    : (fm1_r + fm2_r) * 2 + (rf_r * 3);
-
-assign audio_l = mix_l[17:2];
-assign audio_r = mix_r[17:2];
+s32_audio_mix output_mixer (
+    .is_multi32(is_multi32),
+    .fm1_l(fm1_l), .fm1_r(fm1_r),
+    .fm2_l(fm2_l), .fm2_r(fm2_r),
+    .rf_l(rf_l),   .rf_r(rf_r),
+    .mp_l(mp_l),   .mp_r(mp_r),
+    .audio_l(audio_l), .audio_r(audio_r)
+);
 
 endmodule

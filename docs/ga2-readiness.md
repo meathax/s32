@@ -2,26 +2,26 @@
 
 ## Current answer
 
-`ga2` has crossed the design-only threshold: the actual `ga2.zip` is consumed
-directly by `tools/make_sim_images.py`, boots in the full-core ROM harness,
-passes the V25 wake-up/protection exchange, enables interrupts, and advances
-through scripted coin/Start input to a recognizable character-select screen.
-The real-ROM run exposed V60, interrupt-controller, V25, and video faults that
-the synthetic tests did not; those faults are fixed and recorded in
-`docs/audit.md` Rounds 10 and 13.
+`ga2` now runs actual code on the DE10-Nano: the World Rev B MRA boots, attract
+mode advances, Start enters gameplay, and physical movement, attack, and jump
+controls work. This closes the design-only boot/input milestone.
 
-That is strong simulation evidence, but it is **not yet an honest claim that
-ga2 runs on MiSTer**. There is no recorded fitted/timing-clean RBF, physical
-boot, sustained gameplay session, or audio/video comparison from a DE10-Nano.
+It is **not yet fully functional**. The deployed pre-R15 image renders
+recognizable scene geometry with severely corrupted colors, does not present
+sprites correctly, stutters during the demo, and can leave the visible frame
+frozen. Diagnostic captures prove the V60 continues executing after that
+visible freeze, so current work is focused on palette, sprite framebuffer/DDR,
+and renderer-progress faults rather than basic ROM boot or controller input.
 
 ## Evidence completed
 
 - The MRA-to-SDRAM builder resolves files from the ZIP by name/CRC, applies
   the real interleaves, emits the board descriptor and every ROM region, and
   applies the V25 address descramble.
-- The real boot reaches ga2's `0xA00100` wake-up string, passes the V25 HLE
-  response, programs the byte-lane-correct interrupt controller, and runs
-  attract logic.
+- The production RTL now executes the genuine encrypted `mcu.bin` through the
+  real s80x86/V25 path. It writes the complete wake string, result table, and
+  stack state at an exact nominal 10 MHz cadence with zero unexpected I/O or
+  unmapped accesses.
 - F1 immediate handling, odd interrupt-controller byte lanes, V25 DPRAM
   window placement, and JMP/JSR/TASI indexed dimensions were corrected from
   observations made on the real program.
@@ -61,10 +61,35 @@ boot, sustained gameplay session, or audio/video comparison from a DE10-Nano.
 - The legal 20-byte F1 memory-to-memory decoder path now has a directed tier;
   five-bit offsets preserve a second double displacement at fetch-buffer byte
   16 and advance to the correct next PC.
-- The runner now contains **25 tiers**. The native Windows ModelSim runner
-  (`verif/run_regression.ps1`) passes the complete **25/25-tier** matrix,
-  including **50/50 V60 differential seeds**. The detailed transcript is
-  `verif/modelsim-regression.log`.
+- The runner now contains **35 tiers**. The latest complete native Windows
+  run passes **35/35 tiers** with **10/10** V60 differential seeds, including
+  the ga2 path, integrated sprite/DDR backpressure, interrupt-controller
+  reset/source-ack/timer cases, signed audio-route saturation, MultiPCM,
+  V60 rotate/bus semantics, map decode, and genuine V25 firmware. The ga2-only
+  full core also passes an independent Verilator 5.032 structural elaboration.
+- The audit corrected the fifth tilemap clip rectangle (which had aliased the
+  third), byte-enable handling in VRAM and mixer register shadows, simultaneous
+  interrupt source/ack retention, timer cancel/period behavior, low-byte-only
+  peripheral lane gating, and full-scale audio wraparound.
+- MAME verifies `ga2`, `arabfgt`, `spidman`, `holo`, and `svf`.
+  Eight-frame real-ROM probes built from the same current universal RTL all
+  complete without simulator errors. GA2 reaches video register/list setup by
+  frame 7; Arabian Fight reaches VRAM, palette, mixer, and sprite-list writes
+  by frames 2–5; Spider-Man remains in an early I/O polling path through frame
+  7 and is retained as a non-V25 diagnostic case.
+- Physical MiSTer testing reaches both attract mode and controllable gameplay.
+  Start, movement, attack, and jump have all been confirmed on the real
+  controller path.
+- Identical normal screenshots five seconds apart confirm the displayed-frame
+  stall, while PC diagnostic frames continue to change across hundreds of V60
+  addresses. The CPU therefore does not hard-halt when the picture freezes.
+- Palette alias bit routing is corrected and covered by independent one-hot
+  R/G/B vectors. A bounded 8,192-command sprite-list watchdog prevents a bad
+  JUMP/missing END from trapping rendering forever.
+- `tb_sprite_fb.sv` connects the real sprite renderer and framebuffer module
+  to a backpressured MiSTer-style DDR model for three alternating-buffer
+  frames. The exact stored pixels pass with zero simulation errors/warnings.
+  The integrated test remains in the complete passing 29-tier matrix.
 
 ## Hardware-integration work completed
 
@@ -90,28 +115,52 @@ boot, sustained gameplay session, or audio/video comparison from a DE10-Nano.
   ga2-unreachable ADC, trackball, generic/Burning Rival protection, and Air
   Rescue DSP logic. Universal builds retain those blocks.
 - Quartus Analysis & Synthesis completes for that profile. Its latest
-  **map-only** estimate is 40,434 / 41,910 ALMs, with 63,251 combinational
-  ALUTs, 23,981 dedicated registers, 3,993,510 block-memory bits, 52 DSP
+  **map-only** estimate is 26,851 / 41,910 ALMs, with 41,440 combinational
+  ALUTs, 23,171 dedicated registers, 3,934,136 block-memory bits, 42 DSP
   blocks, and 3 PLLs. These are not fitted resource or timing results.
+- Before the V60 write-port refactor, seeds 5–7 all completed placement but
+  failed routing with 70–77% peak interconnect use. Consolidating scattered
+  dynamic register writes into two masked write ports reduced the map estimate
+  by 13,227 ALMs while preserving two writes per CPU cycle and byte/bit update
+  semantics. A later pre-R15 candidate fitted and met timing as recorded
+  below; the current palette/watchdog/diagnostic candidate is being rebuilt.
+- Both native Windows Quartus 17.0.0 and the Quartus Lite 17.0.2 Docker path
+  are available locally. The current native build selects 16 of 24 processors.
+  One placement attempt ended unexpectedly while ModelSim regression was
+  consuming memory concurrently; the rerun is isolated from heavy simulation.
+- MiSTer hardware preflight and first gameplay are complete: the World Rev B
+  MRA is staged at
+  `/media/fat/_Arcade/Golden Axe The Revenge of Death Adder (World, Rev B).mra`
+  with SHA-256 `558322a51018e4f889b38222dd87260c721185bfc782c86b95ddf22ca9812000`;
+  `ga2.zip` is staged under `/media/fat/games/mame/` with SHA-256
+  `2befa4aa4f5927480595f28cfb5e0daf52003d92db69e43e9091358e2ba45cf3`.
+- A pre-R15 RBF fitted at 27,793 / 41,910 ALMs with 492 / 553 RAM blocks and
+  positive setup/hold slack, then loaded the real game. It is useful hardware
+  evidence but is not the current palette/watchdog candidate and is not a
+  release-quality gameplay result.
 
 ## Remaining ga2 release gates
 
-1. Complete Quartus fitting and static timing analysis. Replace the map-only
-   estimate with fitted ALM/M10K/DSP use and require non-negative slack; no
-   successful fitter or timing result is claimed yet.
-2. Install the resulting RBF/MRA on a DE10-Nano and verify ROM loading,
-   attract mode, controls, coin/start, and several sustained gameplay scenes.
+1. Complete and qualify the current palette/watchdog/DDR-diagnostic Quartus
+   build. Do not deploy or launch it until the user explicitly approves the
+   next MiSTer run.
+2. On that approved run, verify corrected palette output and use the raw
+   Sprite FB/DDR mode to isolate any remaining missing-sprite or stall point.
 3. Validate real DDR3 framebuffer behavior under sprite-heavy scenes and
    compare captured frames against MAME, including zoom, clipping, blending,
    shadow, and palette effects.
-4. Validate the Z80/YM3438/RF5C68 audio path on hardware. The real-ROM harness
-   does not provide equivalent external-audio timing coverage.
-5. Confirm EEPROM changes survive an actual MiSTer save/reload cycle.
+4. Run several sustained attract/gameplay scenes without stutter or visible
+   freeze and verify coin/start plus all already-working controls remain stable.
+5. Validate the Z80/YM3438/RF5C68 audio path on hardware. Signed route
+   arithmetic and saturation are now directed-test clean, but the real-ROM
+   harness does not provide equivalent external-audio timing coverage.
+6. Confirm EEPROM changes survive an actual MiSTer save/reload cycle.
 
 ## Protection posture
 
-The present V25 HLE implements the ga2 wake-up string and result-table
-behavior used by MAME for years before the MCU dump was available. It is a
-practical path to boot and play, while a cycle-executed V25 remains a future
-authenticity improvement rather than a prerequisite for first hardware
-bring-up.
+The production source now selects a real cycle-executed 80186-compatible core
+for V25 games. Opcode bytes alone pass through the MAME-derived GA2/Arabian
+Fight translation tables; operands remain raw. The genuine GA2 firmware passes
+strict wake-string, table, stack, address-map, and 10 MHz cadence checks. The
+older HLE remains useful only as a legacy unit-test/reference path. A new
+Quartus fit and MiSTer run are still required to qualify the real CPU in hardware.

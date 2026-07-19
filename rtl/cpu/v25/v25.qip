@@ -1,0 +1,10 @@
+# Real NEC V25-compatible protection subsystem for ga2 / arabfgt.
+# Standalone verification does not consume QIP files and may continue to
+# compile the legacy HLE unless it explicitly defines S32_REAL_V25.
+set V25_QIP_DIR $::quartus(qip_path)
+
+set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+set_global_assignment -name QIP_FILE [file join $V25_QIP_DIR s80x86 s80x86_files.qip]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $V25_QIP_DIR s32_v25_cpu.sv]
+
+unset V25_QIP_DIR

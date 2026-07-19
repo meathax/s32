@@ -70,7 +70,7 @@ wire [1:0] tilebank = {ext_tilebank[0], r1ff00[10]};
 
 // rendering FSM: iterate layers, per layer iterate x
 typedef enum logic [4:0] {
-    T_IDLE, T_LSTART, T_ROWTAB1, T_ROWTAB2,
+    T_IDLE, T_LSTART, T_SCALE, T_SCALE_APPLY, T_ROWTAB1, T_ROWTAB2, T_ROWSEL1, T_ROWSEL2,
     T_NAME, T_NAMEW, T_NAMER, T_PIX, T_PIXW, T_EMIT,
     T_TXT_NAME, T_TXT_NAMEW, T_TXT_NAMER,
     T_TXT_PIX, T_TXT_PIXW, T_TXT_PIXR, T_TXT_EMIT,
@@ -89,9 +89,31 @@ reg [15:0] rowscroll_add;
 reg [8:0]  rowselect_y;
 reg        use_rowsel;
 
+// NBG0/1 use the same exact 0x80000/zoom step calculation on both axes.
+// A shared restoring divider keeps that work off the 96.6 MHz render path.
+reg         scale_start;
+wire        scale_busy, scale_done;
+reg  [10:0] scale_zx, scale_zy;
+wire [19:0] scale_xquot, scale_yquot;
+reg signed [10:0] scale_xbase;
+reg signed [10:0] scale_ybase;
+reg         [8:0] scale_yorigin;
+reg signed [31:0] scale_yprod, scale_xprod;
+
+s32_tilemap_scale_div scale_div (
+    .clk(clk), .rst(rst), .start(scale_start),
+    .yden(scale_zy), .xden(scale_zx),
+    .busy(scale_busy), .done(scale_done),
+    .yquot(scale_yquot), .xquot(scale_xquot)
+);
+
 wire [8:0] hpix = mode_416 ? 9'd416 : 9'd320;
-wire [10:0] zoom_losum = {1'b0, xacc[9:0]} + {1'b0, xstep[9:0]};
-wire [9:0]  nsx_zoom = scrollx[lay][9:0] + xacc[19:10] + xstep[19:10] + {9'b0, zoom_losum[10]};
+wire tile_flipx = r1ff00[9] ^ ((lay < 4) ? r1ff00[lay] : 1'b0);
+wire tile_flipy = r1ff00[9] ^ (((lay < 4) ? r1ff00[lay] : 1'b0) & ~r1ff00[8]);
+wire [19:0] nacc_zoom = tile_flipx ? (xacc - xstep) : (xacc + xstep);
+wire [9:0] nsx_zoom = scrollx[lay][9:0] + nacc_zoom[19:10];
+wire [8:0] text_srcx = r1ff00[9] ? (9'd511 - x[8:0]) : x[8:0];
+wire [7:0] text_srcy = r1ff00[9] ? (8'd255 - line[7:0]) : line[7:0];
 
 
 // page select for current layer/srcx/srcy: 2x2 pages of 512x256
@@ -112,11 +134,15 @@ endfunction
 function automatic clip_vis(input [8:0] xx, input [8:0] yy,
                             input en, input outp, input [4:0] msk);
     logic [4:0] hit;
+    logic [8:0] test_x;
+    logic [8:0] test_y;
     integer ci;
+    test_x = r1ff00[9] ? (hpix - 1'b1 - xx) : xx;
+    test_y = r1ff00[9] ? (9'd223 - yy) : yy;
     for (ci = 0; ci < 5; ci = ci + 1)
         hit[ci] = msk[ci] &&
-            xx >= clips[4*ci][8:0]   && yy >= {1'b0, clips[4*ci+1][7:0]} &&
-            xx <= clips[4*ci+2][8:0] && yy <= {1'b0, clips[4*ci+3][7:0]};
+            test_x >= clips[4*ci][8:0]   && test_y >= {1'b0, clips[4*ci+1][7:0]} &&
+            test_x <= clips[4*ci+2][8:0] && test_y <= {1'b0, clips[4*ci+3][7:0]};
     clip_vis = !en || ((|hit) ^ outp);
 endfunction
 
@@ -128,9 +154,11 @@ wire [15:0] text_bank_base = {r1ff5c[2:0], 13'b0};
 always @(posedge clk) begin
     if (rst) begin
         tst <= T_IDLE; line_done <= 0; lb_we <= 0; tile_req <= 0;
+        scale_start <= 0;
     end
     else begin
         lb_we <= 1'b0;
+        scale_start <= 1'b0;
 
         case (tst)
         T_IDLE: if (line_start) begin
@@ -151,39 +179,50 @@ always @(posedge clk) begin
                     tst <= T_LSTART;
                     if (lay == 3) begin x <= 0; end
                 end
+                else if (lay < 2) begin
+                    logic [10:0] zy, zx;
+                    logic fx, fy;
+                    logic signed [10:0] xdest;
+                    logic signed [10:0] ydest;
+                    fx = r1ff00[9] ^ r1ff00[lay];
+                    fy = r1ff00[9] ^ (r1ff00[lay] & ~r1ff00[8]);
+                    zy = (zoomy[lay][10:0] < 11'h080) ? 11'h080 : zoomy[lay][10:0];
+                    zx = (zoomx[lay][10:0] < 11'h080) ? 11'h080 : zoomx[lay][10:0];
+                    scale_zx <= zx;
+                    // MAME uses zoom X for both axes unless independent Y
+                    // zoom is selected by $1FF00 bit 14.
+                    scale_zy <= r1ff00[14] ? zy : zx;
+                    xdest = fx ? $signed({2'b00, hpix - 1'b1}) : 11'sd0;
+                    ydest = fy ? $signed(11'd223 - {2'b00, line}) : $signed({2'b00, line});
+                    scale_xbase <= xdest - $signed(offsx[lay][9:0]);
+                    scale_ybase <= ydest - $signed(offsy[lay][9:0]);
+                    scale_yorigin <= scrolly[lay][8:0];
+                    scale_start <= 1'b1;
+                    x <= 0;
+                    use_rowsel <= 0;
+                    rowscroll_add <= 0;
+                    tst <= T_SCALE;
+                end
                 else begin
                     // compute source y for this layer
                     logic [8:0] sy;
-                    sy = scrolly[lay][8:0] + line;
-                    if (lay < 2) begin
-                        // V-2 (MAME update_tilemap_zoom): step = 0x200/zoom
-                        // (zoom floored at 0x80); src = scroll - center +
-                        // (screen+center)*step. 10.10 fixed point.
-                        logic signed [31:0] d;
-                        logic [10:0] zy, zx;
-                        logic [19:0] stepy;
-                        zy = (zoomy[lay][10:0] < 11'h080) ? 11'h080 : zoomy[lay][10:0];
-                        zx = (zoomx[lay][10:0] < 11'h080) ? 11'h080 : zoomx[lay][10:0];
-                        stepy = (20'h200 << 10) / {9'b0, zy};
-                        d = ($signed({23'b0, line}) + $signed({{23{offsy[lay][8]}}, offsy[lay][8:0]}))
-                            * $signed({12'b0, stepy});
-                        sy = scrolly[lay][8:0] - offsy[lay][8:0] + d[18:10];
-                        xacc  <= ($signed({{22{offsx[lay][9]}}, offsx[lay][9:0]}) * $signed({12'b0, (20'h200 << 10) / {9'b0, zx}}));
-                        xstep <= (20'h200 << 10) / {9'b0, zx};
-                    end
-                    else begin
-                        xacc  <= 0;
-                        xstep <= 20'h00200 << 10; // unused for NBG2/3
-                    end
+                    logic [8:0] ylookup;
+                    ylookup = tile_flipy ? (9'd223 - line) : line;
+                    sy = scrolly[lay][8:0] + ylookup;
+                    xacc  <= 0;
+                    xstep <= 20'h00200 << 10; // unused for NBG2/3
                     srcy <= sy;
                     x <= 0;
                     use_rowsel <= 0;
                     rowscroll_add <= 0;
                     // rowscroll/rowselect fetch for NBG2/3
-                    if (lay >= 2 && (r1ff04[lay-2] | r1ff04[lay])) begin
-                        // rowscroll entry: table_base + 0x100*(lay-2) + line
+                    if (!r1ff04[lay+2] && (r1ff04[lay-2] | r1ff04[lay])) begin
+                        // Rowselect is a distinct table at +0x200. If row
+                        // scroll is off, fetch rowselect directly here.
                         vram_addr <= {r1ff04[15:10], 10'b0} +
-                                     (lay == 3 ? 16'h0100 : 16'h0000) + {7'b0, line};
+                                     (lay == 3 ? 16'h0100 : 16'h0000) +
+                                     (r1ff04[lay-2] ? 16'h0000 : 16'h0200) +
+                                     {7'b0, ylookup};
                         tst <= T_ROWTAB1;
                     end
                     else tst <= T_NAME;
@@ -201,20 +240,51 @@ always @(posedge clk) begin
             end
         end
 
+        // V-2 (MAME update_tilemap_zoom): step = 0x200/zoom, with zoom
+        // floored at 0x80.  The divider supplies exact unsigned 10.10 steps.
+        // Register the two DSP products before the final coordinate add so
+        // neither operation spans the full 96 MHz cycle.
+        T_SCALE: if (scale_done) begin
+            scale_yprod <= $signed({{21{scale_ybase[10]}}, scale_ybase}) *
+                           $signed({12'b0, scale_yquot});
+            scale_xprod <= $signed({{21{scale_xbase[10]}}, scale_xbase}) *
+                           $signed({12'b0, scale_xquot});
+            xstep <= scale_xquot;
+            tst <= T_SCALE_APPLY;
+        end
+        T_SCALE_APPLY: begin
+            srcy <= scale_yorigin + scale_yprod[18:10];
+            xacc <= scale_xprod[19:0];
+            tst <= T_NAME;
+        end
+
         // rowscroll value
         T_ROWTAB1: begin
             // wait 1 clk for vram read
             tst <= T_ROWTAB2;
         end
         T_ROWTAB2: begin
-            if (r1ff04[lay-2]) rowscroll_add <= vram_rdata & 16'h3ff;
-            if (r1ff04[lay]) begin
-                // rowselect table at +0x200
-                // (second fetch folded: approximate single-fetch, rowselect
-                //  fetched next state via same path)
-                use_rowsel <= 1'b1;
-                rowselect_y <= vram_rdata[8:0]; // NOTE: refined during co-sim
+            if (r1ff04[lay-2] && !r1ff04[lay+2])
+                rowscroll_add <= vram_rdata & 16'h3ff;
+            if (r1ff04[lay] && !r1ff04[lay+2]) begin
+                if (r1ff04[lay-2]) begin
+                    vram_addr <= {r1ff04[15:10], 10'b0} + 16'h0200 +
+                                 (lay == 3 ? 16'h0100 : 16'h0000) +
+                                 {7'b0, (tile_flipy ? (9'd223-line) : line)};
+                    tst <= T_ROWSEL1;
+                end
+                else begin
+                    use_rowsel <= 1'b1;
+                    rowselect_y <= vram_rdata[8:0];
+                    tst <= T_NAME;
+                end
             end
+            else tst <= T_NAME;
+        end
+        T_ROWSEL1: tst <= T_ROWSEL2;
+        T_ROWSEL2: begin
+                use_rowsel <= 1'b1;
+                rowselect_y <= vram_rdata[8:0];
             tst <= T_NAME;
         end
 
@@ -222,7 +292,9 @@ always @(posedge clk) begin
         T_NAME: begin
             logic [9:0] sx;
             if (lay < 2) sx = scrollx[lay][9:0] + xacc[19:10];
-            else         sx = scrollx[lay][9:0] + rowscroll_add[9:0] + x;
+            else         sx = scrollx[lay][9:0] - {1'b0, offsx[lay][8:0]} +
+                              rowscroll_add[9:0] +
+                              (tile_flipx ? (hpix - 1'b1 - x[8:0]) : x);
             srcx <= sx;
             vram_addr <= name_addr(page_of(lay, sx, use_rowsel ? (scrolly[lay][8:0]+rowselect_y) : srcy), sx,
                                    use_rowsel ? (scrolly[lay][8:0]+rowselect_y) : srcy);
@@ -267,7 +339,7 @@ always @(posedge clk) begin
             // its byte (MSB-first packing), odd = low half.
             begin
                 logic [3:0] nib;
-                nib = {col[3], col[1], col[2], ~col[0]};
+                nib = {col[3], col[1], col[2], col[0]};
                 pen = row[{nib[3:1], 3'b000} + (nib[0] ? 3'd0 : 3'd4) +: 4];
             end
             lb_we    <= 1'b1;
@@ -288,21 +360,22 @@ always @(posedge clk) begin
             else begin
                 x <= x + 1'd1;
                 if (lay < 2) begin
-                    xacc <= xacc + xstep;
+                    xacc <= nacc_zoom;
                     // refetch name/pixels when tile col crosses
                     if (nsx_zoom[9:4] != srcx[9:4]) tst <= T_NAME;
                     else srcx <= nsx_zoom;
                 end
                 else begin
-                    if (srcx[3:0] == 4'hf) tst <= T_NAME;
-                    else srcx <= srcx + 1'd1;
+                    if ((!tile_flipx && srcx[3:0] == 4'hf) ||
+                        ( tile_flipx && srcx[3:0] == 4'h0)) tst <= T_NAME;
+                    else srcx <= tile_flipx ? (srcx - 1'd1) : (srcx + 1'd1);
                 end
             end
         end
 
         // ---- text layer: 8x8 4bpp chars from VRAM ----
         T_TXT_NAME: begin
-            vram_addr <= text_page_base + {5'b0, line[7:3], x[8:3]};
+            vram_addr <= text_page_base + {5'b0, text_srcy[7:3], text_srcx[8:3]};
             tst <= T_TXT_NAMEW;
         end
         T_TXT_NAMEW: begin
@@ -314,7 +387,7 @@ always @(posedge clk) begin
         end
         T_TXT_PIX: begin
             // char gfx: 8x8x4 = 16 words; word = 4 pixels (packed msb)
-            vram_addr <= text_bank_base + {name[8:0], 4'b0} + {line[2:0], x[2]} ;
+            vram_addr <= text_bank_base + {name[8:0], 4'b0} + {text_srcy[2:0], text_srcx[2]} ;
             tst <= T_TXT_PIXW;
         end
         T_TXT_PIXW: begin
@@ -327,7 +400,7 @@ always @(posedge clk) begin
         T_TXT_EMIT: begin
             logic [1:0] col;
             logic [3:0] pen;
-            col = x[1:0];
+            col = text_srcx[1:0];
             case (col)
                 2'd0: pen = row[7:4];
                 2'd1: pen = row[3:0];
@@ -393,6 +466,87 @@ always @(posedge clk) begin
         end
         default: tst <= T_IDLE;
         endcase
+    end
+end
+
+endmodule
+
+//============================================================================
+// Shared unsigned tilemap zoom divider.
+//
+// Computes 0x80000/yden followed by 0x80000/xden with one 20-bit restoring
+// datapath.  Each quotient takes 20 clocks and truncates toward zero, exactly
+// matching the unsigned SystemVerilog division it replaces.
+//============================================================================
+module s32_tilemap_scale_div (
+    input             clk,
+    input             rst,
+    input             start,
+    input      [10:0] yden,
+    input      [10:0] xden,
+    output reg        busy,
+    output reg        done,
+    output reg [19:0] yquot,
+    output reg [19:0] xquot
+);
+
+reg [19:0] shift_r;
+reg [11:0] rem_r;
+reg [10:0] den_r;
+reg [10:0] xden_r;
+reg  [4:0] bit_count;
+reg        axis_x;
+
+wire [11:0] trial_raw = {rem_r[10:0], shift_r[19]};
+wire        trial_ge = trial_raw >= {1'b0, den_r};
+wire [11:0] trial_next = trial_ge ? trial_raw - {1'b0, den_r}
+                                         : trial_raw;
+wire [19:0] shift_next = {shift_r[18:0], trial_ge};
+
+always @(posedge clk) begin
+    if (rst) begin
+        shift_r <= 0;
+        rem_r <= 0;
+        den_r <= 0;
+        xden_r <= 0;
+        bit_count <= 0;
+        axis_x <= 0;
+        busy <= 0;
+        done <= 0;
+        yquot <= 0;
+        xquot <= 0;
+    end
+    else begin
+        done <= 1'b0;
+        if (start && !busy) begin
+            shift_r <= 20'h80000;
+            rem_r <= 0;
+            den_r <= yden;
+            xden_r <= xden;
+            bit_count <= 0;
+            axis_x <= 1'b0;
+            busy <= 1'b1;
+        end
+        else if (busy) begin
+            shift_r <= shift_next;
+            rem_r <= trial_next;
+            if (bit_count == 5'd19) begin
+                if (!axis_x) begin
+                    yquot <= shift_next;
+                    shift_r <= 20'h80000;
+                    rem_r <= 0;
+                    den_r <= xden_r;
+                    bit_count <= 0;
+                    axis_x <= 1'b1;
+                end
+                else begin
+                    xquot <= shift_next;
+                    busy <= 1'b0;
+                    done <= 1'b1;
+                end
+            end
+            else bit_count <= bit_count + 1'd1;
+        end
     end
 end
 

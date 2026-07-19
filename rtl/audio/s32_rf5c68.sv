@@ -37,30 +37,43 @@ reg        enable;
 reg [2:0]  cbank;
 reg [3:0]  wbank;
 
-// Wave RAM is deliberately described as one read/write port plus one read-only
-// port.  Both reads are registered so Quartus can map this 64Kx8 array to true
-// dual-port M10K memory rather than implementing it in ALMs.
-(* ramstyle = "M10K, no_rw_check" *) reg [7:0] wram [0:65535];
+// The RF5C68 needs exactly two physical RAM ports: Z80 read/write and voice
+// read-only.  Instantiate the shared wrapper explicitly because Quartus 17
+// expands an equivalent multi-read unpacked array into registers.  Bytes remain
+// inverted so zero-initialized M10Ks represent the device's logical 0xff
+// power-up state.
 wire [15:0] zram_addr = {wbank, addr[11:0]};
 wire        zram_we   = cs && we && addr[12];
-reg  [7:0]  zram_q;
+wire [7:0]  zram_q_stored;
+wire [7:0]  voice_ram_q_stored;
+wire [7:0]  zram_q = ~zram_q_stored;
+wire [7:0]  voice_ram_q = ~voice_ram_q_stored;
 reg         zram_sel_q;
 reg [15:0]  voice_ram_addr;
-reg  [7:0]  voice_ram_q;
 
-always @(posedge clk) begin
-    if (zram_we) wram[zram_addr] <= wdata;
-    zram_q     <= wram[zram_addr];
+s32_byte_dpram #(
+    .ADDR_WIDTH(16),
+    .NUM_WORDS(65536),
+    .POWER_UP_UNINITIALIZED("FALSE")
+) wave_ram (
+    .clock(clk),
+    .address_a(zram_addr), .data_a(~wdata),
+    .rden_a(1'b1), .wren_a(zram_we), .q_a(zram_q_stored),
+    .address_b(voice_ram_addr), .data_b(8'h00),
+    .rden_b(1'b1), .wren_b(1'b0), .q_b(voice_ram_q_stored)
+);
+
+always @(posedge clk)
     zram_sel_q <= addr[12];
-    voice_ram_q <= wram[voice_ram_addr];
-end
 
 always @* rdata = zram_sel_q ? zram_q : 8'hff;
 
 // Fs divider: one channel is launched per 48 CE ticks (8 ch x 48 = 384).
 reg [5:0]  div48;
 reg [2:0]  ch;
-reg signed [15:0] acc_l, acc_r;
+// Eight full-scale voices exceed 16-bit range; retain the complete mix until
+// the RF5C68's final 10-bit quantization and signed-16 clipping stage.
+reg signed [18:0] acc_l, acc_r;
 
 // A synchronous RAM read takes one clock after its address is registered.  The
 // explicit wait/use states also provide the extra loop-target fetch required
@@ -70,6 +83,7 @@ localparam [2:0] VS_FETCH_WAIT = 3'd1;
 localparam [2:0] VS_FETCH_USE  = 3'd2;
 localparam [2:0] VS_LOOP_WAIT  = 3'd3;
 localparam [2:0] VS_LOOP_USE   = 3'd4;
+localparam [2:0] VS_ACCUM      = 3'd5;
 reg [2:0] voice_state;
 reg [2:0] voice_ch;
 reg       voice_last;
@@ -77,6 +91,9 @@ reg [7:0] voice_env;
 reg [7:0] voice_pan;
 reg [15:0] voice_fd;
 reg [15:0] voice_ls;
+reg signed [18:0] voice_delta_l_q, voice_delta_r_q;
+reg [26:0] voice_next_addr;
+reg        voice_advance;
 
 // Keep the multiply widths explicit.  sample[7]=1 is positive; sample[7]=0
 // is negative, matching MAME's RF5C68 sign/magnitude convention.
@@ -85,12 +102,25 @@ wire [18:0] voice_prod_l  = voice_mag_env * voice_pan[3:0];
 wire [18:0] voice_prod_r  = voice_mag_env * voice_pan[7:4];
 wire [13:0] voice_mag_l   = voice_prod_l[18:5];
 wire [13:0] voice_mag_r   = voice_prod_r[18:5];
-wire signed [15:0] voice_delta_l = voice_ram_q[7]
-                                       ? $signed({2'b00, voice_mag_l})
-                                       : -$signed({2'b00, voice_mag_l});
-wire signed [15:0] voice_delta_r = voice_ram_q[7]
-                                       ? $signed({2'b00, voice_mag_r})
-                                       : -$signed({2'b00, voice_mag_r});
+wire signed [18:0] voice_delta_l = voice_ram_q[7]
+                                       ? $signed({5'b00000, voice_mag_l})
+                                       : -$signed({5'b00000, voice_mag_l});
+wire signed [18:0] voice_delta_r = voice_ram_q[7]
+                                       ? $signed({5'b00000, voice_mag_r})
+                                       : -$signed({5'b00000, voice_mag_r});
+
+// MAME models the RF5C68 as a 10-bit DAC: clear the low six bits of an
+// in-range mix, then clamp excursions to signed 16-bit full scale.
+function automatic signed [15:0] quantize_clip(input signed [18:0] mix);
+    begin
+        if (mix > 19'sd32767)
+            quantize_clip = 16'sh7fff;
+        else if (mix < -19'sd32768)
+            quantize_clip = 16'sh8000;
+        else
+            quantize_clip = {mix[15:6], 6'b000000};
+    end
+endfunction
 
 integer i;
 always @(posedge clk) begin
@@ -101,8 +131,8 @@ always @(posedge clk) begin
         chan_off_m  <= 8'hff;
         div48       <= 6'd0;
         ch          <= 3'd0;
-        acc_l       <= 16'sd0;
-        acc_r       <= 16'sd0;
+        acc_l       <= 19'sd0;
+        acc_r       <= 19'sd0;
         out_l       <= 16'sd0;
         out_r       <= 16'sd0;
         voice_state <= VS_IDLE;
@@ -113,6 +143,10 @@ always @(posedge clk) begin
         voice_pan   <= 8'd0;
         voice_fd    <= 16'd0;
         voice_ls    <= 16'd0;
+        voice_delta_l_q <= 19'sd0;
+        voice_delta_r_q <= 19'sd0;
+        voice_next_addr <= 27'd0;
+        voice_advance   <= 1'b0;
         for (i = 0; i < 8; i = i + 1) begin
             env[i]   <= 8'd0;
             pan[i]   <= 8'd0;
@@ -136,18 +170,11 @@ always @(posedge clk) begin
                     voice_state    <= VS_LOOP_WAIT;
                 end
                 else begin
-                    caddr[voice_ch] <= caddr[voice_ch] + {11'b0, voice_fd};
-                    if (voice_last) begin
-                        out_l <= acc_l + voice_delta_l;
-                        out_r <= acc_r + voice_delta_r;
-                        acc_l <= 16'sd0;
-                        acc_r <= 16'sd0;
-                    end
-                    else begin
-                        acc_l <= acc_l + voice_delta_l;
-                        acc_r <= acc_r + voice_delta_r;
-                    end
-                    voice_state <= VS_IDLE;
+                    voice_next_addr <= caddr[voice_ch] + {11'b0, voice_fd};
+                    voice_advance   <= 1'b1;
+                    voice_delta_l_q <= voice_delta_l;
+                    voice_delta_r_q <= voice_delta_r;
+                    voice_state     <= VS_ACCUM;
                 end
             end
 
@@ -157,23 +184,32 @@ always @(posedge clk) begin
                 // A marker at the loop target is an empty/dead voice: retain
                 // the loop address and contribute silence, as MAME does.
                 if (voice_ram_q != 8'hff) begin
-                    caddr[voice_ch] <= {voice_ls, 11'b0} + {11'b0, voice_fd};
-                    if (voice_last) begin
-                        out_l <= acc_l + voice_delta_l;
-                        out_r <= acc_r + voice_delta_r;
-                        acc_l <= 16'sd0;
-                        acc_r <= 16'sd0;
-                    end
-                    else begin
-                        acc_l <= acc_l + voice_delta_l;
-                        acc_r <= acc_r + voice_delta_r;
-                    end
+                    voice_next_addr <= {voice_ls, 11'b0} +
+                                       {11'b0, voice_fd};
+                    voice_advance   <= 1'b1;
+                    voice_delta_l_q <= voice_delta_l;
+                    voice_delta_r_q <= voice_delta_r;
                 end
-                else if (voice_last) begin
-                    out_l <= acc_l;
-                    out_r <= acc_r;
-                    acc_l <= 16'sd0;
-                    acc_r <= 16'sd0;
+                else begin
+                    voice_advance   <= 1'b0;
+                    voice_delta_l_q <= 19'sd0;
+                    voice_delta_r_q <= 19'sd0;
+                end
+                voice_state <= VS_ACCUM;
+            end
+
+            VS_ACCUM: begin
+                if (voice_advance)
+                    caddr[voice_ch] <= voice_next_addr;
+                if (voice_last) begin
+                    out_l <= quantize_clip(acc_l + voice_delta_l_q);
+                    out_r <= quantize_clip(acc_r + voice_delta_r_q);
+                    acc_l <= 19'sd0;
+                    acc_r <= 19'sd0;
+                end
+                else begin
+                    acc_l <= acc_l + voice_delta_l_q;
+                    acc_r <= acc_r + voice_delta_r_q;
                 end
                 voice_state <= VS_IDLE;
             end
@@ -196,10 +232,10 @@ always @(posedge clk) begin
                     voice_state    <= VS_FETCH_WAIT;
                 end
                 else if (ch == 3'd7) begin
-                    out_l <= acc_l;
-                    out_r <= acc_r;
-                    acc_l <= 16'sd0;
-                    acc_r <= 16'sd0;
+                    out_l <= quantize_clip(acc_l);
+                    out_r <= quantize_clip(acc_r);
+                    acc_l <= 19'sd0;
+                    acc_r <= 19'sd0;
                 end
             end
         end

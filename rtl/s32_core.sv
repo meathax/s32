@@ -19,6 +19,8 @@ module s32_core #(
     input             clk_sys,      // 48.324 MHz
     input             clk_ram,      // 96.648 MHz
     input             rst,
+    // Keep CRT timing alive while game logic is held in ROM-load reset.
+    input             video_rst,
 
     input  board_desc_t board,
 
@@ -104,7 +106,17 @@ module s32_core #(
     output signed [15:0] audio_l,
     output signed [15:0] audio_r,
 
-    output      [7:0] out_lamps     // misc outputs (coin counters etc)
+    output      [7:0] out_lamps,    // misc outputs (coin counters etc)
+
+    // Hardware bring-up visibility. These signals are selected by the
+    // top-level Debug Video option and do not alter the emulated board.
+    output     [31:0] debug_pc,
+    output            debug_halted,
+    output     [23:0] debug_status,
+    output     [15:0] debug_first_rom,
+    output      [8:0] debug_hcnt,
+    output    [127:0] debug_sprite_desc,
+    output            debug_sprite_desc_valid
 );
 
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
@@ -131,6 +143,8 @@ wire        wr_stb;
 
 wire        irq_n;
 wire [7:0]  irq_vector;
+wire [31:0] v60_debug_pc;
+wire        v60_debug_halted;
 
 s32_v60 #(.START_PC(32'h00FFFFF0)) v60 (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
@@ -138,8 +152,11 @@ s32_v60 #(.START_PC(32'h00FFFFF0)) v60 (
     .bus_wdata(c_wdata), .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(irq_n), .irq_vector(irq_vector), .irq_ack(),
     .nmi_n(1'b1),
-    .dbg_pc(), .dbg_halted()
+    .dbg_pc(v60_debug_pc), .dbg_halted(v60_debug_halted)
 );
+
+assign debug_pc     = v60_debug_pc;
+assign debug_halted = v60_debug_halted;
 
 s32_v60_bus vbus (
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
@@ -158,29 +175,29 @@ wire sel_wram   = (A[23:20] == 4'h2);
 wire sel_vram   = (A[23:20] == 4'h3);
 wire sel_sprram = (A[23:20] == 4'h4);
 wire sel_sprctl = (A[23:20] == 4'h5);
-wire sel_pal0   = (A[23:20] == 4'h6) && (!is_multi32 || !A[19]);
-wire sel_mix0   = sel_pal0 && (A[16] == 1'b1) && (A[19:16] == 4'h1);
-wire sel_pal1   = is_multi32 && (A[23:19] == {4'h6, 1'b1});
-wire sel_mix1   = sel_pal1 && (A[16]);
 wire sel_shared = (A[23:20] == 4'h7);
 wire sel_comm   = (A[23:16] == 8'h80);
 wire sel_dual   = (A[23:16] == 8'h81);
 wire sel_prot_a = (A[23:20] == 4'hA);
-wire sel_io0    = (A[23:16] == 8'hC0) && (A[7:6] == 2'b00);
-wire sel_ioex   = (A[23:16] == 8'hC0) && (A[7:6] == 2'b01);   // 0xC00040-7F
-wire sel_io1    = is_multi32 && (A[23:16] == 8'hC8);
+wire sel_v25    = sel_prot_a && (A[19:12] == 8'h00); // 0xA00000-A00FFF
+// MAME's I/O mirrors ignore A19:A7 (System 32) or A18:A7 (Multi 32).
+// A6:A5 remain decoded: 00 selects the 5296 and A6 selects expansion I/O.
+wire io0_area   = (A[23:20] == 4'hC) && (!is_multi32 || !A[19]);
+wire sel_io0    = io0_area && (A[6:5] == 2'b00);
+wire sel_ioex   = io0_area && A[6];
+wire sel_io1    = is_multi32 && (A[23:20] == 4'hC) && A[19] &&
+                  (A[6:5] == 2'b00);
 wire sel_intc   = (A[23:20] == 4'hD) && !A[19];
 wire sel_rand   = (A[23:20] == 4'hD) &&  A[19];
 wire sel_romhi  = (A[23:20] == 4'hF);
 
-// more precise mixer/palette decode:
+// Palette/mixer windows are mirrored through bits 19:17 (System 32) or
+// 18:17 (Multi 32); A16 alone distinguishes palette RAM from mixer regs.
 wire pal_area   = (A[23:20] == 4'h6);
-wire sel_palram = pal_area && (A[19:17] == 3'b000 || (!is_multi32));
-// palette 0x600000-0x60FFFF, mixer 0x610000-0x61007F (mirrors)
-wire is_pal0    = pal_area && !A[19] && (A[18:16] == 3'b000);
-wire is_mix0    = pal_area && !A[19] && (A[18:16] == 3'b001);
-wire is_pal1    = is_multi32 && pal_area && A[19] && (A[18:16] == 3'b000);
-wire is_mix1    = is_multi32 && pal_area && A[19] && (A[18:16] == 3'b001);
+wire is_pal0    = pal_area && !A[16] && (!is_multi32 || !A[19]);
+wire is_mix0    = pal_area &&  A[16] && (!is_multi32 || !A[19]);
+wire is_pal1    = is_multi32 && pal_area && A[19] && !A[16];
+wire is_mix1    = is_multi32 && pal_area && A[19] &&  A[16];
 
 // ---------------------------------------------------------------------------
 // work RAM — dual port (CPU + protection)
@@ -269,8 +286,9 @@ s32_big_dpram #(
 wire mode_416;
 wire vbl_start, vbl_end;
 wire [8:0] hcnt, vcnt;
+assign debug_hcnt = hcnt;
 s32_video crt (
-    .clk(clk_sys), .rst(rst), .mode_416(mode_416),
+    .clk(clk_sys), .rst(video_rst), .mode_416(mode_416),
     .ce_pix(ce_pix), .hcnt(hcnt), .vcnt(vcnt),
     .hblank(hb), .vblank(vb), .hsync(hs), .vsync(vs),
     .vblank_start(vbl_start), .vblank_end(vbl_end)
@@ -330,7 +348,9 @@ s32_sprite sprite (
     // its leading edge.  GA2 builds its next command list during VBLANK, so
     // launching at vbl_start can consume the list before the IRQ-side update.
     .vblank(vbl_end), .rendering(),
-    .ctl_we(wr_stb && m_we && sel_sprctl),
+    .debug_first_rom_desc(debug_sprite_desc),
+    .debug_first_rom_valid(debug_sprite_desc_valid),
+    .ctl_we(wr_stb && m_we && sel_sprctl && m_be[0]),
     .ctl_addr(A[3:1]), .ctl_wdata(m_wdata[7:0]),
     .ctl_rdata(sprctl_q), .ctl_raddr(A[3:1]),
     .slist_addr(slist_addr), .slist_data(sprlist_q),
@@ -349,7 +369,8 @@ assign sdr_p2_addr[24] = 1'b1;   // sprites region base 0x1000000
 // B5: 416/320 width follows sprite control reg 6 bit0 (CPU-written)
 reg mode_416_r = 1'b1;
 always @(posedge clk_sys)
-    if (m_req && m_we && sel_sprctl && A[3:1] == 3'd6) mode_416_r <= m_wdata[0];
+    if (m_req && m_we && sel_sprctl && m_be[0] && A[3:1] == 3'd6)
+        mode_416_r <= m_wdata[0];
 assign mode_416 = mode_416_r;
 
 // Sprite line prefetch for mixer. Hold the request and its address until the
@@ -418,7 +439,7 @@ s32_palette pal0 (
 s32_mixer mix0 (
     .clk(clk_ram), .rst(rst),
     .reg_we(wr_stb && m_we && is_mix0),
-    .reg_addr(A[6:1]), .reg_wdata(m_wdata),
+    .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
     .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
     .display_en(io0_cnt1), .layer_off(tm_layer_off),
@@ -456,7 +477,7 @@ generate
         s32_mixer mix1 (
             .clk(clk_ram), .rst(rst),
             .reg_we(wr_stb && m_we && is_mix1),
-            .reg_addr(A[6:1]), .reg_wdata(m_wdata),
+            .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
             .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
             .display_en(io0_cnt1), .layer_off(tm_layer_off),
@@ -480,9 +501,11 @@ wire [21:0] mpcm_ba;
 
 s32_soundsys #(.SYSTEM32_ONLY(SYSTEM32_ONLY)) sound (
     .clk(clk_sys), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm),
-    .rst(rst | ~io0_cnt2),
+    .rst(rst),
+    .z80_reset(~io0_cnt2),
     .is_multi32(is_multi32),
-    .sh_cs(m_req && sel_shared), .sh_we(m_we && sel_shared),
+    .sh_cs(m_req && sel_shared && m_be[0]),
+    .sh_we(m_we && sel_shared && m_be[0]),
     .sh_addr(A[13:1]), .sh_wdata(m_wdata[7:0]), .sh_rdata(sh_rdata),
     .v60_doorbell(snd_doorbell),
     .irq_to_v60(snd_to_v60),
@@ -506,7 +529,7 @@ wire       eep_do;
 
 s32_io5296 io0 (
     .clk(clk_sys), .rst(rst),
-    .cs(m_req && sel_io0), .we(m_we),
+    .cs(m_req && sel_io0 && m_be[0]), .we(m_we),
     .addr(A[5:1]), .wdata(m_wdata[7:0]), .rdata(io0_q),
     .in_pa(in_p1a), .in_pb(in_p2a),
     .in_pc(in_portc),                          // B2: portc no longer carries EEPROM
@@ -519,7 +542,7 @@ assign out_lamps = io0_pd;
 
 s32_io5296 io1 (
     .clk(clk_sys), .rst(rst),
-    .cs(m_req && sel_io1), .we(m_we),
+    .cs(m_req && sel_io1 && m_be[0]), .we(m_we),
     .addr(A[5:1]), .wdata(m_wdata[7:0]), .rdata(io1_q),
     .in_pa(in_p1b), .in_pb(in_p2b), .in_pc(in_portc_b),
     .in_pe(in_svc12_b), .in_pf(in_svc34_b),
@@ -540,6 +563,9 @@ s32_eeprom93c46 eeprom (
 // extended IO: ADC / trackballs / PPI
 wire adc_bit;
 wire [7:0] trk_q [0:2];
+wire sel_adc   = sel_ioex && (A[5:3] == 3'b010) && board.has_adc;
+wire sel_track = sel_ioex && (A[5:3] <= 3'b010) && board.has_track;
+wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && board.has_ppi;
 genvar t;                         // declare outside the generate-for (Quartus 17.0)
 generate
     if (GA2_ONLY) begin : g_ga2_no_analog
@@ -555,21 +581,23 @@ generate
         reg [2:0] analog_bank;
         s32_msm6253 adc (
             .clk(clk_sys),
-            .cs(m_req && sel_ioex && A[5:4] == 2'b01 && board.has_adc), // 0xC00050-57
+            .cs(m_req && sel_adc && m_be[0]), // 0xC00050-57
             .we(m_we), .addr(A[2:1]),
             .dout_bit(adc_bit),
             .an0(adc_ch[{analog_bank[0], 2'd0}]), .an1(adc_ch[{analog_bank[0], 2'd1}]),
             .an2(adc_ch[{analog_bank[0], 2'd2}]), .an3(adc_ch[{analog_bank[0], 2'd3}])
         );
         always @(posedge clk_sys)
-            if (m_req && m_we && sel_ioex && A[5:4] == 2'b10 && is_multi32)
+            if (m_req && m_we && sel_ioex && m_be[0] && is_multi32 &&
+                A[5:0] == 6'h20)
                 analog_bank <= m_wdata[2:0];   // 0xC00060 analog_bank_w
 
         for (t = 0; t < 3; t = t + 1) begin : tracks
             s32_upd4701 upd (
                 .clk(clk_sys), .rst(rst),
                 .delta_valid(trk_dv[t]), .dx(trk_dx[t]), .dy(trk_dy[t]),
-                .cs(m_req && sel_ioex && board.has_track && A[5:3] == t[2:0]), // B4: 0x40/48/50
+                .cs(m_req && sel_ioex && m_be[0] &&
+                    board.has_track && A[5:3] == t[2:0]), // B4: 0x40/48/50
                 .we(m_we), .addr(A[2:1]),
                 .rdata(trk_q[t]), .buttons(trk_btn[t])
             );
@@ -580,7 +608,7 @@ endgenerate
 wire [7:0] ppi_q;
 s32_i8255 ppi (
     .clk(clk_sys),
-    .cs(m_req && sel_ioex && A[5:4] == 2'b10 && board.has_ppi),
+    .cs(m_req && sel_ppi && m_be[0]),
     .we(m_we), .addr(A[2:1]), .wdata(m_wdata[7:0]), .rdata(ppi_q),
     .pa(ppi_pa), .pb(ppi_pb), .pc_in(ppi_pc), .pc_out()
 );
@@ -667,11 +695,15 @@ generate
     end
 endgenerate
 
+`ifdef S32_REAL_V25
+s32_v25_cpu v25 (
+`else
 s32_v25 v25 (
+`endif
     .clk(clk_sys), .rst(rst), .enable(board.has_v25),
     .table_sel(board.v25_table),
     .prg_wr(v25_prg_wr), .prg_waddr(v25_prg_waddr), .prg_wdata(v25_prg_wdata),
-    .cs(m_req && sel_prot_a && board.has_v25), .we(m_we),
+    .cs(m_req && sel_v25 && board.has_v25 && m_be[0]), .we(m_we),
     .addr(A[11:1]), .wdata(m_wdata[7:0]), .rdata(v25_q)
 );
 
@@ -789,23 +821,134 @@ always @(posedge clk_sys) begin
                 sel_shared:  rmux <= {8'hff, sh_rdata};
                 sel_comm:    rmux <= 16'hffff;      // s32comm absent: link not connected
                 sel_dual:    rmux <= board.dual_pcb ? dual_q : 16'hffff;
-                sel_prot_a:  if (GA2_ONLY)
+                sel_v25:     if (GA2_ONLY)
                                  rmux <= {8'hff, v25_q};
                              else
                                  rmux <= board.has_v25 ? {8'hff, v25_q} :
                                          board.has_dsp_hle ? dsp_q : 16'hffff;
+                sel_prot_a:  rmux <= board.has_dsp_hle ? dsp_q : 16'hffff;
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
                 sel_ioex:    if (GA2_ONLY)
-                                 rmux <= {8'hff, ppi_q};
+                                 rmux <= sel_ppi ? {8'hff, ppi_q} : 16'hffff;
                              else
-                                 rmux <= board.has_adc  ? {8'hff, 7'h7f, adc_bit} :
-                                         board.has_track? {8'hff, trk_q[A[4]?2:(A[3]?1:0)]} :
-                                         board.has_ppi  ? {8'hff, ppi_q} : 16'hffff;
+                                 rmux <= sel_adc   ? {8'hff, 7'h7f, adc_bit} :
+                                         sel_track ? {8'hff, trk_q[A[4]?2:(A[3]?1:0)]} :
+                                         sel_ppi   ? {8'hff, ppi_q} : 16'hffff;
                 sel_intc:    rmux <= {8'hff, intc_q};
                 sel_rand:    rmux <= lfsr;
                 default:     rmux <= 16'hffff;
             endcase
+        end
+    end
+end
+
+// Sticky boot-progress telemetry for first-hardware bring-up. A screenshot of
+// the diagnostic modes preserves enough state to locate a boot stall without
+// requiring SignalTap or changing CPU/memory timing.
+reg [23:0] debug_status_r;
+reg [15:0] debug_first_rom_r;
+reg        debug_first_rom_seen;
+reg [15:0] debug_bus_wait;
+reg [23:0] debug_prev_pc_r;
+reg [23:0] debug_pc_seen_r;
+reg [23:0] debug_pc_hist0_r;
+reg [23:0] debug_pc_hist1_r;
+reg [23:0] debug_pc_hist2_r;
+reg [23:0] debug_pc_hist3_r;
+reg [23:0] debug_pc_hist4_r;
+reg  [7:0] debug_last_irq_vector_r;
+reg [23:0] debug_halt_trace_rgb;
+
+// If the CPU halts unexpectedly, expose eight compact post-mortem clues as
+// 8-pixel bands. The top-level displays one 64-pixel strip over the otherwise
+// unchanged game image, while debug mode 2 repeats the trace across the screen:
+//   current PC, previous PC, five older PCs, last/current IRQ vectors.
+always @(*) begin
+    case (hcnt[5:3])
+        3'd0: debug_halt_trace_rgb = v60_debug_pc[23:0];
+        3'd1: debug_halt_trace_rgb = debug_prev_pc_r;
+        3'd2: debug_halt_trace_rgb = debug_pc_hist0_r;
+        3'd3: debug_halt_trace_rgb = debug_pc_hist1_r;
+        3'd4: debug_halt_trace_rgb = debug_pc_hist2_r;
+        3'd5: debug_halt_trace_rgb = debug_pc_hist3_r;
+        3'd6: debug_halt_trace_rgb = debug_pc_hist4_r;
+        default: debug_halt_trace_rgb = {8'h00, debug_last_irq_vector_r, irq_vector};
+    endcase
+end
+
+assign debug_status = v60_debug_halted ? debug_halt_trace_rgb : debug_status_r;
+assign debug_first_rom = v60_debug_halted ?
+                         {debug_last_irq_vector_r, irq_vector} :
+                         debug_first_rom_r;
+
+always @(posedge clk_sys) begin
+    if (rst) begin
+        debug_status_r       <= 24'h000000;
+        debug_first_rom_r    <= 16'h0000;
+        debug_first_rom_seen <= 1'b0;
+        debug_bus_wait       <= 16'h0000;
+        debug_prev_pc_r      <= 24'hfffff0;
+        debug_pc_seen_r      <= 24'hfffff0;
+        debug_pc_hist0_r     <= 24'hfffff0;
+        debug_pc_hist1_r     <= 24'hfffff0;
+        debug_pc_hist2_r     <= 24'hfffff0;
+        debug_pc_hist3_r     <= 24'hfffff0;
+        debug_pc_hist4_r     <= 24'hfffff0;
+        debug_last_irq_vector_r <= 8'hff;
+    end
+    else begin
+        if (v60_debug_pc[23:0] != debug_pc_seen_r) begin
+            debug_pc_hist4_r <= debug_pc_hist3_r;
+            debug_pc_hist3_r <= debug_pc_hist2_r;
+            debug_pc_hist2_r <= debug_pc_hist1_r;
+            debug_pc_hist1_r <= debug_pc_hist0_r;
+            debug_pc_hist0_r <= debug_prev_pc_r;
+            debug_prev_pc_r  <= debug_pc_seen_r;
+            debug_pc_seen_r  <= v60_debug_pc[23:0];
+        end
+        // Sampling while the controller asserts IRQ avoids routing the CPU's
+        // otherwise-unused irq_ack hierarchy output, which Quartus 17 crashes
+        // while elaborating. The value still identifies the selected source.
+        if (!irq_n)
+            debug_last_irq_vector_r <= irq_vector;
+
+        debug_status_r[0] <= 1'b1;
+        if (c_req)       debug_status_r[1]  <= 1'b1;
+        if (c_ack)       debug_status_r[2]  <= 1'b1;
+        if (m_req)       debug_status_r[3]  <= 1'b1;
+        if (m_ack)       debug_status_r[4]  <= 1'b1;
+        if (sdr_p0_req)  debug_status_r[5]  <= 1'b1;
+        if (sdr_p0_ack)  debug_status_r[6]  <= 1'b1;
+        if (v60_debug_pc != 32'h00fffff0)
+            debug_status_r[7] <= 1'b1;
+        if (v60_debug_pc < 32'h00200000)
+            debug_status_r[8] <= 1'b1;
+        if (m_req && m_we && sel_wram) debug_status_r[9]  <= 1'b1;
+        if (m_req && m_we && sel_vram) debug_status_r[10] <= 1'b1;
+        if (m_req && m_we && is_pal0)  debug_status_r[11] <= 1'b1;
+        if (m_req && m_we && sel_io0)  debug_status_r[12] <= 1'b1;
+        if (m_req && m_we && sel_intc) debug_status_r[13] <= 1'b1;
+        if (io0_cnt1)                  debug_status_r[14] <= 1'b1;
+        if (v60_debug_halted)          debug_status_r[15] <= 1'b1;
+        if (sdr_p1_req)                debug_status_r[16] <= 1'b1;
+        if (sdr_p1_ack)                debug_status_r[17] <= 1'b1;
+        if (sdr_p2_req)                debug_status_r[18] <= 1'b1;
+        if (sdr_p2_ack)                debug_status_r[19] <= 1'b1;
+        if (vbl_start)                 debug_status_r[20] <= 1'b1;
+        if (!irq_n)                    debug_status_r[21] <= 1'b1;
+        if (v60_debug_pc[31:24] != 8'h00)
+            debug_status_r[22] <= 1'b1;
+
+        if (m_req && !m_ack) begin
+            if (!(&debug_bus_wait)) debug_bus_wait <= debug_bus_wait + 1'd1;
+            if (&debug_bus_wait)  debug_status_r[23] <= 1'b1;
+        end
+        else debug_bus_wait <= 16'h0000;
+
+        if (sdr_p0_ack && !debug_first_rom_seen) begin
+            debug_first_rom_seen <= 1'b1;
+            debug_first_rom_r    <= sdr_p0_dout;
         end
     end
 end

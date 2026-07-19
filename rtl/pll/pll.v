@@ -5,7 +5,7 @@ module pll (
     input  reset_reset,
     output outclk0_clk,   // 96.648 MHz
     output outclk1_clk,   // 48.324 MHz
-    output outclk2_clk,   // 96.648 MHz, -90 deg (SDRAM_CLK)
+    output outclk2_clk,   // 96.648 MHz, 180 deg (SDRAM_CLK)
     output locked_export
 );
 `ifdef SIMULATION

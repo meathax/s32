@@ -78,8 +78,8 @@ module tb_rf5c68;
             // bit 6 selects the channel register bank; bit 7 remains clear so
             // voices cannot run while the directed setup is in progress.
             write_reg(4'h7, {1'b0, 1'b1, 3'b000, voice});
-            write_reg(4'h0, 8'd32);      // ENV; with PAN=1 this preserves mag
-            write_reg(4'h1, 8'h11);      // equal one-unit left/right pan
+            write_reg(4'h0, 8'hff);      // full envelope
+            write_reg(4'h1, 8'hff);      // equal full-scale left/right pan
             write_reg(4'h2, 8'h00);
             write_reg(4'h3, 8'h08);      // FD=0x0800: advance exactly one byte
             write_reg(4'h4, loop_addr[7:0]);
@@ -91,6 +91,7 @@ module tb_rf5c68;
     integer timeout;
     integer first_frame_cycle;
     integer second_frame_cycle;
+    integer voice;
 
     initial begin
         repeat (4) @(posedge clk);
@@ -157,7 +158,7 @@ module tb_rf5c68;
         @(negedge clk);
         ce = 1'b1;
 
-        // Normal ch0 fetch: one byte of FD advance and one unit accumulated.
+        // Normal ch0 fetch: one byte of FD advance and 119 units accumulated.
         timeout = 0;
         while ((dut.caddr[0] !== 27'h0000800) && (timeout < 16)) begin
             @(posedge clk); #1;
@@ -165,7 +166,7 @@ module tb_rf5c68;
         end
         if (dut.caddr[0] !== 27'h0000800)
             $fatal(1, "normal sample did not retire");
-        if (dut.acc_l !== 16'sd1 || dut.acc_r !== 16'sd1 || dut.ch !== 3'd1)
+        if (dut.acc_l !== 19'sd119 || dut.acc_r !== 19'sd119 || dut.ch !== 3'd1)
             $fatal(1, "normal sample/channel sequencing wrong: acc=%0d/%0d ch=%0d",
                    dut.acc_l, dut.acc_r, dut.ch);
 
@@ -178,7 +179,7 @@ module tb_rf5c68;
         end
         if (dut.caddr[1] !== 27'h0100800)
             $fatal(1, "loop target was not fetched/advanced: %07x", dut.caddr[1]);
-        if (dut.acc_l !== 16'sd4 || dut.acc_r !== 16'sd4 || dut.ch !== 3'd2)
+        if (dut.acc_l !== 19'sd477 || dut.acc_r !== 19'sd477 || dut.ch !== 3'd2)
             $fatal(1, "loop sample/channel sequencing wrong: acc=%0d/%0d ch=%0d",
                    dut.acc_l, dut.acc_r, dut.ch);
         if (out_l !== 16'sd0 || out_r !== 16'sd0)
@@ -193,8 +194,8 @@ module tb_rf5c68;
         if (dut.caddr[7] !== 27'h0380800)
             $fatal(1, "channel 7 sample did not retire");
         first_frame_cycle = cycles;
-        if (out_l !== 16'sd11 || out_r !== 16'sd11)
-            $fatal(1, "frame mix must include ch0+ch1+ch7 (11), got %0d/%0d",
+        if (out_l !== 16'sd1280 || out_r !== 16'sd1280)
+            $fatal(1, "10-bit frame mix must quantize 1313 to 1280, got %0d/%0d",
                    out_l, out_r);
         if (dut.acc_l !== 16'sd0 || dut.acc_r !== 16'sd0 || dut.ch !== 3'd0)
             $fatal(1, "frame accumulator/channel wrap wrong");
@@ -212,10 +213,57 @@ module tb_rf5c68;
         if ((second_frame_cycle - first_frame_cycle) != 384)
             $fatal(1, "playback cadence changed: %0d clocks",
                    second_frame_cycle - first_frame_cycle);
-        if (out_l !== 16'sd11 || out_r !== 16'sd11)
+        if (out_l !== 16'sd1280 || out_r !== 16'sd1280)
             $fatal(1, "second frame mix wrong: %0d/%0d", out_l, out_r);
 
-        $display("RF5C68 PASS");
-        $finish;
+        // ------------------------------------------------------------------
+        // Eight maximum-level voices exceed signed 16-bit range. Verify that
+        // the full mix is retained until the final RF5C68 clamp, for both
+        // polarities, rather than wrapping and reversing polarity.
+        // ------------------------------------------------------------------
+        @(negedge clk);
+        ce = 1'b0;
+        write_reg(4'h8, 8'hff);           // stop/reload every channel
+        write_reg(4'h7, 8'h00);           // wave bank 0
+        for (voice = 0; voice < 8; voice = voice + 1) begin
+            write_ram(voice * 12'h100, 8'hfe);
+            write_ram(voice * 12'h100 + 1, 8'hfe);
+            configure_voice(voice[2:0], voice[7:0], 16'h0000);
+        end
+        write_reg(4'h8, 8'h00);           // enable all voices
+        write_reg(4'h7, 8'h80);           // global enable
+        @(negedge clk);
+        ce = 1'b1;
+        timeout = 0;
+        while ((out_l !== 16'sh7fff) && (timeout < 500)) begin
+            @(posedge clk); #1;
+            timeout = timeout + 1;
+        end
+        if (out_l !== 16'sh7fff || out_r !== 16'sh7fff)
+            $fatal(1, "positive full mix did not saturate: %0d/%0d",
+                   out_l, out_r);
+
+        @(negedge clk);
+        ce = 1'b0;
+        write_reg(4'h8, 8'hff);
+        write_reg(4'h7, 8'h00);
+        for (voice = 0; voice < 8; voice = voice + 1) begin
+            write_ram(voice * 12'h100, 8'h7e);
+            write_ram(voice * 12'h100 + 1, 8'h7e);
+        end
+        write_reg(4'h8, 8'h00);
+        write_reg(4'h7, 8'h80);
+        @(negedge clk);
+        ce = 1'b1;
+        timeout = 0;
+        while ((out_l !== -16'sd32768) && (timeout < 500)) begin
+            @(posedge clk); #1;
+            timeout = timeout + 1;
+        end
+        if (out_l !== -16'sd32768 || out_r !== -16'sd32768)
+            $fatal(1, "negative full mix did not saturate: %0d/%0d",
+                   out_l, out_r);
+
+        $display("RF5C68 PASS");        $finish;
     end
 endmodule

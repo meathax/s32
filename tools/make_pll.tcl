@@ -32,9 +32,14 @@ set_instance_parameter_value pll_inst {gui_output_clock_frequency1}     {48.324}
 set_instance_parameter_value pll_inst {gui_phase_shift1}                {0}
 set_instance_parameter_value pll_inst {gui_duty_cycle1}                 {50}
 
-# outclk_2 = SDRAM_CLK: 96.648 MHz shifted -90 deg (-2588 ps)
+# outclk_2 = SDRAM_CLK: 96.648 MHz shifted 180 deg (+5174 ps).
+# The half-cycle relationship centres both sides of the board interface:
+# commands/write data launched by outclk_0 have ample setup before SDRAM_CLK,
+# while CL2 read data is captured by the constrained outclk_0 input register.
+# A negative quarter-cycle phase sampled pre-data on hardware; +90 degrees
+# fixed the read direction but left only 2.587 ns for outbound setup.
 set_instance_parameter_value pll_inst {gui_output_clock_frequency2}     {96.648}
-set_instance_parameter_value pll_inst {gui_phase_shift2}                {-2588}
+set_instance_parameter_value pll_inst {gui_phase_shift2}                {5174}
 set_instance_parameter_value pll_inst {gui_duty_cycle2}                 {50}
 
 # Export refclk / reset / outclks / locked to match emu's pll instance.

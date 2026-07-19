@@ -8,6 +8,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/s32_core.sv
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
+set_global_assignment -name QIP_FILE rtl/cpu/v25/v25.qip
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_vram.sv
@@ -18,6 +19,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_mixer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_palette.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_video.sv
 
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/s32_audio_mix.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/s32_soundsys.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/s32_rf5c68.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/s32_multipcm.sv

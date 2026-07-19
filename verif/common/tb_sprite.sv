@@ -7,6 +7,14 @@
 //   5. 2x horizontal zoom: each source pixel doubled
 //   6. indirect (inline table): transmask decides transparency, entry drawn
 //   7. shadow sprite: run flagged fb_wr_shadow
+//   8. even-width center alignment uses (dstw-1)/2
+//   9. alignment code 3 aliases center, matching the controller
+//  10. from-RAM pixel source uses the controller's 32-bit byte repacking
+//  11. clip-out persists across a later clip-in-only command
+//  12. signed position + JUMP offset does not wrap in the 12-bit domain
+//  13. MAME-exact 16.16 horizontal zoom source selection
+//  14. latched sprite-control global X/Y flip mirrors the framebuffer scan
+//  15. self-referential JUMP is bounded to 8192 commands (no frame freeze)
 //============================================================================
 `timescale 1ns/1ps
 
@@ -20,6 +28,8 @@ reg rst = 1;
 reg       ctl_we = 0;
 reg [2:0] ctl_addr = 0;
 reg [7:0] ctl_wdata = 0;
+reg [2:0] ctl_raddr = 0;
+wire [7:0] ctl_rdata;
 
 // sprite RAM model (registered read, 1-clk lag like s32_core)
 reg [15:0] sram [0:16383];
@@ -49,6 +59,7 @@ always @(posedge clk) fbe_ack <= fbe_req;
 
 reg [15:0] fbcap [0:511];       // pixel values by x (single test row)
 reg        fbsh  [0:511];       // captured with shadow flag
+reg  [7:0] fbycap [0:511];       // captured output row by x
 integer    fbcnt = 0;
 reg        run_shadow = 0;
 integer ci;
@@ -57,6 +68,7 @@ always @(posedge clk) begin
     if (fbw_valid) begin
         fbcap[fbw_x] <= fbw_pix;
         fbsh[fbw_x]  <= run_shadow | fbw_shadow;
+        fbycap[fbw_x] <= fbw_y;
         fbcnt = fbcnt + 1;
     end
 end
@@ -67,7 +79,7 @@ s32_sprite dut (
     .clk(clk), .rst(rst), .is_multi32(1'b0),
     .vblank(vblank), .rendering(),
     .ctl_we(ctl_we), .ctl_addr(ctl_addr), .ctl_wdata(ctl_wdata),
-    .ctl_rdata(), .ctl_raddr(3'd0),
+    .ctl_rdata(ctl_rdata), .ctl_raddr(ctl_raddr),
     .slist_addr(slist_addr), .slist_data(slist_q),
     .srom_req(srom_req), .srom_addr(srom_addr),
     .srom_data(srom_data), .srom_ack(srom_ack),
@@ -94,7 +106,9 @@ endtask
 // run one frame: pulse vblank, wait for the walker to finish
 task frame;
     integer k;
-    for (k = 0; k < 512; k = k + 1) begin fbcap[k] = 16'hFFFF; fbsh[k] = 0; end
+    for (k = 0; k < 512; k = k + 1) begin
+        fbcap[k] = 16'hFFFF; fbsh[k] = 0; fbycap[k] = 8'hff;
+    end
     fbcnt = 0;
     @(posedge clk); vblank <= 1;
     @(posedge clk); vblank <= 0;
@@ -193,6 +207,7 @@ initial begin
     check(104, 16'h0345); check(106, 16'h0456);
 
     // ---- 7: shadow sprite: fb_wr_shadow flagged for the run ----
+    wctl(3'd4, 8'h02);                    // transmask row select
     wctl(3'd5, 8'h01);                    // shadow enable (reg 5 bit 0)
     entry(0, W0_PLAIN | 16'h0800, W1_1x1, 16'h0001, 16'h0008, 16'd10, 16'd100, 16'h0000, COLOR);
     entry(1, 16'hC000, 0,0,0,0,0,0,0);
@@ -200,6 +215,103 @@ initial begin
     if (!fbsh[100] || !fbsh[107]) begin
         errors = errors + 1;
         $display("  FAIL shadow run not flagged (sh100=%0d sh107=%0d)", fbsh[100], fbsh[107]);
+    end
+    // Registers 4/5 are latched at swap and CPU-readable like 2/3.
+    ctl_raddr = 3'd4; #1;
+    if (ctl_rdata !== 8'hfe) begin
+        errors = errors + 1;
+        $display("  FAIL ctl4 readback=%02x want=fe", ctl_rdata);
+    end
+    ctl_raddr = 3'd5; #1;
+    if (ctl_rdata !== 8'hfd) begin
+        errors = errors + 1;
+        $display("  FAIL ctl5 readback=%02x want=fd", ctl_rdata);
+    end
+
+    // ---- 8: even-width center alignment subtracts (dstw-1)/2 = 3 ----
+    // ay=start(10), ax=center(00), xpos=100 -> pixels at x=97..104.
+    entry(0, 16'h0008, W1_1x1, 16'h0001, 16'h0008,
+          16'd10, 16'd100, 16'h0000, COLOR);
+    entry(1, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    check(96, 16'hFFFF); check(97, 16'h8101); check(104, 16'h8108);
+    check(105, 16'hFFFF);
+
+    // ---- 9: alignment code 3 is the second center encoding ----
+    entry(0, 16'h000B, W1_1x1, 16'h0001, 16'h0008,
+          16'd10, 16'd100, 16'h0000, COLOR);
+    frame;
+    check(96, 16'hFFFF); check(97, 16'h8101); check(104, 16'h8108);
+    check(105, 16'hFFFF);
+
+    // ---- 10: from-RAM source repacks two CPU halfwords like MAME ----
+    // even=0x5678, odd=0x1234 -> 32-bit pixel word 0x78563412 -> pens 1..8.
+    sram[16'h0200] = 16'h5678;
+    sram[16'h0201] = 16'h1234;
+    entry(0, W0_PLAIN | 16'h0400, W1_1x1, 16'h0001, 16'h0008,
+          16'd10, 16'd100, 16'h0100, COLOR);
+    entry(1, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    check(100, 16'h8101); check(101, 16'h8102); check(102, 16'h8103);
+    check(103, 16'h8104); check(104, 16'h8105); check(105, 16'h8106);
+    check(106, 16'h8107); check(107, 16'h8108);
+
+    // ---- 11: clip-out persists if a later clip command updates only
+    // clip-in. MAME changes each rectangle only when its individual enable
+    // bit is present; x=102 remains excluded by the first command. ----
+    entry(0, 16'h6000, 0,0,0, 16'd10,16'd10,16'd102,16'd102);
+    entry(1, 16'h5000,16'd223,16'd0,16'd319, 0,0,0,0);
+    entry(2, W0_PLAIN, W1_1x1, 16'h0001, 16'h0008,
+          16'd10, 16'd100, 16'h0000, COLOR);
+    entry(3, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    check(101, 16'h8102); check(102, 16'hFFFF); check(103, 16'h8104);
+
+    // ---- 12: both signed 12-bit values are -2048. MAME's int-domain sum
+    // is -4096 (offscreen); a 12-bit RTL sum wraps to zero and draws there. ----
+    entry(0, 16'hA001,16'h0800,16'h0800,0,0,0,0,0); // JUMP+offset -> entry1
+    entry(1, W0_PLAIN | 16'h0030, W1_1x1, 16'h0001, 16'h0008,
+          16'h0800,16'h0800,16'h0000,COLOR);
+    entry(2, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    if (fbcnt != 0 || fbcap[0] !== 16'hFFFF) begin
+        errors = errors + 1;
+        $display("  FAIL signed offset wrapped onscreen count=%0d x0=%04x", fbcnt, fbcap[0]);
+    end
+
+    // ---- 13: MAME uses 16.16 zoom. For 4 source pixels expanded to 41,
+    // destination x=31 selects source index 3. The former 10.10 step selected
+    // index 2 due to cumulative truncation. ----
+    rom128[0][31:0] = 32'h04030201; // 8bpp source pixels 1,2,3,4
+    entry(0, 16'h020A, 16'h0101, 16'h0001, 16'h0029,
+          16'd10,16'd100,16'h0000,COLOR);
+    entry(1, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    check(130, 16'h8103); // x=30 still source index 2
+    check(131, 16'h8104); // x=31 advances exactly as MAME
+
+    // ---- 14: ctl2 globally mirrors the displayed sprite framebuffer.
+    // Original x=100..107,y=10 becomes x=219..212,y=213 in 320 mode. ----
+    wctl(3'd2, 8'h03);
+    rom128[0][31:0] = 32'h78563412; // restore 4bpp pens 1..8
+    entry(0, W0_PLAIN, W1_1x1, 16'h0001, 16'h0008,
+          16'd10,16'd100,16'h0000,COLOR);
+    entry(1, 16'hC000, 0,0,0,0,0,0,0);
+    frame;
+    check(219, 16'h8101); check(212, 16'h8108);
+    if (fbycap[219] !== 8'd213 || fbycap[212] !== 8'd213) begin
+        errors = errors + 1;
+        $display("  FAIL global Y flip rows=%0d/%0d want=213", fbycap[219], fbycap[212]);
+    end
+    wctl(3'd2, 8'h00);
+
+    // ---- 15: malformed/self-referential list cannot trap renderer ----
+    entry(0, 16'h8000, 0,0,0,0,0,0,0);    // JUMP to entry 0 forever
+    frame;
+    if (dut.list_count !== 14'd8192 || dut.rendering !== 1'b0) begin
+        errors = errors + 1;
+        $display("  FAIL list watchdog count=%0d rendering=%0d",
+                 dut.list_count, dut.rendering);
     end
 
     if (errors == 0) $display("SPRITE PASS");

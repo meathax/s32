@@ -53,7 +53,7 @@ for (genvar gt=0; gt<3; gt++) begin
 end
 
 s32_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .board(board),
+    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .video_rst(rst), .board(board),
     .ce_cpu(ce_cpu), .ce_z80(1'b0), .ce_fm(1'b0), .ce_pcm(1'b0),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(), .sdr_p1_addr(), .sdr_p1_dout(64'h0), .sdr_p1_ack(1'b0),

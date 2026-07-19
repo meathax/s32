@@ -1,7 +1,7 @@
 //============================================================================
 // Focused test: synthesis-friendly shared sprite scale divider.
 // Checks result equality against the simulator's unsigned division operator
-// and enforces the fixed 40-clock two-axis latency.
+// and enforces the fixed 50-clock two-axis latency.
 //============================================================================
 `timescale 1ns/1ps
 
@@ -11,10 +11,10 @@ reg clk = 0;
 always #5 clk = ~clk;
 reg rst = 1;
 reg start = 0;
-reg [19:0] ynum = 0, xnum = 0;
+reg [24:0] ynum = 0, xnum = 0;
 reg  [9:0] yden = 1, xden = 1;
 wire busy, done;
-wire [19:0] yquot, xquot;
+wire [24:0] yquot, xquot;
 
 s32_sprite_scale_div dut (
     .clk(clk), .rst(rst), .start(start),
@@ -26,12 +26,12 @@ integer errors = 0;
 integer tests = 0;
 integer seed = 32'h5386a032;
 integer cycles;
-reg [19:0] want_y, want_x;
+reg [24:0] want_y, want_x;
 
 task run_pair(
-    input [19:0] yn,
+    input [24:0] yn,
     input  [9:0] yd,
-    input [19:0] xn,
+    input [24:0] xn,
     input  [9:0] xd
 );
 begin
@@ -45,14 +45,14 @@ begin
     @(negedge clk); start = 1'b0;
 
     cycles = 0;
-    while (!done && cycles < 45) begin
+    while (!done && cycles < 55) begin
         @(posedge clk); #1;
         cycles = cycles + 1;
     end
     tests = tests + 1;
-    if (cycles != 40) begin
+    if (cycles != 50) begin
         errors = errors + 1;
-        $display("  FAIL latency=%0d want=40 yn=%0d/%0d xn=%0d/%0d",
+        $display("  FAIL latency=%0d want=50 yn=%0d/%0d xn=%0d/%0d",
                  cycles, yn, yd, xn, xd);
     end
     if (yquot !== want_y || xquot !== want_x) begin
@@ -76,11 +76,11 @@ initial begin
     rst = 0;
 
     // Directed limits, exact divisions, and truncating divisions.
-    run_pair(20'd1024,   10'd1,    20'd8192,   10'd8);
-    run_pair(20'd261120, 10'd1,    20'd516096, 10'd1);
-    run_pair(20'd261120, 10'd1023, 20'd516096, 10'd1023);
-    run_pair(20'd7168,   10'd13,   20'd19456,  10'd37);
-    run_pair(20'd255000, 10'd511,  20'd503000, 10'd997);
+    run_pair(25'd65536,    10'd1,    25'd524288,   10'd8);
+    run_pair(25'd16711680, 10'd1,    25'd33030144, 10'd1);
+    run_pair(25'd16711680, 10'd1023, 25'd33030144, 10'd1023);
+    run_pair(25'd458752,   10'd13,   25'd1245184,  10'd37);
+    run_pair(25'd16320000, 10'd511, 25'd32192000, 10'd997);
 
     // Cover every legal destination divisor while cycling through all legal
     // source-height/width fields and both 4/8-bpp horizontal numerators.
@@ -89,8 +89,8 @@ initial begin
         srcw = ((i - 1) % 63) + 1;
         dh = i[9:0];
         dw = (1024 - i);
-        run_pair({2'b0, srch, 10'b0}, dh,
-                 i[0] ? {2'b0, srcw, 12'b0} : {1'b0, srcw, 13'b0}, dw);
+        run_pair({1'b0, srch, 16'b0}, dh,
+                 i[0] ? {1'b0, srcw, 18'b0} : {srcw, 19'b0}, dw);
     end
 
     // Deterministic constrained-random coverage over the same legal domains.
@@ -99,8 +99,8 @@ initial begin
         srcw = ($unsigned($random(seed)) % 63) + 1;
         dh = ($unsigned($random(seed)) % 1023) + 1;
         dw = ($unsigned($random(seed)) % 1023) + 1;
-        run_pair({2'b0, srch, 10'b0}, dh,
-                 i[0] ? {2'b0, srcw, 12'b0} : {1'b0, srcw, 13'b0}, dw);
+        run_pair({1'b0, srch, 16'b0}, dh,
+                 i[0] ? {1'b0, srcw, 18'b0} : {srcw, 19'b0}, dw);
     end
 
     if (errors == 0) $display("SPRITE DIV PASS (%0d pairs)", tests);

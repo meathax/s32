@@ -1,12 +1,48 @@
 # Building the RBF
 
 The core ships as source. Producing `SegaS32.rbf` requires Intel/Altera
-Quartus — it cannot be built without the FPGA toolchain. There are two paths:
-build locally, or let CI build it for you.
+Quartus — it cannot be built without the FPGA toolchain. The recommended path
+is a local Docker build; native Quartus and CI remain available as fallbacks.
 
 ---
 
-## Option A — CI (no local install)
+## Option A — Local Docker build on Windows (recommended)
+
+Install Docker Desktop with its WSL2 backend, start it, then run from the repo
+root:
+
+```powershell
+pwsh -File tools/build-docker.ps1
+```
+
+The script pulls the MiSTer-compatible Quartus Lite 17.0.2 container,
+regenerates the PLL, compiles the project, qualifies the fitter/timing reports,
+and only then stages `releases/SegaS32.rbf`. Docker and Quartus use all
+processors available to the container; the project does not impose a processor
+limit. After the first successful pull, use `-SkipPull` to start subsequent
+builds immediately:
+
+```powershell
+pwsh -File tools/build-docker.ps1 -SkipPull
+```
+
+This path also avoids the TBB routing crash observed with the older native
+Windows Quartus 17.0.0 build while keeping compilation on the local PC.
+
+Summarize a completed build and reject anything that is not fit, timing-clean,
+and backed by a current RBF with:
+
+```powershell
+pwsh -File tools/report-quartus.ps1
+pwsh -File tools/report-quartus.ps1 -RequireReady
+```
+
+The checker deliberately ignores static-timing numbers from a failed fit and
+also rejects a stale RBF left by an earlier run.
+
+---
+
+## Option B — CI (no local Quartus install)
 
 A GitHub Actions workflow (`.github/workflows/build.yml`) compiles the core on
 every push and uploads the `.rbf` as a build artifact.
@@ -22,7 +58,7 @@ left on an unmodified hosted runner.
 
 ---
 
-## Option B — Local build on Windows (one command)
+## Option C — Native Windows Quartus build
 
 If Quartus is at `D:\Q` (set `QUARTUS_ROOT` otherwise):
 
@@ -58,7 +94,7 @@ between generation modes.
 
 ---
 
-## Option C — Local build (manual / other platforms)
+## Option D — Local build (manual / other platforms)
 
 ### Prerequisites
 
@@ -110,6 +146,19 @@ cp output_files/Arcade-SegaSystem32.rbf releases/SegaS32.rbf
 
 Launch from the MiSTer `_Arcade` menu.
 
+On Windows, a passwordless-SSH MiSTer can be updated with:
+
+```powershell
+pwsh -File tools/deploy-mister.ps1 -MisterHost root@<MISTER-IP>
+```
+
+The deployment script uploads the GA2 MRA and RBF under temporary names,
+first requires a successful fit, non-negative reported timing slack, and a
+current matching RBF. It then checks SHA-256 hashes on the MiSTer and only
+atomically moves verified files into place. It never copies or modifies ROM
+files. For a qualified build retained in an isolated directory, pass that
+directory with `-ReportRoot` and its RBF with `-RbfPath`.
+
 ---
 
 ## Current build expectations
@@ -119,8 +168,15 @@ mapping passes have been fixed, including generated Qsys port names, source
 ordering, a V60 identifier collision, simulation-only memory initialization,
 hierarchical signal reach-through, and an enum-returning helper that crashed
 the older Quartus frontend. The ga2-only profile now completes Analysis &
-Synthesis at a **map-only estimate of 40,434 / 41,910 ALMs**. This is not
-evidence of a successful fit or timing closure.
+Synthesis at a **map-only estimate of 26,851 / 41,910 ALMs**.
+
+Before the V60 write-port refactor, seeds 5–7 all reached successful placement
+but failed routing with 70–77% peak interconnect use. Seed 5 reported 39,851 /
+41,910 fitted ALMs and 514 / 553 RAM blocks before failure. Consolidating every
+architectural-register update into two masked write ports then reduced the map
+estimate by 13,227 ALMs to 26,851 while retaining simultaneous writes and
+byte/bit masks. The refactor passes all 25 regression tiers and 50/50
+differential seeds. A new fit and timing result are still required.
 
 The following release gates remain **open**:
 
@@ -131,8 +187,8 @@ The following release gates remain **open**:
 - installation and gameplay validation on a DE10-Nano, including DDR3
   framebuffer backpressure and audio.
 
-After any compile, inspect `output_files/*.fit.rpt` and
-`output_files/*.sta.rpt`; the mere presence of an RBF is not a timing-closure
-claim. The current first hardware target is ga2; use the evidence and open
-release gates in `docs/ga2-readiness.md` rather than inferring readiness from
-the map estimate.
+After any compile, run `tools/report-quartus.ps1 -RequireReady` and inspect
+`output_files/*.fit.rpt` and `output_files/*.sta.rpt`; the mere presence of
+an RBF is not a timing-closure claim. The current first hardware target is ga2;
+use the evidence and open release gates in `docs/ga2-readiness.md` rather
+than inferring readiness from the map estimate.

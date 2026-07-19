@@ -182,3 +182,69 @@ recognizable 90-frame capture milestone in R13-7. These simulation results do
 not change the hardware gate: map success is not fitter or timing success,
 and a fitted resource report, non-negative static-timing result, assembled
 release RBF, and physical ga2 boot/gameplay validation are still required.
+
+# Round 14 — local fitting and V60 write-network reduction
+
+Round 14 moved the Quartus flow back onto the development PC with an
+unrestricted Quartus Lite 17.0.2 Docker build, then used fitter evidence rather
+than simulator intuition to identify the routing blocker.
+
+## R14 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R14-1 | BUILD | Native Windows Quartus 17.0.0 repeatedly crashed in its TBB routing code, while the hosted CI runner exposed only two CPUs and took more than an hour to reach the same failure. | Added `tools/build-docker.ps1` using the MiSTer-compatible `raetro/quartus:17.0` image. Quartus 17.0.2 now runs locally without a project CPU cap, regenerates the PLL, performs the full flow, qualifies the result, and stages an RBF only after all release gates pass. |
+| R14-2 | ROUTE | The 40,078-ALM design placed but did not route. Seeds 5–7 all failed with 70–77% peak interconnect use; seed 5 failed both in CI and locally in the same X11_Y35–X21_Y45 region. | The repeated failures rule out a stalled worker or one unlucky seed. Fitter hierarchy data identified `s32_v60` as the dominant block at about 25,015 fitted ALMs, so optimization moved to its register network instead of spending more time on unchanged seeds. |
+| R14-3 | AREA | The monolithic V60 FSM updated the 32×32-bit architectural register array at more than 50 syntactic sites. Quartus rebuilt variable write-selection logic throughout the FSM, dominating ALMs and routing fanout. | Every full, byte, halfword, and single-bit update now queues into two explicit masked write ports; port ordering preserves same-register nonblocking priority and covers the V60's maximum two writes per cycle. The complete 25-tier ModelSim suite passes with 50/50 differential seeds. Quartus mapping falls from 40,078 to **26,851 / 41,910 estimated ALMs**, and from 62,897 to **41,440 combinational ALUTs**, with memory/DSP use unchanged. |
+| R14-4 | RELEASE | A copied or stale RBF could previously be transferred even if the latest fit failed or timing was negative. | Added `tools/report-quartus.ps1` to classify map, fit, congestion, timing, and RBF freshness. Both the build and `tools/deploy-mister.ps1` require a successful fit, non-negative reported slack, and a hash match to the report-qualified RBF before deployment; MiSTer uploads are hash-checked and atomically activated. |
+
+## R14 release status
+
+The reduced V60 candidate is regression-clean and its full local fit is in
+progress. Until that flow completes successfully, produces a current RBF, and
+passes static-timing qualification, the hardware release gate remains open.
+
+# Round 15 — first ga2 hardware gameplay and freeze isolation
+
+## R15 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R15-1 | HARDWARE | The release MRA and a timing-clean pre-R15 RBF now boot the real World Rev B ROM on the DE10-Nano. The V25/protection path reaches attract/gameplay, and physical Start, movement, attack, and jump inputs all work. This is the first actual-gameplay result, but the video is badly corrupted and the demo can stutter and freeze. | Hardware boot, CPU execution, protection, ROM mapping, and the complete controller path are no longer design-only claims. They remain partial acceptance because sustained gameplay, correct video, and audio are not yet proven. |
+| R15-2 | VIDEO | Recognizable landscape geometry was rendered with neon/speckled colors. The palette alias conversion promoted each channel's MSB into the alternate-layout flag bit; current MAME promotes the channel LSB. | Corrected both alias directions in `s32_palette.sv`. Independent one-hot R/G/B vectors and write/read alias cases in `tb_palette.sv` pass under ModelSim with zero errors or warnings. An analytical remap of the captured hardware frame becomes a coherent green/brown scene; only a newly deployed RBF can turn that preview into hardware proof. |
+| R15-3 | DIAG | Two normal screenshots five seconds apart were byte-identical after the visible freeze, but PC-video diagnostic captures still showed hundreds of changing V60 addresses, including main/handler regions around `0x1009xx`, `0x100cxx`, `0x1014xx`, and `0x133xxx`. | The failure is not a hard V60 halt. Added a raw Sprite FB/DDR diagnostic that reports renderer-run, run-end, accepted DDR-write, DDR-read-data, and line-read-ack activity and exposes exact framebuffer words. This will separate renderer, DDR write/read, and mixer faults on the next approved hardware run. |
+| R15-4 | BUG | The sprite-list FSM had no overdraw/list bound. A missing END or self-referential JUMP could therefore trap rendering forever while the V60 and tile display continued, matching the observed frozen-picture failure mode. | Added the reference controller's 8,192-command bound. A directed self-JUMP test reaches exactly 8,192 commands, drops `rendering`, and returns to idle; the full existing 26-tier native regression passes with the new guard. |
+| R15-5 | TEST | The real-ROM harness models framebuffer service behaviorally, so its recognizable ga2 sprite output did not exercise the actual `s32_sprite` -> `s32_fb_if` -> MiSTer DDR path. | Added `tb_sprite_fb.sv`, which runs three alternating-buffer erase/render/flush frames through the real modules under deterministic DDR backpressure and verifies the exact stored pixels. It passes in 1.25 ms simulated time with zero errors/warnings and is wired as the new final regression tier. |
+
+## R15 release status
+
+ga2 now has real hardware boot and working physical controls, but it is not
+fully functional: the deployed pre-R15 image has corrupted color, missing or
+incorrect sprite presentation, demo stutter, and a repeatable visible freeze.
+The palette correction, sprite-list watchdog, raw DDR diagnostic, and new
+integrated regression are locally verified. A current fit/timing-qualified RBF
+is being built, but deployment and launch are explicitly paused until the user
+approves another MiSTer run.
+
+# Round 16 — broad RTL audit and cross-ROM differential probes
+
+## R16 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R16-1 | BUG | The fifth tilemap clip rectangle used a four-bit concatenated index, mapping its four words onto clip entries 8–11 and overwriting the third rectangle instead of entries 16–19. VRAM register shadows also ignored CPU byte enables. | Corrected the fifth-rectangle index width and added byte-enable merging to every scroll, zoom, page, clip, and control shadow. The focused test proves the third rectangle is unchanged, the fifth lands at 16–19, and independent low/high byte writes merge to `0xBBAA`. |
+| R16-2 | BUG | Interrupt-control bytes 0–5 and 8–15 reset unknown, same-cycle source arrival plus acknowledgement could lose an unrelated interrupt, zero timer writes did not stop a running timer, and timer expiry was one clock late. | Reset all 16 control bytes to `0xFF`, combine new sources before applying the acknowledgement mask, make zero writes cancel timers, and store period-minus-one. `tb_intc.sv` covers reset, vector/mask/ack, source+ack collision, exact N=1 timer cadence, cancellation, and sound doorbell behavior. |
+| R16-3 | BUG | Several byte-wide peripherals could still see high-byte/odd-lane bus cycles, and mixer register shadows accepted both bytes regardless of lane enables. These paths could create unintended side effects or replace the untouched byte with zero. | Gate sprite control, mode 416, shared Z80 RAM, I/O, ADC, analog-bank, trackball, PPI, and V25 mailbox selects with the valid low-byte lane. Mixer registers now update only enabled bytes; directed low/high-lane writes reconstruct `0xBBAA`. |
+| R16-4 | BUG | System 32 and Multi 32 audio routes accumulated signed 16-bit terms into only 18 bits, allowing loud legal positive samples to wrap negative before the final divide. | Added `s32_audio_mix` with explicit 20-bit sign extension, unchanged route ratios/cross-routing, arithmetic scaling, and signed 16-bit saturation. Directed zero, ratio, stereo, positive, and negative full-scale cases pass. |
+| R16-5 | TEST | The Windows runner had drifted from the shell runner and omitted the SDRAM tier; the real-ROM and ga2-path benches also omitted five newly added debug outputs. | Restored the SDRAM tier, synchronized both runners, connected the debug outputs, and added interrupt/audio tiers. The complete native ModelSim run passes **30/30 tiers** with **10/10 differential V60 seeds**. The ga2-only full core also passes Verilator 5.032 structural elaboration. |
+| R16-6 | DIAG | Testing only ga2 made it hard to distinguish shared video/interrupt defects from V25/game-specific initialization. | MAME 0.285 verifies `ga2`, `arabfgt`, `spidman`, `holo`, and `svf`. New ignored simulation images were generated for Arabian Fight and Spider-Man. Eight-frame probes from the same universal RTL complete without simulator errors: ga2 reaches video/list setup by frame 7; Arabian Fight reaches mixer, VRAM, palette, and sprite-list writes by frames 2–5; Spider-Man remains in an early I/O polling sequence through frame 7 and becomes a useful non-V25 follow-up. |
+
+## R16 release status
+
+The local RTL audit is regression-clean, but it does not close hardware
+acceptance. The fixes have not yet been proven in a newly fitted,
+timing-qualified RBF on the DE10-Nano. Golden Axe remains the release target;
+Arabian Fight and Spider-Man are diagnostic comparison cases only. The next
+hardware gate is sustained GA2 gameplay through the first-level waterfall/
+flame-heavy scene with correct palette, persistent sprites, stable DDR
+framebuffer activity, and working audio.

@@ -277,7 +277,7 @@ begin
 	          DIR(175 downto 160) & -- DE'
 	          DIR(159 downto 144);  -- BC'
 
-	mcode : work.T80_MCode
+	mcode : entity work.T80_MCode
 		generic map(
 			Mode   => Mode,
 			Flag_C => Flag_C,
@@ -345,7 +345,7 @@ begin
 			Write       => Write,
 			XYbit_undoc => XYbit_undoc);
 
-	alu : work.T80_ALU
+	alu : entity work.T80_ALU
 		generic map(
 			Mode   => Mode,
 			Flag_C => Flag_C,
@@ -960,7 +960,7 @@ begin
 		end if;
 	end process;
 
-	Regs : work.T80_Reg
+	Regs : entity work.T80_Reg
 		port map(
 			Clk => CLK_n,
 			CEN => ClkEn,

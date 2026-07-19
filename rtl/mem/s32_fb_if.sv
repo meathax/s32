@@ -55,7 +55,7 @@ module s32_fb_if #(
     input       [1:0] rd_buf,
     input       [7:0] rd_y,
     output reg        rd_ack,          // line available in buffer
-    input       [8:0] rd_x,            // async read of fetched line
+    input       [8:0] rd_x,            // synchronous read of fetched line
     output     [15:0] rd_pix
 );
 
@@ -75,10 +75,19 @@ reg         run_active;
 reg         run_shadow;
 reg         run_any;               // at least one pixel written
 
-wire [63:0] rd_word = line_buf[rd_x[8:2]];
-assign rd_pix = (rd_x[1:0] == 2'd0) ? rd_word[15:0]  :
-                (rd_x[1:0] == 2'd1) ? rd_word[31:16] :
-                (rd_x[1:0] == 2'd2) ? rd_word[47:32] : rd_word[63:48];
+// Match the registered tile line-buffer latency.  The mixer deliberately
+// waits one clk_ram edge after disp_x changes before snapshotting all layer
+// pixels, so registering this read both aligns sprites with the tile layers
+// and prevents a deep clk_sys -> clk_ram path through the priority logic.
+reg [63:0] rd_word;
+reg  [1:0] rd_lane;
+always @(posedge clk) begin
+    rd_word <= line_buf[rd_x[8:2]];
+    rd_lane <= rd_x[1:0];
+end
+assign rd_pix = (rd_lane == 2'd0) ? rd_word[15:0]  :
+                (rd_lane == 2'd1) ? rd_word[31:16] :
+                (rd_lane == 2'd2) ? rd_word[47:32] : rd_word[63:48];
 
 // DDR engine
 typedef enum logic [3:0] { D_IDLE, D_WR_PF, D_WR, D_ER, D_RD, D_RD_W,
@@ -149,6 +158,14 @@ assign DDRAM_BE       = dbe;
 
 reg flush_req;
 
+// Scanout has a fixed deadline; a completed sprite run may remain queued until
+// a pending display-line fetch has been launched.  Keep acceptance explicit so
+// deferring the flush cannot discard it.
+wire erase_pending = er_req && !er_ack;
+wire read_pending  = rd_req && !rd_ack;
+wire flush_accept  = (dst == D_IDLE) && !erase_pending &&
+                     !read_pending && flush_req;
+
 // capture pixel runs (indexed by the pixel's own x)
 always @(posedge clk) begin
     if (wr_start) begin
@@ -167,14 +184,14 @@ always @(posedge clk) begin
         if (wr_x < run_x0) run_x0 <= wr_x;
         if (wr_x > run_xe) run_xe <= wr_x;
     end
-    if (dst == D_IDLE && flush_req && !er_req) run_active <= 1'b0;
+    if (flush_accept) run_active <= 1'b0;
     if (rst) run_active <= 1'b0;
 end
 
 always @(posedge clk) begin
     if (rst) flush_req <= 0;
     else if (wr_end && run_active) flush_req <= 1'b1;
-    else if (dst == D_IDLE && flush_req && !er_req) flush_req <= 1'b0;
+    else if (flush_accept) flush_req <= 1'b0;
 end
 
 // hold the renderer off from wr_end (combinational — closes the one-cycle
@@ -189,7 +206,7 @@ always @(posedge clk) begin
         case (dst)
         D_IDLE: begin
             dwe <= 0; drd <= 0;
-            if (er_req && !er_ack) begin
+            if (erase_pending) begin
                 daddr  <= pix_addr(er_buf, er_y, 7'd0);
                 // MiSTer recommends pipelined single writes. With burstcnt=1
                 // each accepted beat may advance DDRAM_ADDR legally.
@@ -199,6 +216,13 @@ always @(posedge clk) begin
                 beat   <= 0; beats <= 7'd127;
                 dwe    <= 1'b1;
                 dst    <= D_ER;
+            end
+            else if (read_pending) begin
+                daddr  <= pix_addr(rd_buf, rd_y, 7'd0);
+                dburst <= 8'd128;
+                rbeat  <= 0;
+                drd    <= 1'b1;
+                dst    <= D_RD;
             end
             else if (flush_req) begin
                 beat  <= 0;
@@ -218,13 +242,7 @@ always @(posedge clk) begin
                     dst    <= D_WR_PF;
                 end
             end
-            else if (rd_req && !rd_ack) begin
-                daddr  <= pix_addr(rd_buf, rd_y, 7'd0);
-                dburst <= 8'd128;
-                rbeat  <= 0;
-                drd    <= 1'b1;
-                dst    <= D_RD;
-            end
+
         end
         // One synchronous-RAM prefetch cycle.  q is the base word requested
         // while the preceding D_IDLE edge accepted this flush.

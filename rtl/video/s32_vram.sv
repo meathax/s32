@@ -42,6 +42,18 @@ module s32_vram (
     output reg [15:0] reg_1ff8e     // per-layer disable set 2
 );
 
+// Register shadows must observe the same byte enables as the backing VRAM.
+// Byte writes are common on the V60 bus; replacing the disabled lane with
+// cpu_wdata corrupts scroll, clip, zoom, and layer-control state.
+function automatic [15:0] merge_be(
+    input [15:0] old_value,
+    input [15:0] new_value,
+    input  [1:0] be
+);
+    merge_be = {be[1] ? new_value[15:8] : old_value[15:8],
+                be[0] ? new_value[7:0]  : old_value[7:0]};
+endfunction
+
 s32_big_dpram #(
     .ADDR_WIDTH(16),
     .NUM_WORDS(65536),
@@ -57,53 +69,55 @@ s32_big_dpram #(
 
 always @(posedge clk) begin
     // register shadow (word writes into $1FF00 region)
-    if (cpu_we && cpu_addr[15:7] == 9'h1FF) begin  // 0xFF80..0xFFFF word addrs = byte 1FF00..
-    end
     if (cpu_we && (cpu_addr >= 16'hFF80)) begin
         case (cpu_addr[6:0])
-            7'h00: reg_1ff00 <= cpu_wdata;
-            7'h01: reg_1ff02 <= cpu_wdata;
-            7'h02: reg_1ff04 <= cpu_wdata;
-            7'h03: reg_1ff06 <= cpu_wdata;
-            7'h09: reg_scrollx[0] <= cpu_wdata;
-            7'h0b: reg_scrolly[0] <= cpu_wdata;
-            7'h0d: reg_scrollx[1] <= cpu_wdata;
-            7'h0f: reg_scrolly[1] <= cpu_wdata;
-            7'h11: reg_scrollx[2] <= cpu_wdata;
-            7'h13: reg_scrolly[2] <= cpu_wdata;
-            7'h15: reg_scrollx[3] <= cpu_wdata;
-            7'h17: reg_scrolly[3] <= cpu_wdata;
-            7'h18: reg_offsx[0] <= cpu_wdata;
-            7'h19: reg_offsy[0] <= cpu_wdata;
-            7'h1a: reg_offsx[1] <= cpu_wdata;
-            7'h1b: reg_offsy[1] <= cpu_wdata;
-            7'h1c: reg_offsx[2] <= cpu_wdata;
-            7'h1d: reg_offsy[2] <= cpu_wdata;
-            7'h1e: reg_offsx[3] <= cpu_wdata;
-            7'h1f: reg_offsy[3] <= cpu_wdata;
-            7'h20: reg_pages[0] <= cpu_wdata;
-            7'h21: reg_pages[1] <= cpu_wdata;
-            7'h22: reg_pages[2] <= cpu_wdata;
-            7'h23: reg_pages[3] <= cpu_wdata;
-            7'h24: reg_pages[4] <= cpu_wdata;
-            7'h25: reg_pages[5] <= cpu_wdata;
-            7'h26: reg_pages[6] <= cpu_wdata;
-            7'h27: reg_pages[7] <= cpu_wdata;
-            7'h28: reg_zoomx[0] <= cpu_wdata;
-            7'h29: reg_zoomy[0] <= cpu_wdata;
-            7'h2a: reg_zoomx[1] <= cpu_wdata;
-            7'h2b: reg_zoomy[1] <= cpu_wdata;
-            7'h2e: reg_1ff5c <= cpu_wdata;
-            7'h2f: reg_1ff5e <= cpu_wdata;
+            7'h00: reg_1ff00 <= merge_be(reg_1ff00, cpu_wdata, cpu_be);
+            7'h01: reg_1ff02 <= merge_be(reg_1ff02, cpu_wdata, cpu_be);
+            7'h02: reg_1ff04 <= merge_be(reg_1ff04, cpu_wdata, cpu_be);
+            7'h03: reg_1ff06 <= merge_be(reg_1ff06, cpu_wdata, cpu_be);
+            7'h09: reg_scrollx[0] <= merge_be(reg_scrollx[0], cpu_wdata, cpu_be);
+            7'h0b: reg_scrolly[0] <= merge_be(reg_scrolly[0], cpu_wdata, cpu_be);
+            7'h0d: reg_scrollx[1] <= merge_be(reg_scrollx[1], cpu_wdata, cpu_be);
+            7'h0f: reg_scrolly[1] <= merge_be(reg_scrolly[1], cpu_wdata, cpu_be);
+            7'h11: reg_scrollx[2] <= merge_be(reg_scrollx[2], cpu_wdata, cpu_be);
+            7'h13: reg_scrolly[2] <= merge_be(reg_scrolly[2], cpu_wdata, cpu_be);
+            7'h15: reg_scrollx[3] <= merge_be(reg_scrollx[3], cpu_wdata, cpu_be);
+            7'h17: reg_scrolly[3] <= merge_be(reg_scrolly[3], cpu_wdata, cpu_be);
+            7'h18: reg_offsx[0] <= merge_be(reg_offsx[0], cpu_wdata, cpu_be);
+            7'h19: reg_offsy[0] <= merge_be(reg_offsy[0], cpu_wdata, cpu_be);
+            7'h1a: reg_offsx[1] <= merge_be(reg_offsx[1], cpu_wdata, cpu_be);
+            7'h1b: reg_offsy[1] <= merge_be(reg_offsy[1], cpu_wdata, cpu_be);
+            7'h1c: reg_offsx[2] <= merge_be(reg_offsx[2], cpu_wdata, cpu_be);
+            7'h1d: reg_offsy[2] <= merge_be(reg_offsy[2], cpu_wdata, cpu_be);
+            7'h1e: reg_offsx[3] <= merge_be(reg_offsx[3], cpu_wdata, cpu_be);
+            7'h1f: reg_offsy[3] <= merge_be(reg_offsy[3], cpu_wdata, cpu_be);
+            7'h20: reg_pages[0] <= merge_be(reg_pages[0], cpu_wdata, cpu_be);
+            7'h21: reg_pages[1] <= merge_be(reg_pages[1], cpu_wdata, cpu_be);
+            7'h22: reg_pages[2] <= merge_be(reg_pages[2], cpu_wdata, cpu_be);
+            7'h23: reg_pages[3] <= merge_be(reg_pages[3], cpu_wdata, cpu_be);
+            7'h24: reg_pages[4] <= merge_be(reg_pages[4], cpu_wdata, cpu_be);
+            7'h25: reg_pages[5] <= merge_be(reg_pages[5], cpu_wdata, cpu_be);
+            7'h26: reg_pages[6] <= merge_be(reg_pages[6], cpu_wdata, cpu_be);
+            7'h27: reg_pages[7] <= merge_be(reg_pages[7], cpu_wdata, cpu_be);
+            7'h28: reg_zoomx[0] <= merge_be(reg_zoomx[0], cpu_wdata, cpu_be);
+            7'h29: reg_zoomy[0] <= merge_be(reg_zoomy[0], cpu_wdata, cpu_be);
+            7'h2a: reg_zoomx[1] <= merge_be(reg_zoomx[1], cpu_wdata, cpu_be);
+            7'h2b: reg_zoomy[1] <= merge_be(reg_zoomy[1], cpu_wdata, cpu_be);
+            7'h2e: reg_1ff5c <= merge_be(reg_1ff5c, cpu_wdata, cpu_be);
+            7'h2f: reg_1ff5e <= merge_be(reg_1ff5e, cpu_wdata, cpu_be);
             7'h30, 7'h31, 7'h32, 7'h33, 7'h34, 7'h35, 7'h36, 7'h37,
             7'h38, 7'h39, 7'h3a, 7'h3b, 7'h3c, 7'h3d, 7'h3e, 7'h3f:
-                reg_clips[cpu_addr[3:0]] <= cpu_wdata;
+                reg_clips[{1'b0, cpu_addr[3:0]}] <=
+                    merge_be(reg_clips[{1'b0, cpu_addr[3:0]}], cpu_wdata, cpu_be);
             7'h40, 7'h41, 7'h42, 7'h43:                // 5th rect (bitmap)
-                reg_clips[{2'b10, cpu_addr[1:0]}] <= cpu_wdata;
-            7'h44: reg_1ff88 <= cpu_wdata;
-            7'h45: reg_1ff8a <= cpu_wdata;
-            7'h46: reg_1ff8c <= cpu_wdata;
-            7'h47: reg_1ff8e <= cpu_wdata;
+                // Fifth rectangle occupies clip words 16..19. The former
+                // four-bit concatenation decoded as 8..11 and overwrote rect 3.
+                reg_clips[{3'b100, cpu_addr[1:0]}] <=
+                    merge_be(reg_clips[{3'b100, cpu_addr[1:0]}], cpu_wdata, cpu_be);
+            7'h44: reg_1ff88 <= merge_be(reg_1ff88, cpu_wdata, cpu_be);
+            7'h45: reg_1ff8a <= merge_be(reg_1ff8a, cpu_wdata, cpu_be);
+            7'h46: reg_1ff8c <= merge_be(reg_1ff8c, cpu_wdata, cpu_be);
+            7'h47: reg_1ff8e <= merge_be(reg_1ff8e, cpu_wdata, cpu_be);
             default: ;
         endcase
     end

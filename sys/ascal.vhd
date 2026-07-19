@@ -511,6 +511,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_lex0,o_lex1,o_lex2,o_lex3       : std_logic;
 	SIGNAL o_wr : unsigned(3 DOWNTO 0);
 	SIGNAL o_hcpt,o_vcpt,o_vcpt_pre,o_vcpt_pre2,o_vcpt_pre3,o_vcpt2 : uint12;
+	SIGNAL o_hlast : std_logic := '0';
 	SIGNAL o_ihsize,o_ihsizem,o_ivsize : uint12;
 	SIGNAL o_ihsize_temp, o_ihsize_temp2 : natural RANGE 0 TO 32767;
 
@@ -2760,10 +2761,15 @@ BEGIN
 
 			IF o_ce='1' THEN
 				-- Output pixels count
-				IF o_hcpt+1<o_htotal THEN
+				-- Register the terminal decision one pixel early.  This keeps the
+				-- vertical-counter update off the 12-bit hcounter compare path at
+				-- 148.5 MHz while preserving the exact wrap pixel.
+				IF o_hlast='0' THEN
 					o_hcpt<=(o_hcpt+1) MOD 4096;
+					o_hlast<=to_std_logic(o_hcpt+2>=o_htotal);
 				ELSE
 					o_hcpt<=0;
+					o_hlast<=to_std_logic(1>=o_htotal);
 
 					IF o_vcpt_sync /= 4095 THEN
 						o_vcpt_sync <= o_vcpt_sync+1;

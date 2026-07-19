@@ -28,14 +28,16 @@ wire [13:0] a = cpu_addr[13:0];
 // xBBBBBGGGGGRRRRR <-> xBGRBBBBGGGGRRRR
 function automatic [15:0] to_alt(input [15:0] v);
     // v = x BBBBB GGGGG RRRRR
-    to_alt = {v[15], v[14], v[9], v[4],      // x B4 G4 R4 (top bits)
-              v[13:10], v[8:5], v[3:0]};     // B3-0 G3-0 R3-0
+    // Alternate format promotes each channel's bit 0, not bit 4:
+    //   x B0 G0 R0 B4-1 G4-1 R4-1
+    to_alt = {v[15], v[10], v[5], v[0],
+              v[14:11], v[9:6], v[4:1]};
 endfunction
 function automatic [15:0] from_alt(input [15:0] v);
     // v = x B G R BBBB GGGG RRRR
-    from_alt = {v[15], v[14], v[11:8],       // x BBBBB
-                v[13], v[7:4],               // GGGGG
-                v[12], v[3:0]};              // RRRRR
+    from_alt = {v[15], v[11:8], v[14],
+                v[7:4], v[13],
+                v[3:0], v[12]};
 endfunction
 
 wire [15:0] rd_native;
@@ -53,12 +55,12 @@ wire write_both = |(mixer_r4e & 16'h0880);
 //     avoiding the 16K-word asynchronous read/modify/write that made Quartus
 //     flatten the palette and exhaust host memory.
 //
-// A write-both access must copy the fully merged SOURCE word: byte lanes that
-// are not enabled come from the old source word, not from the old partner.
-// Keep the original one-entry pending transaction for that copy.  Each plane
-// captures the old source bit on the source write and writes the partner on
-// the following idle clock.  This avoids a combinational read from either RAM
-// while retaining the original write-both and byte-enable semantics.
+// A write-both access performs the same masked write independently in each
+// half. Disabled bits therefore remain from each half's own old word (MAME
+// paletteram_w), rather than being copied from the source half. Both physical
+// banks sample the addressed row during the source edge, so the pending edge
+// can merge enabled bits with the partner bank's registered old data without
+// an asynchronous RAM read.
 wire [15:0] cpu_lane_mask = {{8{cpu_be[1]}}, {8{cpu_be[0]}}};
 wire [15:0] wr_mask       = conv ? from_alt(cpu_lane_mask) : cpu_lane_mask;
 wire [15:0] wr_native     = conv ? from_alt(cpu_wdata)     : cpu_wdata;
@@ -106,8 +108,9 @@ always @(posedge clk) begin
                 sim_shadow[a][sim_bit] <= wr_native[sim_bit];
     end
     else if (pend_we) begin
-        sim_shadow[{pend_bank, pend_row}]
-            <= sim_shadow[{~pend_bank, pend_row}];
+        sim_shadow[{pend_bank, pend_row}] <=
+            (sim_shadow[{pend_bank, pend_row}] & ~pend_mask) |
+            (pend_native & pend_mask);
     end
 end
 
@@ -131,15 +134,15 @@ generate
         wire bank0_we = (cpu_we && !a[13] && wr_mask[pal_bit]) || bank0_copy;
         wire bank1_we = (cpu_we &&  a[13] && wr_mask[pal_bit]) || bank1_copy;
 
-        // During the pending clock the source port's registered read still
-        // contains the pre-write source bit captured on the preceding edge.
+        // During the pending clock each bank's registered read contains its
+        // own pre-write bit captured on the source edge.
         wire bank0_d = bank0_copy
                      ? (pend_mask[pal_bit] ? pend_native[pal_bit]
-                                           : bank1_cpu_q)
+                                           : bank0_cpu_q)
                      : wr_native[pal_bit];
         wire bank1_d = bank1_copy
                      ? (pend_mask[pal_bit] ? pend_native[pal_bit]
-                                           : bank0_cpu_q)
+                                           : bank1_cpu_q)
                      : wr_native[pal_bit];
 
         s32_palette_plane_ram bank0 (

@@ -470,7 +470,7 @@ module s32_intc (
 
     // MAME interrupt_control_16_w: BOTH byte lanes are registers —
     // even byte -> ctl[offset*2], odd byte -> ctl[offset*2+1] (ga2 programs
-    // vectors 1/3/5, the ack reg 7, and the timer highs 9/11 on odd lanes;
+    // vectors 0..4, the ack reg 7, and the timer highs 9/11 on both lanes;
     // found by real-ROM boot: dropped acks made an IRQ storm and timer1
     // never armed).
     input             cs,
@@ -499,9 +499,13 @@ reg [4:0] pending;
 
 // timers: t0 at MAIN/2 (24.16 MHz CE assumed = ce counts), t1 at 50MHz/16.
 // Implemented with fractional accumulators on clk_sys=48.324MHz.
-reg [11:0] t0_reload, t1_reload;
 reg [23:0] t0_cnt, t1_cnt;
 reg        t0_run, t1_run;
+
+wire       t0_expire = t0_run && (t0_cnt == 0);
+wire       t1_expire = t1_run && (t1_cnt == 0);
+wire [4:0] pending_sources = {t1_expire, t0_expire, sound_irq,
+                              vblank_end, vblank_start};
 
 wire [7:0] mask = ctl[6];
 wire [4:0] eff = pending & ~mask[4:0];
@@ -518,30 +522,32 @@ end
 
 always @(posedge clk) begin
     if (rst) begin
-        pending <= 0;
-        z80_doorbell <= 0;
-        t0_run <= 0; t1_run <= 0;
-        ctl[6] <= 8'hff;             // mask resets to all-masked
-        ctl[7] <= 8'h00;
+        pending <= 5'd0;
+        z80_doorbell <= 1'b0;
+        t0_run <= 1'b0; t1_run <= 1'b0;
+        t0_cnt <= 24'd0; t1_cnt <= 24'd0;
+        rdata <= 8'hff;
+        // MAME/device-reset contract: the complete 16-byte register file
+        // starts at FF. Leaving vector/timer bytes uninitialized can expose
+        // FPGA power-up state before a game has programmed every source.
+        for (int i = 0; i < 16; i++) ctl[i] <= 8'hff;
     end
     else begin
         z80_doorbell <= 1'b0;
-
-        if (vblank_start) pending[MAIN_IRQ_VBSTART] <= 1'b1;
-        if (vblank_end)   pending[MAIN_IRQ_VBSTOP]  <= 1'b1;
-        if (sound_irq)    pending[MAIN_IRQ_SOUND]   <= 1'b1;
+        // Accumulate every source first. An acknowledgement below applies to
+        // this combined value so it cannot discard a different source that
+        // arrives on the same clock.
+        pending <= pending | pending_sources;
 
         // timer 0: period = 0x800*N ticks of MAIN/2 (~16.1 MHz)
         if (t0_run) begin
             if (t0_cnt == 0) begin
-                pending[MAIN_IRQ_TIMER0] <= 1'b1;
                 t0_run <= 0;
             end
             else t0_cnt <= t0_cnt - 1'd1;
         end
         if (t1_run) begin
             if (t1_cnt == 0) begin
-                pending[MAIN_IRQ_TIMER1] <= 1'b1;
                 t1_run <= 0;
             end
             else t1_cnt <= t1_cnt - 1'd1;
@@ -551,15 +557,21 @@ always @(posedge clk) begin
             if (be[0]) ctl[{addr, 1'b0}] <= wdata[7:0];
             if (be[1]) ctl[{addr, 1'b1}] <= wdata[15:8];
             case (addr)
-                3'd3: if (be[1]) pending <= pending & wdata[12:8];  // byte 7: ack = AND
+                3'd3: if (be[1]) pending <= (pending | pending_sources) & wdata[12:8]; // byte 7: ack = AND
                 3'd4: begin           // bytes 8/9: timer 0 count, one-shot arm
                     logic [11:0] n;
                     n = {(be[1] ? wdata[11:8] : ctl[9][3:0]),
                          (be[0] ? wdata[7:0]  : ctl[8])};
                     if (n != 0) begin
                         // period in clk_sys ticks: 0x800*N / 16.1MHz * 48.3MHz = N*0x1800
-                        t0_cnt <= {n, 11'b0} + {n, 12'b0};
+                        // Store period-1 because expiry is tested before the
+                        // decrement; this produces exactly N*0x1800 clocks.
+                        t0_cnt <= ({n, 11'b0} + {n, 12'b0}) - 1'b1;
                         t0_run <= 1'b1;
+                    end
+                    else begin
+                        t0_cnt <= 24'd0;
+                        t0_run <= 1'b0;
                     end
                 end
                 3'd5: begin           // bytes 10/11: timer 1 count, one-shot arm
@@ -568,8 +580,12 @@ always @(posedge clk) begin
                          (be[0] ? wdata[7:0]  : ctl[10])};
                     if (n != 0) begin
                         // period = 0x100*N / 3.125MHz -> *48.3/3.125 ≈ N*0x100*15.5
-                        t1_cnt <= ({n, 8'b0} << 4) - ({n, 8'b0} >> 1);
+                        t1_cnt <= (({n, 8'b0} << 4) - ({n, 8'b0} >> 1)) - 1'b1;
                         t1_run <= 1'b1;
+                    end
+                    else begin
+                        t1_cnt <= 24'd0;
+                        t1_run <= 1'b0;
                     end
                 end
                 3'd6, 3'd7: z80_doorbell <= 1'b1;    // bytes 12-15: ring sound CPU

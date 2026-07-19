@@ -25,6 +25,7 @@ module s32_mixer (
     input             reg_we,
     input       [5:0] reg_addr,
     input      [15:0] reg_wdata,
+    input       [1:0] reg_be,
     output     [15:0] reg_rdata,
     input       [5:0] reg_raddr,
     output     [15:0] reg_r4e,        // 0x4E: palette write-both control (B6)
@@ -67,7 +68,10 @@ integer __mri;
 initial for(__mri=0;__mri<64;__mri=__mri+1) mreg[__mri]=16'hFFFF;
 assign reg_rdata = mreg[reg_raddr];
 assign reg_r4e   = mreg[6'h27];   // 0x4E/2
-always @(posedge clk) if (reg_we) mreg[reg_addr] <= reg_wdata;
+always @(posedge clk) if (reg_we) begin
+    if (reg_be[0]) mreg[reg_addr][7:0]  <= reg_wdata[7:0];
+    if (reg_be[1]) mreg[reg_addr][15:8] <= reg_wdata[15:8];
+end
 
 // ---------------------------------------------------------------------------
 // sprite group extraction (reg 0x4C low nibble -> shift/mask/or)
@@ -104,7 +108,8 @@ end
 //   shadow source a: bit15 CLEAR when reg 0x4C bit2 set (RMW shadow sprites)
 //   shadow source b: masked pen == sprshadow (0x7ffe & sprpixmask) — the
 //     shadow pen: itself transparent, shadows whatever wins beneath
-wire [3:0]  spr_group = sprgroup_or | (spr_pix >> sprgroup_shift) & {12'b0,sprgroup_mask};
+wire [3:0]  spr_group_raw = (spr_pix >> sprgroup_shift) & {12'b0,sprgroup_mask};
+wire [3:0]  spr_group = sprgroup_or | spr_group_raw;
 wire [15:0] sprpixmask = ((16'h1 << sprgroup_shift) - 1) & 16'h3fff;
 wire        spr_transp = (spr_pix & 16'h7fff) == 16'h7fff;
 wire [15:0] sprshadowpen = 16'h7ffe & sprpixmask;
@@ -143,34 +148,48 @@ always @(*) begin
     ep_bmp  = (!layer_off[5] && px_bmp[13]  && lr_b[3:0] != 0) ? {lr_b[3:0], 3'd1} : 7'd0;
 end
 
-// winner select (8-way max)
+// The source pixels arrive from registered line/frame buffers, but the full
+// two-winner scan plus palette-index arithmetic is much too deep for 96 MHz.
+// Snapshot the per-pixel candidates first, then resolve winner, runner-up and
+// palette indices on separate clocks.  The 416-wide mode still provides 12
+// clk_ram clocks per pixel, so this leaves two clocks of margin.
+reg [6:0] ep_spr_s, ep_text_s, ep_nbg0_s, ep_nbg1_s;
+reg [6:0] ep_nbg2_s, ep_nbg3_s, ep_bmp_s, ep_spr_nom_s;
+
+// winner select (8-way max), evaluated from the candidate snapshot
 reg [6:0] best;
 reg [3:0] bestsel;   // 0=text 1..4 nbg 5 bmp 6 spr 7 bg (== MAME laynum)
 always @(*) begin
     best = ep_bg; bestsel = 4'd7;
-    if (ep_bmp  > best) begin best = ep_bmp;  bestsel = 4'd5; end
-    if (ep_nbg3 > best) begin best = ep_nbg3; bestsel = 4'd4; end
-    if (ep_nbg2 > best) begin best = ep_nbg2; bestsel = 4'd3; end
-    if (ep_nbg1 > best) begin best = ep_nbg1; bestsel = 4'd2; end
-    if (ep_nbg0 > best) begin best = ep_nbg0; bestsel = 4'd1; end
-    if (ep_text > best) begin best = ep_text; bestsel = 4'd0; end
-    if (ep_spr  > best) begin best = ep_spr;  bestsel = 4'd6; end
+    if (ep_bmp_s  > best) begin best = ep_bmp_s;  bestsel = 4'd5; end
+    if (ep_nbg3_s > best) begin best = ep_nbg3_s; bestsel = 4'd4; end
+    if (ep_nbg2_s > best) begin best = ep_nbg2_s; bestsel = 4'd3; end
+    if (ep_nbg1_s > best) begin best = ep_nbg1_s; bestsel = 4'd2; end
+    if (ep_nbg0_s > best) begin best = ep_nbg0_s; bestsel = 4'd1; end
+    if (ep_text_s > best) begin best = ep_text_s; bestsel = 4'd0; end
+    if (ep_spr_s  > best) begin best = ep_spr_s;  bestsel = 4'd6; end
 end
+
+reg [6:0] best_hold;
+reg [3:0] bestsel_hold;
 
 // blend partner: the same scan continued below the winner
 reg [6:0] best2;
 reg [3:0] best2sel;
 always @(*) begin
     best2 = 7'd0; best2sel = 4'd7;   // background is the floor of every scan
-    if (bestsel != 4'd7)               begin best2 = ep_bg;   best2sel = 4'd7; end
-    if (bestsel != 4'd5 && ep_bmp  > best2) begin best2 = ep_bmp;  best2sel = 4'd5; end
-    if (bestsel != 4'd4 && ep_nbg3 > best2) begin best2 = ep_nbg3; best2sel = 4'd4; end
-    if (bestsel != 4'd3 && ep_nbg2 > best2) begin best2 = ep_nbg2; best2sel = 4'd3; end
-    if (bestsel != 4'd2 && ep_nbg1 > best2) begin best2 = ep_nbg1; best2sel = 4'd2; end
-    if (bestsel != 4'd1 && ep_nbg0 > best2) begin best2 = ep_nbg0; best2sel = 4'd1; end
-    if (bestsel != 4'd0 && ep_text > best2) begin best2 = ep_text; best2sel = 4'd0; end
-    if (bestsel != 4'd6 && ep_spr  > best2) begin best2 = ep_spr;  best2sel = 4'd6; end
+    if (bestsel_hold != 4'd7) begin best2 = ep_bg; best2sel = 4'd7; end
+    if (bestsel_hold != 4'd5 && ep_bmp_s  > best2) begin best2 = ep_bmp_s;  best2sel = 4'd5; end
+    if (bestsel_hold != 4'd4 && ep_nbg3_s > best2) begin best2 = ep_nbg3_s; best2sel = 4'd4; end
+    if (bestsel_hold != 4'd3 && ep_nbg2_s > best2) begin best2 = ep_nbg2_s; best2sel = 4'd3; end
+    if (bestsel_hold != 4'd2 && ep_nbg1_s > best2) begin best2 = ep_nbg1_s; best2sel = 4'd2; end
+    if (bestsel_hold != 4'd1 && ep_nbg0_s > best2) begin best2 = ep_nbg0_s; best2sel = 4'd1; end
+    if (bestsel_hold != 4'd0 && ep_text_s > best2) begin best2 = ep_text_s; best2sel = 4'd0; end
+    if (bestsel_hold != 4'd6 && ep_spr_s  > best2) begin best2 = ep_spr_s;  best2sel = 4'd6; end
 end
+
+reg [6:0] best2_hold;
+reg [3:0] best2sel_hold;
 
 // ---------------------------------------------------------------------------
 // backdrop pixel (MAME update_background): per line,
@@ -200,19 +219,22 @@ wire [19:0] li_spr  = {(r4c[1:0] == 2'b11) ? r4c[7:4] : sprreg[7:4],
                        sprreg[9:8], spr_pix[13:0] & sprpixmask[13:0]};
 wire [19:0] li_bg   = {lr_bg[7:4], lr_bg[9:8], bg_pen};
 
+reg [19:0] li_text_s, li_nbg0_s, li_nbg1_s, li_nbg2_s;
+reg [19:0] li_nbg3_s, li_bmp_s, li_spr_s, li_bg_s;
+
 reg [19:0] li_first, li_second;
 always @(*) begin
-    case (bestsel)
-        4'd0: li_first = li_text;  4'd1: li_first = li_nbg0;
-        4'd2: li_first = li_nbg1;  4'd3: li_first = li_nbg2;
-        4'd4: li_first = li_nbg3;  4'd5: li_first = li_bmp;
-        4'd6: li_first = li_spr;   default: li_first = li_bg;
+    case (bestsel_hold)
+        4'd0: li_first = li_text_s;  4'd1: li_first = li_nbg0_s;
+        4'd2: li_first = li_nbg1_s;  4'd3: li_first = li_nbg2_s;
+        4'd4: li_first = li_nbg3_s;  4'd5: li_first = li_bmp_s;
+        4'd6: li_first = li_spr_s;   default: li_first = li_bg_s;
     endcase
-    case (best2sel)
-        4'd0: li_second = li_text; 4'd1: li_second = li_nbg0;
-        4'd2: li_second = li_nbg1; 4'd3: li_second = li_nbg2;
-        4'd4: li_second = li_nbg3; 4'd5: li_second = li_bmp;
-        4'd6: li_second = li_spr;  default: li_second = li_bg;
+    case (best2sel_hold)
+        4'd0: li_second = li_text_s; 4'd1: li_second = li_nbg0_s;
+        4'd2: li_second = li_nbg1_s; 4'd3: li_second = li_nbg2_s;
+        4'd4: li_second = li_nbg3_s; 4'd5: li_second = li_bmp_s;
+        4'd6: li_second = li_spr_s;  default: li_second = li_bg_s;
     endcase
 end
 
@@ -229,33 +251,38 @@ wire [13:0] idx_second = mk_palidx(li_second);
 // blend controls (reg 0x4E: bit11 enable, bits 10:8 factor;
 //   winner's reg 0x30+2*lay: bits 13:6 blendmask, bits 5:0 sprite-group code)
 // ---------------------------------------------------------------------------
-wire        blendenable = r4e[11];
-wire [2:0]  blendfactor = r4e[10:8];
-wire [15:0] wblendreg   = mreg[6'h18 + {2'b0, bestsel}];   // valid for lay 0..5
-wire        winner_blends = (bestsel <= 4'd5);
-wire [7:0]  blendmask   = (blendenable && winner_blends) ? wblendreg[13:6] : 8'h00;
+reg         blendenable_s;
+reg  [2:0]  blendfactor_s;
+reg  [15:0] wblendreg_hold;
+wire        winner_blends = (bestsel_hold <= 4'd5);
+wire [7:0]  blendmask   = (blendenable_s && winner_blends) ? wblendreg_hold[13:6] : 8'h00;
 
 // compute_sprite_blend: mm=(enc>>4)&3, v=enc&0xf
 reg [15:0] sprblendmask;
 always @(*) begin
-    case (wblendreg[5:4])
-        2'b00: sprblendmask = 16'h1 << wblendreg[3:0];
-        2'b01: sprblendmask = (16'h1 << wblendreg[3:0]) | ((16'h1 << wblendreg[3:0]) - 16'h1);
-        2'b10: sprblendmask = ~((16'h1 << wblendreg[3:0]) - 16'h1);
+    case (wblendreg_hold[5:4])
+        2'b00: sprblendmask = 16'h1 << wblendreg_hold[3:0];
+        2'b01: sprblendmask = (16'h1 << wblendreg_hold[3:0]) | ((16'h1 << wblendreg_hold[3:0]) - 16'h1);
+        2'b10: sprblendmask = ~((16'h1 << wblendreg_hold[3:0]) - 16'h1);
         2'b11: sprblendmask = 16'hffff;
     endcase
 end
 
-wire do_blend = blendmask[best2sel[2:0]] &&
-                (best2sel != 4'd6 || sprblendmask[spr_group]);
+reg [3:0] spr_group_s;
+reg [3:0] spr_group_raw_s;
+// MAME uses the raw pixel-derived group for the per-layer sprite blend
+// mask. sprgroup_or selects the effective priority/palette register only.
+wire do_blend = blendmask[best2sel_hold[2:0]] &&
+                (best2sel_hold != 4'd6 || sprblendmask[spr_group_raw_s]);
 
 // shadow applies when the scan passes the sprite layer's order slot:
 //   scan 1 (always): sprite at/above the winner
 //   scan 2 (only when the winner has blends): sprite below winner, at/above
 //   the partner — MAME's second loop re-evaluates shadow identically
-wire shadow_now = spr_shadow_src && (ep_spr_nom != 0) &&
-                  ( ep_spr_nom >= best ||
-                    (blendmask != 8'h00 && bestsel != 4'd6 && ep_spr_nom >= best2) );
+reg spr_shadow_src_s;
+wire shadow_now = spr_shadow_src_s && (ep_spr_nom_s != 0) &&
+                  ( ep_spr_nom_s >= best_hold ||
+                    (blendmask != 8'h00 && bestsel_hold != 4'd6 && ep_spr_nom_s >= best2_hold) );
 
 // ---------------------------------------------------------------------------
 // color offsets: rgboffs bank0 = regs 0x40-0x44, bank1 = 0x46-0x4A, bank2 = 0
@@ -267,6 +294,9 @@ wire shadow_now = spr_shadow_src && (ep_spr_nom != 0) &&
 wire [5:0] layer_color_flags = {mreg[6'h1d][14], mreg[6'h1c][14],
                                 mreg[6'h1b][14], mreg[6'h1a][14],
                                 mreg[6'h19][14], mreg[6'h18][14]};
+reg [15:0] r3e_s;
+reg        r4c15_s;
+reg  [5:0] layer_color_flags_s;
 wire [17:0] coloroffs_bank0 = {mreg[6'h22][5:0], mreg[6'h21][5:0],
                                mreg[6'h20][5:0]};
 wire [17:0] coloroffs_bank1 = {mreg[6'h25][5:0], mreg[6'h24][5:0],
@@ -323,21 +353,35 @@ endfunction
 
 // ---------------------------------------------------------------------------
 // pixel pipeline: two palette lookups per pixel, then MAME's 5-bit-domain
-// arithmetic. Palette port is registered on clk_sys (2 clk_ram) — allow 5
-// clk_ram per lookup. Pixel period is >= ~11.6 clk_ram (416 mode).
+// arithmetic. Palette port is registered on clk_sys (2 clk_ram); three
+// clk_ram clocks cover the worst edge alignment and registered RAM address.
+// Pixel period is 12 clk_ram in 416 mode and >= 14 in 320 mode.
 //   T0 (disp_x changes): synchronous line-RAM read is issued
-//   T1: latch winner context from the RAM outputs, present first index
-//   T6: capture first pixel, present second index
-//   T11: capture second pixel, blend/shadow/clamp, register rgb
+//   T1: snapshot candidates from the RAM outputs
+//   T2: resolve/register winner
+//   T3: resolve/register blend partner
+//   T4: present first palette index and latch final context
+//   P1: present the second palette index after the first RAM read is captured
+//   P3: capture the first pixel
+//   P4: apply both color-offset banks
+//   P5: blend and apply shadow
+//   P6: clamp and register rgb
 // ---------------------------------------------------------------------------
 reg [8:0]  dx_d;
 reg [3:0]  ph;
 reg        launch_pending;
+reg        winner_pending;
+reg        second_pending;
+reg        resolve_pending;
 reg [13:0] pal_addr_r;
+reg [15:0] pal_data_r;
 reg [15:0] first_pal;
 reg [13:0] idx2_hold;
 reg        blend_hold, shadow_hold, act_hold;
 reg [1:0]  co1_hold, co2_hold;
+reg signed [7:0] r1_pipe, g1_pipe, b1_pipe;
+reg signed [7:0] r2_pipe, g2_pipe, b2_pipe;
+reg signed [11:0] rr_pipe, gg_pipe, bb_pipe;
 assign pal_addr = pal_addr_r;
 
 function automatic [4:0] clamp5(input signed [11:0] v);
@@ -347,13 +391,19 @@ function automatic [4:0] clamp5(input signed [11:0] v);
 endfunction
 
 always @(posedge clk) begin
-    logic signed [7:0]  r1, g1, b1, r2, g2, b2;
     logic signed [11:0] rr, gg, bb;
 
     dx_d <= disp_x;
+    // The palette RAM is clocked at clk_sys while the mixer runs at 2x that
+    // rate.  Register its output before the offset/blend DSP chain so the RAM
+    // clock crossing is a short path to one fast-domain register.
+    pal_data_r <= pal_data;
     if (rst) begin
         ph <= 4'hF;
         launch_pending <= 1'b0;
+        winner_pending <= 1'b0;
+        second_pending <= 1'b0;
+        resolve_pending <= 1'b0;
         rgb <= 24'h000000;
     end
     else if (disp_x != dx_d) begin
@@ -361,56 +411,117 @@ always @(posedge clk) begin
         // outputs become visible after the edge, so launch winner selection
         // on the following clock rather than pairing old pixels with new x.
         launch_pending <= 1'b1;
+        winner_pending <= 1'b0;
+        second_pending <= 1'b0;
+        resolve_pending <= 1'b0;
         ph <= 4'hF;
     end
     else if (launch_pending) begin
+        ep_spr_s     <= ep_spr;
+        ep_text_s    <= ep_text;
+        ep_nbg0_s    <= ep_nbg0;
+        ep_nbg1_s    <= ep_nbg1;
+        ep_nbg2_s    <= ep_nbg2;
+        ep_nbg3_s    <= ep_nbg3;
+        ep_bmp_s     <= ep_bmp;
+        ep_spr_nom_s <= ep_spr_nom;
+        li_text_s    <= li_text;
+        li_nbg0_s    <= li_nbg0;
+        li_nbg1_s    <= li_nbg1;
+        li_nbg2_s    <= li_nbg2;
+        li_nbg3_s    <= li_nbg3;
+        li_bmp_s     <= li_bmp;
+        li_spr_s     <= li_spr;
+        li_bg_s      <= li_bg;
+        spr_group_s  <= spr_group;
+        spr_group_raw_s <= spr_group_raw;
+        spr_shadow_src_s <= spr_shadow_src;
+        blendenable_s <= r4e[11];
+        blendfactor_s <= r4e[10:8];
+        r3e_s <= r3e;
+        r4c15_s <= r4c[15];
+        layer_color_flags_s <= layer_color_flags;
+        act_hold <= disp_active & display_en;
+        launch_pending <= 1'b0;
+        winner_pending <= 1'b1;
+    end
+    else if (winner_pending) begin
+        best_hold <= best;
+        bestsel_hold <= bestsel;
+        winner_pending <= 1'b0;
+        second_pending <= 1'b1;
+    end
+    else if (second_pending) begin
+        best2_hold <= best2;
+        best2sel_hold <= best2sel;
+        // bestsel_hold was registered on the preceding edge.  Reading the
+        // winner's blend register here avoids putting the winner priority
+        // chain and register-file mux in the same 96 MHz path.
+        wblendreg_hold <= mreg[6'h18 + {2'b0, bestsel_hold}];
+        second_pending <= 1'b0;
+        resolve_pending <= 1'b1;
+    end
+    else if (resolve_pending) begin
         pal_addr_r  <= idx_first;
         idx2_hold   <= idx_second;
         blend_hold  <= do_blend;
         shadow_hold <= shadow_now;
-        co1_hold    <= coloroffs_of(bestsel,  r3e, r4c[15], layer_color_flags);
-        co2_hold    <= coloroffs_of(best2sel, r3e, r4c[15], layer_color_flags);
-        act_hold    <= disp_active & display_en;
-        launch_pending <= 1'b0;
+        co1_hold    <= coloroffs_of(bestsel_hold,  r3e_s, r4c15_s, layer_color_flags_s);
+        co2_hold    <= coloroffs_of(best2sel_hold, r3e_s, r4c15_s, layer_color_flags_s);
+        resolve_pending <= 1'b0;
         ph <= 4'd0;
     end
     else if (ph != 4'hF) begin
         ph <= ph + 1'd1;
-        if (ph == 4'd4) begin
-            first_pal  <= pal_data;
+        if (ph == 4'd1) begin
+            // Switch the registered palette port early.  The first value is
+            // already retained in pal_data_r, while this gives the second
+            // value enough time to cross from clk_sys before the P4 stage.
             pal_addr_r <= idx2_hold;
         end
-        else if (ph == 4'd9) begin
-            // both pixels in hand: offsets in the 5-bit domain, then blend,
-            // then shadow halving, then clamp — exactly MAME's order
-            r1 = $signed({3'b0, first_pal[4:0]})
-               + off_chan(co1_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
-            g1 = $signed({3'b0, first_pal[9:5]})
-               + off_chan(co1_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
-            b1 = $signed({3'b0, first_pal[14:10]})
-               + off_chan(co1_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
-            r2 = $signed({3'b0, pal_data[4:0]})
-               + off_chan(co2_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
-            g2 = $signed({3'b0, pal_data[9:5]})
-               + off_chan(co2_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
-            b2 = $signed({3'b0, pal_data[14:10]})
-               + off_chan(co2_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
+        else if (ph == 4'd3) begin
+            first_pal <= pal_data_r;
+        end
+        else if (ph == 4'd4) begin
+            // Keep the offset-bank muxes out of the DSP/clamp path.
+            r1_pipe <= $signed({3'b0, first_pal[4:0]})
+                     + off_chan(co1_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
+            g1_pipe <= $signed({3'b0, first_pal[9:5]})
+                     + off_chan(co1_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
+            b1_pipe <= $signed({3'b0, first_pal[14:10]})
+                     + off_chan(co1_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
+            r2_pipe <= $signed({3'b0, pal_data_r[4:0]})
+                     + off_chan(co2_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
+            g2_pipe <= $signed({3'b0, pal_data_r[9:5]})
+                     + off_chan(co2_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
+            b2_pipe <= $signed({3'b0, pal_data_r[14:10]})
+                     + off_chan(co2_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
+        end
+        else if (ph == 4'd5) begin
+            // Preserve MAME's order: offset, blend, then shadow.
             if (blend_hold) begin
-                rr = (r1 * $signed({2'b0, 3'd7 - blendfactor})
-                    + r2 * ($signed({2'b0, blendfactor}) + 5'sd1)) >>> 3;
-                gg = (g1 * $signed({2'b0, 3'd7 - blendfactor})
-                    + g2 * ($signed({2'b0, blendfactor}) + 5'sd1)) >>> 3;
-                bb = (b1 * $signed({2'b0, 3'd7 - blendfactor})
-                    + b2 * ($signed({2'b0, blendfactor}) + 5'sd1)) >>> 3;
+                rr = (r1_pipe * $signed({2'b0, 3'd7 - blendfactor_s})
+                    + r2_pipe * ($signed({2'b0, blendfactor_s}) + 5'sd1)) >>> 3;
+                gg = (g1_pipe * $signed({2'b0, 3'd7 - blendfactor_s})
+                    + g2_pipe * ($signed({2'b0, blendfactor_s}) + 5'sd1)) >>> 3;
+                bb = (b1_pipe * $signed({2'b0, 3'd7 - blendfactor_s})
+                    + b2_pipe * ($signed({2'b0, blendfactor_s}) + 5'sd1)) >>> 3;
             end
             else begin
-                rr = r1; gg = g1; bb = b1;
+                rr = r1_pipe; gg = g1_pipe; bb = b1_pipe;
             end
             if (shadow_hold) begin
                 rr = rr >>> 1; gg = gg >>> 1; bb = bb >>> 1;
             end
+            rr_pipe <= rr;
+            gg_pipe <= gg;
+            bb_pipe <= bb;
+        end
+        else if (ph == 4'd6) begin
             rgb <= !act_hold ? 24'h000000
-                 : {clamp5(rr), 3'b000, clamp5(gg), 3'b000, clamp5(bb), 3'b000};
+                 : {clamp5(rr_pipe), 3'b000,
+                    clamp5(gg_pipe), 3'b000,
+                    clamp5(bb_pipe), 3'b000};
             ph <= 4'hF;
         end
     end

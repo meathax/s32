@@ -119,44 +119,73 @@ always @(posedge clk_sys) begin
     p3_dout <= sc[p3_addr[21:1]];   // soundcpu base 0x200000
 end
 
-// framebuffer service: behavioral model of the emu-top s32_fb_if
-// (4 buffers x 256 lines x 512 px; erased state = 0xFFFF = transparent,
-// shadow runs RMW dest &= 0x7FFF, reads serve the line latched at rd_req)
+// Framebuffer service.  The broad regression keeps the compact behavioral
+// memory; +define+S32_REAL_FB_SIM selects the production s32_fb_if plus a
+// deterministic MiSTer-style DDR model for Golden Axe qualification.
 wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req;
 wire  [1:0] fbw_buf, fbe_buf, fbr_buf;
 wire  [8:0] fbw_x, fbr_x;
 wire  [7:0] fbw_y, fbe_y, fbr_y;
 wire [15:0] fbw_pix;
 wire        fbw_shadow;
-reg  [15:0] fbmem [0:3][0:255][0:511];
+wire        fbw_busy, fbe_ack, fbr_ack;
+wire [15:0] fbr_pix;
+
+integer fbr_accepts = 0;
+reg [1:0] fbr_buf_l;
+reg [7:0] fbr_y_l;
+reg fbr_req_d = 0, fbr_ack_h_d = 0;
+always @(posedge clk_ram) begin
+    fbr_req_d   <= fbr_req;
+    fbr_ack_h_d <= fbr_ack;
+    if (fbr_req && !fbr_req_d) begin
+        fbr_buf_l <= fbr_buf;
+        fbr_y_l   <= fbr_y;
+    end
+    if (fbr_ack && !fbr_ack_h_d)
+        fbr_accepts = fbr_accepts + 1;
+end
+
+`ifdef S32_REAL_FB_SIM
+wire [31:0] fb_ddr_writes, fb_ddr_reads, fb_line_acks;
+wire [31:0] fb_max_wr_wait, fb_max_rd_wait, fb_max_er_wait;
+wire        fb_deadline_fail;
+
+s32_fb_ddr_model fb_service (
+    .clk(clk_ram), .rst(rst),
+    .wr_start(fbw_start), .wr_buf(fbw_buf), .wr_x(fbw_x), .wr_y(fbw_y),
+    .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
+    .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
+    .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
+    .rd_req(fbr_req), .rd_buf(fbr_buf), .rd_y(fbr_y), .rd_ack(fbr_ack),
+    .rd_x(fbr_x), .rd_pix(fbr_pix),
+    .write_accepts(fb_ddr_writes), .read_accepts(fb_ddr_reads),
+    .line_acks(fb_line_acks),
+    .max_wr_wait(fb_max_wr_wait), .max_rd_wait(fb_max_rd_wait),
+    .max_er_wait(fb_max_er_wait), .deadline_fail(fb_deadline_fail)
+);
+`else
+// Fast behavioral model: 4 buffers x 256 lines x 512 pixels.
+reg [15:0] fbmem [0:3][0:255][0:511];
 initial for (int b = 0; b < 4; b++)
     for (int y = 0; y < 256; y++)
-        for (int x = 0; x < 512; x++) fbmem[b][y][x] = 16'hFFFF;
-reg fbe_ack;
+        for (int x = 0; x < 512; x++) fbmem[b][y][x] = 16'hffff;
+reg fbe_ack_r = 0, fbr_ack_r = 0;
+assign fbe_ack = fbe_ack_r;
+assign fbr_ack = fbr_ack_r;
+assign fbw_busy = 1'b0;
 always @(posedge clk_ram) begin
-    fbe_ack <= fbe_req;
+    fbe_ack_r <= fbe_req;
+    fbr_ack_r <= fbr_req && !fbr_ack_r;
     if (fbw_valid) begin
         if (fbw_shadow) fbmem[fbw_buf][fbw_y][fbw_x][15] <= 1'b0;
         else            fbmem[fbw_buf][fbw_y][fbw_x] <= fbw_pix;
     end
-    if (fbe_req && !fbe_ack)
-        for (int x = 0; x < 512; x++) fbmem[fbe_buf][fbe_y][x] = 16'hFFFF;
+    if (fbe_req && !fbe_ack_r)
+        for (int x = 0; x < 512; x++) fbmem[fbe_buf][fbe_y][x] = 16'hffff;
 end
-// Read-line service uses a conditional acknowledge pulse.  Holding ack high
-// suppresses the core request entirely: s32_core only launches when ack is
-// low, then holds req/address until the service acknowledges it.
-reg fbr_ack = 0;
-integer fbr_accepts = 0;
-reg [1:0] fbr_buf_l; reg [7:0] fbr_y_l;
-always @(posedge clk_ram) begin
-    fbr_ack <= fbr_req && !fbr_ack;
-    if (fbr_req && !fbr_ack) begin
-        fbr_buf_l <= fbr_buf;
-        fbr_y_l <= fbr_y;
-        fbr_accepts = fbr_accepts + 1;
-    end
-end
-wire [15:0] fbr_pix = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+assign fbr_pix = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+`endif
 integer spr_px = 0;
 always @(posedge clk_ram) if (fbw_valid) spr_px = spr_px + 1;
 // Renderer liveness: accepted sprite-ROM bursts and valid draw commands.
@@ -269,7 +298,7 @@ wire [23:0] rgb_a;
 wire        ce_pix;
 
 s32_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .board(board),
+    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .video_rst(rst), .board(board),
     .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_z80), .ce_pcm(ce_pcm),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr), .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
@@ -278,7 +307,7 @@ s32_core core (
     .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
     .fb_wr_start(fbw_start), .fb_wr_buf(fbw_buf), .fb_wr_x(fbw_x), .fb_wr_y(fbw_y),
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
-    .fb_wr_shadow(fbw_shadow), .fb_wr_busy(1'b0),
+    .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
     .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
     .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
@@ -294,7 +323,8 @@ s32_core core (
     .trk_btn(tbt_a),
     .ppi_pa(8'hff), .ppi_pb(8'hff), .ppi_pc(8'hff),
     .rgb_a(rgb_a), .rgb_b(), .ce_pix(ce_pix), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
-    .audio_l(), .audio_r(), .out_lamps()
+    .audio_l(), .audio_r(), .out_lamps(),
+    .debug_pc(), .debug_halted(), .debug_status(), .debug_first_rom(), .debug_hcnt()
 );
 
 // MAME's v60_device::device_start() gives R0..R30 a deterministic zero
@@ -731,6 +761,42 @@ endtask
 integer nb_pix = 0;
 always @(posedge clk_sys)
     if (ce_pix && !hb && !vb && rgb_a != 24'h0) nb_pix = nb_pix + 1;
+
+// A compact whole-frame signature proves that active video remains known and
+// continues changing after the game has accepted coin/start/player input.
+reg [31:0] frame_sig = 32'h811c9dc5;
+reg [31:0] prev_frame_sig = 0;
+reg        frame_sig_seen = 0;
+integer    frame_sig_samples = 0;
+integer    frame_sig_changes = 0;
+integer    frame_sig_x = 0;
+always @(posedge clk_sys) begin
+    if (rst) begin
+        frame_sig <= 32'h811c9dc5;
+        prev_frame_sig <= 0;
+        frame_sig_seen <= 0;
+        frame_sig_samples <= 0;
+        frame_sig_changes <= 0;
+        frame_sig_x <= 0;
+    end
+    else begin
+        if (ce_pix && !hb && !vb)
+            frame_sig <= {frame_sig[26:0], frame_sig[31:27]} ^
+                         {8'h00, rgb_a} ^ {23'h0, core.hcnt[8:0]};
+        if (vb && !vb_d) begin
+            if (cur_frame >= 55) begin
+                frame_sig_samples <= frame_sig_samples + 1;
+                if (^frame_sig === 1'bx)
+                    frame_sig_x <= frame_sig_x + 1;
+                if (frame_sig_seen && frame_sig != prev_frame_sig)
+                    frame_sig_changes <= frame_sig_changes + 1;
+                prev_frame_sig <= frame_sig;
+                frame_sig_seen <= 1'b1;
+            end
+            frame_sig <= 32'h811c9dc5 ^ cur_frame;
+        end
+    end
+end
 // prefetch/kick/mixer liveness
 integer rdreq_cnt = 0, kick_cnt = 0, spr_opq_cnt = 0;
 always @(posedge clk_sys) if (core.fb_rd_req) rdreq_cnt = rdreq_cnt + 1;
@@ -833,6 +899,30 @@ initial begin
         $fatal(1, "ROMBOOT P1 start was never returned on SERVICE12 bit 4");
     if (p1_event_count > 0 && p1a_active_samples == 0)
         $fatal(1, "ROMBOOT P1 digital event was never returned on P1A");
+`ifdef S32_REAL_FB_SIM
+    if (fb_deadline_fail)
+        $fatal(1, "GA2 production framebuffer reported a service deadline failure");
+    if (fb_ddr_writes == 0 || fb_ddr_reads == 0)
+        $fatal(1, "GA2 DDR traffic missing: writes=%0d reads=%0d",
+               fb_ddr_writes, fb_ddr_reads);
+    if (fb_line_acks < frames * 128)
+        $fatal(1, "GA2 framebuffer line service too sparse: acks=%0d frames=%0d",
+               fb_line_acks, frames);
+    if (frames >= 70 && spr_px == 0)
+        $fatal(1, "GA2 reached gameplay window without any sprite pixels");
+    if (frame_sig_x != 0)
+        $fatal(1, "GA2 active-video signature contained X on %0d frames",
+               frame_sig_x);
+    if (frames >= 70 && frame_sig_samples < 10)
+        $fatal(1, "GA2 active-video signature window was not exercised");
+    if (frames >= 90 && frame_sig_changes < 3)
+        $fatal(1, "GA2 active video stopped changing: samples=%0d changes=%0d",
+               frame_sig_samples, frame_sig_changes);
+    $display("GA2 DDR QUALIFICATION PASS writes=%0d reads=%0d line_acks=%0d max_wr=%0d max_rd=%0d max_er=%0d sig_samples=%0d sig_changes=%0d",
+        fb_ddr_writes, fb_ddr_reads, fb_line_acks,
+        fb_max_wr_wait, fb_max_rd_wait, fb_max_er_wait,
+        frame_sig_samples, frame_sig_changes);
+`endif
     $display("ROMBOOT DONE");
     $finish;
 end

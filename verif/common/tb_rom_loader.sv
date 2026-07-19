@@ -4,7 +4,8 @@
 //   * EEPROM-only downloads never open the ROM boot gate
 //   * index-0 start/end controls rom_loaded and waits for the final SDRAM ack
 //   * all SDRAM region boundaries preserve little-endian byte pairing/mapping
-//   * V25 writes use the MCU-local offset before address descrambling
+//   * V25 writes use the inverse MAME permutation of the MCU-local source
+//     offset, including the real GA2 reset-vector source address
 //   * persisted index-3 EEPROM data loads as little-endian 16-bit words
 //============================================================================
 `timescale 1ns/1ps
@@ -211,15 +212,25 @@ initial begin
     check_sdr_pair(OFF_MCU-2,        8'h42, 8'h43, 24'h6FFFFF);
     check_sdr_pair(OFF_SPRITES,      8'h50, 8'h51, 24'h800000);
 
-    // The stream's MCU base has low bits 0x0040.  A local offset of 0x0040
-    // contains only source bit 6, which the documented bitswap maps to bit 2
-    // (0x0004).  This specifically detects permuting the global address.
+    // The stream's MCU base has low bits 0x0040.  Local source offset 0x0040
+    // contains only source bit 6, which the inverse permutation maps to
+    // destination bit 10 (0x0400).  This also detects accidentally permuting
+    // the global stream address rather than the MCU-local source offset.
     send_byte(8'd0, OFF_MCU + 27'h0000040, 8'hC7);
-    check(v25_wr && v25_waddr === 16'h0004 && v25_wdata === 8'hC7,
-          "V25 uses MCU-local descrambled address");
+    check(v25_wr && v25_waddr === 16'h0400 && v25_wdata === 8'hC7,
+          "V25 uses inverse-permuted MCU-local source address");
     @(posedge clk);
     #1;
     check(!v25_wr, "V25 write is a one-cycle pulse");
+
+    // Golden Axe II stores encrypted reset byte 0x02 at raw source 0xFDDC.
+    // MAME's contract places that byte at V25 destination 0xFFF0.
+    send_byte(8'd0, OFF_MCU + 27'h000FDDC, 8'h02);
+    check(v25_wr && v25_waddr === 16'hFFF0 && v25_wdata === 8'h02,
+          "GA2 raw reset source FDDC maps to V25 destination FFF0");
+    @(posedge clk);
+    #1;
+    check(!v25_wr, "GA2 reset-vector write is a one-cycle pulse");
 
     // Leave the very last stream word outstanding while download deasserts.
     // rom_loaded may rise only after that request has actually acknowledged.

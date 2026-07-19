@@ -24,11 +24,11 @@ s32_palette dut (
 );
 
 function automatic [15:0] to_alt(input [15:0] v);
-    to_alt = {v[15], v[14], v[9], v[4], v[13:10], v[8:5], v[3:0]};
+    to_alt = {v[15], v[10], v[5], v[0], v[14:11], v[9:6], v[4:1]};
 endfunction
 
 function automatic [15:0] from_alt(input [15:0] v);
-    from_alt = {v[15], v[14], v[11:8], v[13], v[7:4], v[12], v[3:0]};
+    from_alt = {v[15], v[11:8], v[14], v[7:4], v[13], v[3:0], v[12]};
 endfunction
 
 integer errors = 0;
@@ -81,6 +81,23 @@ reg [15:0] old_alt;
 initial begin
     repeat (2) @(posedge clk);
 
+    // Independent one-hot format vectors from MAME's conversion contract.
+    // Native channel bit 0 is promoted into the alternate B/G/R flag bit;
+    // channel bits 4:1 move into the low nibbles.  These constants prevent
+    // the DUT and test helper from agreeing on the same reversed mapping.
+    write_word(15'h0070, 16'h0001, 2'b11, 1'b0);
+    expect_cpu(15'h4070, 16'h1000, "native R0 -> alternate R flag");
+    write_word(15'h0071, 16'h0020, 2'b11, 1'b0);
+    expect_cpu(15'h4071, 16'h2000, "native G0 -> alternate G flag");
+    write_word(15'h0072, 16'h0400, 2'b11, 1'b0);
+    expect_cpu(15'h4072, 16'h4000, "native B0 -> alternate B flag");
+    write_word(15'h4073, 16'h0001, 2'b11, 1'b0);
+    expect_cpu(15'h0073, 16'h0002, "alternate R1 -> native R1");
+    write_word(15'h4074, 16'h0010, 2'b11, 1'b0);
+    expect_cpu(15'h0074, 16'h0040, "alternate G1 -> native G1");
+    write_word(15'h4075, 16'h0100, 2'b11, 1'b0);
+    expect_cpu(15'h0075, 16'h0800, "alternate B1 -> native B1");
+
     // Native full-word and byte-lane writes.
     write_word(15'h0012, 16'hABCD, 2'b11, 1'b0);
     expect_cpu(15'h0012, 16'hABCD, "native full write/read");
@@ -106,9 +123,8 @@ initial begin
     expect_cpu(15'h0044, expected, "converted high-byte mask permutation");
     expect_cpu(15'h4044, 16'h26E7, "converted byte-merged readback");
 
-    // Seed unequal pair words.  A partial write-both must copy untouched
-    // bits from the SOURCE (ABCD), yielding ABEF in both banks rather than
-    // preserving the partner's high byte (13EF).
+    // MAME applies COMBINE_DATA to each half independently, so partial
+    // write-both preserves each half's own disabled byte.
     write_word(15'h0033, 16'hABCD, 2'b11, 1'b0);
     write_word(15'h2033, 16'h1357, 2'b11, 1'b0);
     @(negedge clk);
@@ -127,15 +143,15 @@ initial begin
     check16(cpu_rdata, 16'hABEF, "write-both source merged word");
     check16(mix_data, 16'h1357, "pending edge has read-before-write data");
     @(posedge clk); #1;
-    check16(mix_data, 16'hABEF, "pending partner copy committed");
-    expect_cpu(15'h2033, 16'hABEF, "write-both partner equals merged source");
+    check16(mix_data, 16'h13EF, "pending partner masked write committed");
+    expect_cpu(15'h2033, 16'h13EF, "write-both partner preserves own high byte");
 
     // Reverse direction and converted-view partial write-both.
     write_word(15'h2055, 16'h2468, 2'b11, 1'b0);
     write_word(15'h0055, 16'hDEAD, 2'b11, 1'b0);
     write_word(15'h2055, 16'hB100, 2'b10, 1'b1);
     expect_cpu(15'h2055, 16'hB168, "reverse write-both source");
-    expect_cpu(15'h0055, 16'hB168, "reverse write-both partner");
+    expect_cpu(15'h0055, 16'hB1AD, "reverse write-both partner");
 
     write_word(15'h0066, 16'h5A3C, 2'b11, 1'b0);
     write_word(15'h2066, 16'h0F0F, 2'b11, 1'b0);
@@ -144,6 +160,8 @@ initial begin
     write_word(15'h4066, 16'h0091, 2'b01, 1'b1);
     expect_cpu(15'h4066, {old_alt[15:8], 8'h91},
                "converted write-both alias readback");
+    old_alt = to_alt(16'h0F0F);
+    expected = from_alt({old_alt[15:8], 8'h91});
     expect_cpu(15'h2066, expected,
                "converted write-both partner native data");
 
