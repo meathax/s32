@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with s80x86.  If not, see <http://www.gnu.org/licenses/>.
 
-task do_das;
+task automatic do_das;
     output [15:0] out;
     input [15:0] a;
     input [15:0] flags_in;
@@ -23,6 +23,7 @@ task do_das;
     reg [15:0] tmp;
 
     begin
+        tmp = 16'b0;
         flags_out = flags_in;
         out = a;
         if (a[3:0] > 4'd9 || flags_in[AF_IDX]) begin

@@ -3,8 +3,8 @@
 
 set S80X86_QIP_DIR $::quartus(qip_path)
 
-# Upstream normally generates this setting in config.v.
-set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
+# S80X86_PSEUDO_286_INT is set in the project QSF. Quartus 17 does not allow
+# VERILOG_MACRO in a QIP because it appends an unsupported QIP scope option.
 set_global_assignment -name SEARCH_PATH [file join $S80X86_QIP_DIR generated]
 set_global_assignment -name MIF_FILE [file join $S80X86_QIP_DIR generated microcode.mif]
 

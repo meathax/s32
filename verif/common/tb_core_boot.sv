@@ -60,6 +60,7 @@ s32_core core (
     .sdr_p2_req(), .sdr_p2_addr(), .sdr_p2_dout(128'h0), .sdr_p2_ack(1'b0),
     .sdr_p3_req(), .sdr_p3_addr(), .sdr_p3_dout(16'h0), .sdr_p3_ack(1'b0),
     .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
+    .sdr_p5_req(), .sdr_p5_addr(), .sdr_p5_dout(64'h0), .sdr_p5_ack(1'b0),
     .fb_wr_start(), .fb_wr_buf(), .fb_wr_x(), .fb_wr_y(),
     .fb_wr_valid(), .fb_wr_pix(), .fb_wr_end(),
     .fb_wr_shadow(), .fb_wr_busy(1'b0),

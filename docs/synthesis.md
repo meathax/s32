@@ -91,8 +91,9 @@ ALMs, 147 combinational ALUTs, 90 registers, and 1,024 block-memory bits.
 | V60 maximum-length F1 decode | ✅ PASS — 20-byte double-displacement MOVW and correct next PC |
 | V60 `SKPCUH` search semantics | ✅ PASS — exact ga2 encoding plus found/exhausted/zero-length cases |
 | EEPROM M10K implementation | ✅ PASS — serial operations, synchronous upload latency, dirty/ack ordering, isolated Quartus inference |
-| Complete regression | ✅ PASS — native Windows ModelSim **25/25 tiers**, including **50/50 V60 differential seeds**; detailed transcript in `verif/modelsim-regression.log` |
-| Per-game acceptance (§11.6 hardware tier) | no build of this core has launched a set on a DE10-Nano; tracked in `docs/compat.md` |
+| Complete regression | ✅ PASS — native Windows ModelSim **35/35 tiers**, including **50/50 V60 differential seeds** and the permanent 512-case mixer differential; detailed transcript in `verif/modelsim-mixer-complete-gate.log` |
+| Quartus analysis/elaboration | ✅ PASS — final universal RTL, zero errors (no fit or RBF generated) |
+| Per-game acceptance (§11.6 hardware tier) | ga2 has partial DE10-Nano gameplay evidence; Holosseum has not yet been hardware-certified. Tracked in `docs/compat.md` |
 
 ## §11.6 acceptance — simulator tier (run here)
 

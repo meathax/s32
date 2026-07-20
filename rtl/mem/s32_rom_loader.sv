@@ -5,8 +5,9 @@
 //    [maincpu 2MB][soundcpu 4MB][tiles 4MB][multipcm 4MB][mcu 64KB pad 2MB-]
 //    [sprites up to 16MB]
 //  The MRA pads every region to its fixed size so offsets are constant.
-//  mcu bytes are address-descrambled into the V25 program BRAM here
-//  by applying the inverse of MAME's destination-to-source address lookup
+//  MCU bytes are address-descrambled into the reserved external-SDRAM slot,
+//  avoiding a duplicate 64 KiB on-chip ROM that cannot fit alongside the real
+//  V25. The inverse of MAME's destination-to-source address lookup is applied
 //  (see v25_stream_to_dst below and DESIGN.md §8.1).
 //  ioctl index 2 = 93C46 default image (128 bytes).
 //============================================================================
@@ -83,7 +84,9 @@ function automatic [24:0] map_addr(input [26:0] a);
     else if (a < OFF_TILES)    map_addr = SDR_SOUNDCPU_BASE + (a[24:0] - OFF_SOUNDCPU[24:0]);
     else if (a < OFF_MULTIPCM) map_addr = SDR_TILES_BASE    + (a[24:0] - OFF_TILES[24:0]);
     else if (a < OFF_MCU)      map_addr = SDR_MULTIPCM_BASE + (a[24:0] - OFF_MULTIPCM[24:0]);
-    else                       map_addr = SDR_SPRITES_BASE  + (a[24:0] - OFF_SPRITES[24:0]);
+    else if (a < OFF_SPRITES)  map_addr = SDR_MCU_BASE +
+        {9'd0, v25_stream_to_dst(a[15:0] - OFF_MCU[15:0])};
+    else                       map_addr = SDR_SPRITES_BASE + (a[24:0] - OFF_SPRITES[24:0]);
 endfunction
 
 board_desc_t desc_r;
@@ -125,15 +128,25 @@ always @(posedge clk) begin
                         desc_r.has_cd_stub <= desc_bytes[0][7];
                         desc_r.dual_pcb    <= desc_bytes[1][0];
                         desc_r.prot_sel    <= desc_bytes[2][6:0];
+                        desc_r.sprite_bank_valid <= desc_bytes[3][7];
+                        desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
                     end
                 end
                 else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
-                    // V25 program -> BRAM with address descramble. Subtract
-                    // the 64-byte stream descriptor before permuting the
-                    // MCU-local address bits.
+                    logic [24:0] ma;
+                    // Preserve the legacy observation port for focused loader
+                    // tests, but store the production image in external SDRAM.
                     v25_wr    <= 1'b1;
                     v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
                     v25_wdata <= ioctl_dout;
+                    ma = map_addr(ioctl_addr);
+                    sdr_wr_req  <= 1'b1;
+                    busy        <= 1'b1;
+                    sdr_wr_addr <= ma[24:1];
+                    // Each descrambled destination byte is non-sequential, so
+                    // write it independently through the correct byte lane.
+                    sdr_wr_din  <= {ioctl_dout, ioctl_dout};
+                    sdr_wr_be   <= ma[0] ? 2'b10 : 2'b01;
                 end
                 else begin
                     // SDRAM regions: global stream addresses are aligned, so

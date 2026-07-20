@@ -19,6 +19,7 @@ module tb_core_lint;
         .sdr_p2_dout(128'h0), .sdr_p2_ack(1'b0),
         .sdr_p3_dout(16'h0), .sdr_p3_ack(1'b0),
         .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
+        .sdr_p5_dout(64'h0), .sdr_p5_ack(1'b0),
         .fb_er_ack(1'b0), .fb_rd_ack(1'b0), .fb_rd_pix(16'hffff),
         .fb_wr_busy(1'b0),
         .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),

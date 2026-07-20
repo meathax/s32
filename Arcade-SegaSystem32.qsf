@@ -63,6 +63,11 @@ set_global_assignment -name VERILOG_MACRO "S32_SYSTEM32_ONLY=1"
 # removes board variants that GA2 can never select (notably the dual-PCB
 # communications RAM) while leaving their source available for later builds.
 set_global_assignment -name VERILOG_MACRO "S32_GA2_ONLY=1"
+# Quartus appends QIP scope metadata to assignments sourced from a .qip, but
+# VERILOG_MACRO does not accept that scope in Quartus 17. Keep CPU feature
+# defines at project scope while the QIPs contain source/manifests only.
+set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
 
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 

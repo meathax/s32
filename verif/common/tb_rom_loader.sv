@@ -4,8 +4,9 @@
 //   * EEPROM-only downloads never open the ROM boot gate
 //   * index-0 start/end controls rom_loaded and waits for the final SDRAM ack
 //   * all SDRAM region boundaries preserve little-endian byte pairing/mapping
-//   * V25 writes use the inverse MAME permutation of the MCU-local source
-//     offset, including the real GA2 reset-vector source address
+//   * V25 writes use the inverse MAME permutation of the MCU-local source,
+//     store through the correct external-SDRAM byte lane, and cover the real
+//     GA2 reset-vector source address
 //   * persisted index-3 EEPROM data loads as little-endian 16-bit words
 //============================================================================
 `timescale 1ns/1ps
@@ -197,8 +198,12 @@ initial begin
     // proves descriptor state is deterministic.
     send_byte(8'd0, 27'd1, 8'h01);
     send_byte(8'd0, 27'd2, 8'h7F);
+    send_byte(8'd0, 27'd3, 8'h81);
     send_byte(8'd0, 27'd63, 8'h00);
     check(board_desc !== '0, "descriptor became nonzero before final reset");
+    check(board_desc.sprite_bank_valid &&
+          board_desc.sprite_bank_mask === 2'b01,
+          "descriptor sprite bank metadata");
 
     // First and last words of every SDRAM-backed region.  Distinct byte data
     // on each pair catches stale byte_lo and endian errors as well as mapping.
@@ -219,18 +224,32 @@ initial begin
     send_byte(8'd0, OFF_MCU + 27'h0000040, 8'hC7);
     check(v25_wr && v25_waddr === 16'h0400 && v25_wdata === 8'hC7,
           "V25 uses inverse-permuted MCU-local source address");
-    @(posedge clk);
-    #1;
-    check(!v25_wr, "V25 write is a one-cycle pulse");
+    check(sdr_wr_req && ioctl_wait, "MCU byte raises SDRAM request/wait");
+    check(sdr_wr_addr === 24'h700200, "MCU destination 0400 word address");
+    check(sdr_wr_din === 16'hC7C7, "MCU byte replicated for lane write");
+    check(sdr_wr_be === 2'b01, "even MCU destination uses low byte lane");
+    ack_sdr();
+    check(!v25_wr, "V25 observation write is a one-cycle pulse");
+
+    // Source bit zero remains destination bit zero, covering the high lane.
+    send_byte(8'd0, OFF_MCU + 27'h0000001, 8'h5A);
+    check(v25_wr && v25_waddr === 16'h0001 && v25_wdata === 8'h5A,
+          "V25 odd source maps to odd destination");
+    check(sdr_wr_addr === 24'h700000, "odd MCU destination word address");
+    check(sdr_wr_be === 2'b10, "odd MCU destination uses high byte lane");
+    ack_sdr();
 
     // Golden Axe II stores encrypted reset byte 0x02 at raw source 0xFDDC.
     // MAME's contract places that byte at V25 destination 0xFFF0.
     send_byte(8'd0, OFF_MCU + 27'h000FDDC, 8'h02);
     check(v25_wr && v25_waddr === 16'hFFF0 && v25_wdata === 8'h02,
           "GA2 raw reset source FDDC maps to V25 destination FFF0");
-    @(posedge clk);
-    #1;
-    check(!v25_wr, "GA2 reset-vector write is a one-cycle pulse");
+    check(sdr_wr_req && ioctl_wait, "GA2 reset byte raises SDRAM request");
+    check(sdr_wr_addr === 24'h707FF8, "GA2 reset byte SDRAM word address");
+    check(sdr_wr_din === 16'h0202, "GA2 reset byte replicated for lane write");
+    check(sdr_wr_be === 2'b01, "GA2 reset byte uses low byte lane");
+    ack_sdr();
+    check(!v25_wr, "GA2 reset-vector observation is a one-cycle pulse");
 
     // Leave the very last stream word outstanding while download deasserts.
     // rom_loaded may rise only after that request has actually acknowledged.

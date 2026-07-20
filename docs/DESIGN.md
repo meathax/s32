@@ -438,13 +438,14 @@ programmer's manuals.
   base), SYCW (system control word: current/previous level, virtual mode
   bits), TKCW (task control word), TR (task register), PIR (processor ID),
   ADTR0/1 + ADTMR0/1 (address trap regs), PSW2 (V70).
-- **Not needed for System 32** (verified: MAME's core does not implement them
-  and all games run): MMU/virtual paging (games run real-mapped; SYCW virtual
-  bit stays 0), FRM multiprocessor function, V20/V30 emulation mode, and the
-  floating-point instruction set (MAME `v60` has no FP execution; no S32 game
-  executes FP opcodes). The RTL traps FP/undefined opcodes to the
-  reserved-instruction exception, matching a real chip with FP disabled — and
-  logs them in simulation so any surprise is caught by the trace harness.
+- **Not needed by known System 32 software:** MMU/virtual paging (games run
+  real-mapped; SYCW virtual bit stays 0), FRM multiprocessor function,
+  V20/V30 emulation mode, and the floating-point instruction set. MAME does
+  implement a small single-precision subset in groups `0x5c`/`0x5f`, but no
+  System 32 game is known to execute it. The RTL currently sends those FP
+  groups to the reserved-instruction exception and logs them in simulation;
+  this is an explicit arcade-profile exclusion, not a claim that MAME lacks
+  floating-point execution.
 
 ### 5.3 Instruction set and encoding
 
@@ -760,18 +761,21 @@ Register file: `0x610000` (screen 0) / `0x690000` (screen 1, Multi 32),
     color (implemented as RGB shift after palette lookup of the layer below —
     requires the mixer to also resolve the runner-up pixel; the two-candidate
     resolve is the main mixer pipeline subtlety and is specified in C.8).
-  - **Palette lookup**: index = `palbase + (pen << mixshift)` into the
-    screen's 0x4000-entry palette (15-bit color).
+  - **Palette lookup**: index = `palbase + ((pen >> mixshift) & 0xFFF0) +
+    (pen & 0xF)`, wrapped to 14 bits, into the screen's 0x4000-entry palette
+    (15-bit color). The low nibble is deliberately never shifted.
   - **Color offset**: signed 6-bit per-channel offsets, two banks
     (regs `0x40–0x4A`) selected per layer by reg `0x3E` bits + per-layer
     flag bits (grayscale modes per `compute_color_offsets` — C.8).
   - **Blending**: when reg `0x4E` bit 11 set, layers whose `blendmask`
     (regs `0x30–0x3A` bits 13:6) matches the runner-up layer, or sprites
     matching the per-layer `sprblendmask` encoding (bits 5:0: eq/le/ge/always
-    vs sprite priority), mix `factor/8 × front + (8-factor)/8 × back`
+    vs sprite priority), mix `((7-factor) × front + (factor+1) × back) / 8`
     (factor = reg `0x4E` bits 10:8). This is what radm/radr/jpark use for
-    fades and water.
-- Backdrop color: `$1FF5E` selects per-line or per-screen CRAM entry.
+    fades and water. Signed color offsets are applied before this arithmetic;
+    the channels are clamped only after blend and shadow.
+- Backdrop color: VRAM `$1FF5E` (not mixer register `$5E`) selects the static
+  or per-line CRAM entry. The control is snapshotted at the scanline boundary.
 - Display enable: 315-5296 CNT1 blanks the screen (black) when low.
 
 ### 6.7 Palette (`s32_palette`, per screen)
@@ -782,8 +786,10 @@ Register file: `0x610000` (screen 0) / `0x690000` (screen 1, Multi 32),
   combinational on the CPU port.
 - When mixer reg `0x4E & 0x0880` ≠ 0, CPU writes also mirror into
   `offset ^ 0x2000` (blend pair), duplicated by the palette write port.
-- Physical: one BRAM per screen, CPU port + two mixer read ports (winner +
-  runner-up via double-pumping at 2× pixel rate).
+- Physical: one BRAM per screen, CPU port + one registered mixer read port.
+  Winner and runner-up reads are time-multiplexed at 2× the system clock;
+  the first address is issued at winner selection, the second at pipeline P0,
+  and the first result is retained at P2 so both 2:1 clock phases are safe.
 - Final 15-bit color + offsets → 24-bit RGB output (5→8 bit expansion after
   signed-offset clamp), matching the 315-5242 DAC hybrid.
 

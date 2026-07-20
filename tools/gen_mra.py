@@ -37,6 +37,7 @@ STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
 #   b0: flags {multi32,v25,v25table,adc,track,ppi,dsp_hle,cd_stub}
 #   b1: {dual_pcb}
 #   b2: prot_sel
+#   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
 PROT = dict(NONE=0, SONIC=1, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
 def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0, dsp=0, cd=0,
          dual=0, prot=0):
@@ -213,10 +214,16 @@ def interleave_parts(loads, region_size, ctx=""):
 
 def gen(setname, data, outdir):
     parent = data.get("parent") or setname
-    d = GAMES.get(parent) or GAMES.get(setname)
-    if d is None or setname in UNSUPPORTED:
+    d_base = GAMES.get(parent) or GAMES.get(setname)
+    if d_base is None or setname in UNSUPPORTED:
         return False
     regions = {r["region"]: r for r in data["regions"]}
+    d = bytearray(d_base)
+    sprite_region_size = regions.get("sprites", {}).get("size", 0x1000000)
+    assert sprite_region_size in (0x400000, 0x800000, 0x1000000), (
+        f"{setname}: unsupported sprite region size {sprite_region_size:#x}")
+    sprite_banks = sprite_region_size // 0x400000
+    d[3] = 0x80 | (sprite_banks - 1)
     # D1: no region may exceed its declared SDRAM slot size.
     for reg, size in REGION_SIZES.items():
         r = regions.get(reg)
@@ -235,7 +242,7 @@ def gen(setname, data, outdir):
     lines.append('  <rbf>SegaS32</rbf>')
     lines.append('  <rom index="0" zip="%s.zip" md5="none">' % setname)
     # descriptor
-    hexd = d.hex().upper()
+    hexd = bytes(d).hex().upper()
     lines.append(f'    <part>{hexd}</part>')
     for reg in STREAM_ORDER:
         size = REGION_SIZES[reg]

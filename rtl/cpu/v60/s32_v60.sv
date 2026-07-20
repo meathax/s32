@@ -11,10 +11,12 @@
 //   - Full integer ISA: F1/F2 two-operand ops, short-format ops, branches,
 //     DBcc/TB, JMP/JSR/CALL/RET/RETIU/RETIS, PREPARE/DISPOSE, PUSH(M)/POP(M),
 //     string ops (MOVC*/CMPC*/SCHC*/SKPC*), TASI, bit ops, GETPSW/UPDPSW,
-//     TRAP/TRAPFL/BRK/BRKV, privileged register moves (LDPR/STPR).
+//     TRAP/TRAPFL/BRK/BRKV, CHLVL, task save/load, privileged register moves
+//     (LDPR/STPR), and MAME-defined decimal/bit-string/bit-field groups.
 //   - Not implemented (reserved-instruction exception, logged in sim):
-//     FP (0x5C/0x5F groups), decimal (0x59), MMU/TLB ops (executed as NOP
-//     like MAME: CLRTLB*), LDTASK/STTASK (NOP+log), IN/OUT map to bus.
+//     FP arithmetic/conversion (0x5C/0x5F groups). MMU/TLB effects are absent
+//     like MAME, but CLRTLB still decodes its complete operand. Address-trap
+//     and separate IN/OUT-space side effects remain outside the S32 profile.
 //
 //  Bus: logical access port; unaligned/size handled by s32_v60_bus adapter.
 //============================================================================
@@ -54,6 +56,8 @@ reg [31:0] r[0:31];             // general registers, r[31]=active SP
 reg [31:0] pc;
 reg [31:0] sbr, sycw, tkcw, pir, psw2;
 reg [31:0] isp, l0sp, l1sp, l2sp, l3sp;   // shadow stacks (inactive copies)
+reg [31:0] atbr0, atlr0, atbr1, atlr1, atbr2, atlr2, atbr3, atlr3;
+reg [31:0] trmode;
 reg [31:0] adtr0, adtr1, adtmr0, adtmr1;
 reg [31:0] trr;                  // TR task register
 
@@ -162,6 +166,10 @@ reg [7:0]  exc_vector;
 reg [31:0] exc_code;      // code+size word for trap/brkv-class frames (A2/A3)
 reg [31:0] exc_retpc;     // return PC pushed by the frame
 reg        exc_has_code;  // 1 = 3-word frame (code,PSW,PC); 0 = IRQ 2-word
+reg        exc_has_extra; // BRKV adds the fault PC ahead of its 3-word frame
+reg [31:0] exc_extra;
+reg [1:0]  exc_target_level;
+reg        exc_is_interrupt;
 reg [31:0] wb_val;
 reg [31:0] op2val;          // loaded value of a memory op2 (V60-1)
 reg        ea_isval;        // EA mode was an immediate: result is a pure
@@ -172,6 +180,9 @@ reg        op2val_v;
 reg [2:0]  rmw_kind;   // 0=INC 1=DEC 2=SET1 3=CLR1 4=NOT1 5=TEST1
 reg [1:0]  rmw_dim;
 reg [31:0] xch_addr;
+reg [31:0] task_mask, task_addr;
+reg [5:0]  task_phase;
+reg        task_reloaded;
 // V60 F1 encodings can carry two nine-byte effective-address operands:
 // opcode/flags + 9 + 9 = 20 bytes.  Four bits silently wrapped those legal
 // instruction lengths and advanced PC into the middle of the instruction.
@@ -215,7 +226,8 @@ typedef enum logic [6:0] {
     S_BF_INS1, S_BF_INS2, S_BF_INSRD, S_BF_INSWR,
     S_BS_SCH1, S_BS_SCHRD, S_BS_SCHB, S_BS_SCHW,
     S_BS_MOV1, S_BS_MOV2, S_BS_MOVS, S_BS_MOVD, S_BS_MOVB, S_BS_MOVF,
-    S_EXC_PUSH1, S_EXC_CODE, S_EXC_PUSH2, S_EXC_VEC, S_EXC_JMP,
+    S_EXC_PUSH1, S_EXC_EXTRA, S_EXC_CODE, S_EXC_PUSH2, S_EXC_VEC, S_EXC_JMP,
+    S_TASK_LD_NEXT, S_TASK_LD_ACK, S_TASK_ST_NEXT, S_TASK_ST_ACK,
     S_TASI1, S_TASI2,
     S_PREP1, S_DISP1,
     S_HALT
@@ -480,6 +492,8 @@ always @* begin
             rf_raddr_a = fb[5'd2 + len1][4:0];
         S_BF_INS2:
             rf_raddr_a = fb[5'd2 + len1 + len2][4:0];
+        S_TASK_ST_NEXT:
+            if (task_phase >= 6'd5) rf_raddr_a = task_phase - 6'd5;
         S_EXEC: begin
             rf_raddr_a = ((cur_op == 8'ha6) || (cur_op == 8'hb6))
                          ? op2[4:0] + 5'd1 : op1[4:0];
@@ -554,7 +568,14 @@ else if (ce) begin
         sbr  <= 32'h0000_0000;
         sycw <= 32'h0000_0070;
         tkcw <= 32'h0000_e000;
+        pir  <= IS_V70 ? 32'h0000_7000 : 32'h0000_6000;
         psw2 <= 32'h0000_f002;
+        isp <= 0; l0sp <= 0; l1sp <= 0; l2sp <= 0; l3sp <= 0;
+        trr <= 0;
+        atbr0 <= 0; atlr0 <= 0; atbr1 <= 0; atlr1 <= 0;
+        atbr2 <= 0; atlr2 <= 0; atbr3 <= 0; atlr3 <= 0;
+        trmode <= 0;
+        adtr0 <= 0; adtr1 <= 0; adtmr0 <= 0; adtmr1 <= 0;
         halted <= 0;
         fb_base <= START_PC;
         fb_valid <= 0;
@@ -635,6 +656,9 @@ else if (ce) begin
         // exception-frame defaults (A8): 2-word frame returning to current PC;
         // TRAP/BRKV override with a 3-word code frame and adjusted return PC.
         exc_has_code <= 1'b0;
+        exc_has_extra <= 1'b0;
+        exc_target_level <= 2'd0;
+        exc_is_interrupt <= 1'b0;
         exc_retpc    <= pc;
         rmw_kind     <= 3'd7;   // sentinel: not an RMW writeback
         op2val_v     <= 1'b0;
@@ -645,6 +669,7 @@ else if (ce) begin
             exc_pushval <= psw;
             exc_retpc <= pc;
             exc_has_code <= 1'b0;      // NMI: 2-word frame (v60_do_irq)
+            exc_is_interrupt <= 1'b1;
             st <= S_EXC_PUSH1;
         end
         else if (!irq_n && psw_ie) begin
@@ -653,6 +678,7 @@ else if (ce) begin
             exc_pushval <= psw;
             exc_retpc <= pc;
             exc_has_code <= 1'b0;      // IRQ: 2-word frame
+            exc_is_interrupt <= 1'b1;
             st <= S_EXC_PUSH1;
         end
         else if (halted) st <= S_HALT;
@@ -672,15 +698,27 @@ else if (ce) begin
             if (f_ov) begin
                 exc_vector   <= 8'd21;
                 exc_code     <= 32'h1501_0004;   // EXCEPTION_CODE_AND_SIZE(0x1501,4)
+                exc_extra    <= pc;
                 exc_pushval  <= psw;
                 exc_retpc    <= pc + 1;
                 exc_has_code <= 1'b1;
+                exc_has_extra <= 1'b1;
                 st <= S_EXC_PUSH1;
             end
             else begin pc <= pc + 1; st <= S_FILL; st_after_fill<=S_DECODE; end
         end
 
-        // ---- Bcc disp8 (0x60-0x6f) / disp16 (0x70-0x7f) ----
+        // 0x6B/0x7B are holes in MAME's authoritative primary dispatch
+        // table, not branch-condition encodings.  Enter the reserved-
+        // instruction vector rather than silently treating condition B as
+        // false and continuing after the displacement.
+        8'h6b, 8'h7b: begin
+            exc_vector <= 8'd8;
+            exc_pushval <= psw;
+            st <= S_EXC_PUSH1;
+        end
+
+        // ---- Bcc disp8 (0x60-0x6a,0x6c-0x6f) / disp16 equivalent ----
         8'b0110_????: begin
             if (cond_true(opcode[3:0]))
                  pc <= pc + {{24{fb[1][7]}}, fb[1]};
@@ -740,6 +778,7 @@ else if (ce) begin
 
         // ---- F12 two-operand groups ----
         // MOV/logic/arith B/H/W + friends: route through generic F12 engine
+        8'h01,                                   // LDTASK
         8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d,       // MOVB, MOVSBH, MOVZBH, MOVSBW, MOVZBW
         8'h19, 8'h1b, 8'h1c, 8'h1d,              // MOVTHB, MOVH, MOVSHW, MOVZHW
         8'h29, 8'h2b, 8'h2c, 8'h2d, 8'h08,       // MOVTWB, MOVTWH, RVBYT, MOVW, RVBIT
@@ -776,6 +815,8 @@ else if (ce) begin
         8'hf0, 8'hf1, 8'hf2, 8'hf3, 8'hf4, 8'hf5,          // TEST B/H/W
         8'hf6, 8'hf7,                                      // GETPSW
         8'hf8, 8'hf9,                                      // TRAP
+        8'hfc, 8'hfd,                                      // STTASK
+        8'hfe, 8'hff,                                      // CLRTLB (operand consumed; MMU absent)
         8'hde, 8'hdf,                                      // PREPARE
         8'he2, 8'he3,                                      // RET
         8'hea, 8'heb, 8'hfa, 8'hfb: begin                  // RETIU/RETIS
@@ -801,6 +842,8 @@ else if (ce) begin
                 8'hf2, 8'hf3: begin ea_want_addr <= 1'b0; ea_dim <= 2'd1; end
                 8'hf4, 8'hf5: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end
                 8'hf8, 8'hf9: begin ea_want_addr <= 1'b0; ea_dim <= 2'd0; end               // TRAP vector operand
+                8'hfc, 8'hfd: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end               // STTASK mask
+                8'hfe, 8'hff: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end               // CLRTLB operand
                 8'hde, 8'hdf: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end               // PREPARE imm
                 8'he2, 8'he3: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end // RET adj (word)
                 8'hea, 8'heb, 8'hfa, 8'hfb:
@@ -822,15 +865,26 @@ else if (ce) begin
         //   len1 byte follows op1; op2 = dest EA (modm=subop[5]); len2 byte.
         8'h58, 8'h5a: begin  // byte/half string ops
             subop <= fb[1];
-            cls <= C_STRING;
-            ea_want_addr <= 1'b1;
-            ea_dim   <= 2'd2;
-            ea_modm  <= fb[1][6];
-            ea_ofs   <= 5'd2;
-            ea_target2 <= 1'b0;
-            ea_ret   <= 3'd0;
-            st <= S_EA_MODE;
-            st_after_ea <= S_STR_OP1;
+            case (fb[1][4:0])
+            5'h00, 5'h01, 5'h02,
+            5'h08, 5'h09, 5'h0a, 5'h0b, 5'h0c,
+            5'h18, 5'h19, 5'h1a, 5'h1b: begin
+                cls <= C_STRING;
+                ea_want_addr <= 1'b1;
+                ea_dim   <= 2'd2;
+                ea_modm  <= fb[1][6];
+                ea_ofs   <= 5'd2;
+                ea_target2 <= 1'b0;
+                ea_ret   <= 3'd0;
+                st <= S_EA_MODE;
+                st_after_ea <= S_STR_OP1;
+            end
+            default: begin
+                exc_vector <= 8'd8;
+                exc_pushval <= psw;
+                st <= S_EXC_PUSH1;
+            end
+            endcase
         end
         8'h59: begin
             // decimal group (F7c): op1 = value, op2 = address, ext byte.
@@ -943,21 +997,18 @@ else if (ce) begin
             st <= S_RSR;
         end
         8'hcb: begin // TRAPFL
-            if (psw_rest[27] /*TP*/ ) begin
+            // MAME/NEC floating-exception test: enabled TKCW causes are
+            // intersected with the PSW floating-status field.  PSW.TP alone
+            // is unrelated and must not spuriously vector here.
+            if ((tkcw & 32'h0000_01f0) & ((psw & 32'h0000_1f00) >> 4)) begin
                 exc_vector <= 8'd15; exc_pushval <= psw; st <= S_EXC_PUSH1;
             end else begin
                 pc <= pc + 1; st <= S_FILL; st_after_fill<=S_DECODE;
             end
         end
-        8'h10, 8'hfe, 8'hff: begin // CLRTLBA / CLRTLB: no MMU -> NOP (with length)
-            pc <= pc + ((opcode==8'h10) ? 32'd1 : 32'd2);
+        8'h10: begin // CLRTLBA: no MMU -> one-byte NOP
+            pc <= pc + 1;
             st <= S_FILL; st_after_fill <= S_DECODE;
-        end
-        8'h01, 8'hfc, 8'hfd: begin // LDTASK/STTASK: unsupported -> NOP+log
-            // synthesis translate_off
-            $display("V60: LDTASK/STTASK ignored at %08x", pc);
-            // synthesis translate_on
-            pc <= pc + 2; st <= S_FILL; st_after_fill <= S_DECODE;
         end
         8'h20, 8'h21, 8'h22, 8'h23, 8'h24, 8'h25: begin // IN/OUT -> F12 engine
             instflags <= fb[1]; cls <= C_F12; st <= S_IF2;
@@ -2270,18 +2321,119 @@ else if (ce) begin
     end
 
     // ------------------------------------------------------------------
+    // LDTASK/STTASK task-block transfers. Phase 0 is TKCW, phases 1..4
+    // are enabled L0SP..L3SP fields, and phases 5..35 are R0..R30.
+    S_TASK_LD_NEXT: begin
+        if (task_phase == 0) begin
+            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
+            bus_addr <= task_addr;
+            st <= S_TASK_LD_ACK;
+        end
+        else if (task_phase <= 4) begin
+            if (sycw[7 + task_phase]) begin
+                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
+                bus_addr <= task_addr;
+                st <= S_TASK_LD_ACK;
+            end
+            else task_phase <= task_phase + 1'd1;
+        end
+        else if (task_phase == 5 && !task_reloaded) begin
+            // Stack fields loaded on prior cycles are now stable.
+            queue_reg_write(5'd31, pick_stack(psw), 32'hffff_ffff);
+            task_reloaded <= 1'b1;
+        end
+        else if (task_phase <= 35) begin
+            if (task_mask[task_phase - 5]) begin
+                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
+                bus_addr <= task_addr;
+                st <= S_TASK_LD_ACK;
+            end
+            else task_phase <= task_phase + 1'd1;
+        end
+        else st <= S_NEXT;
+    end
+    S_TASK_LD_ACK: if (bus_ack) begin
+        bus_req <= 0;
+        case (task_phase)
+            0: tkcw <= bus_rdata;
+            1: l0sp <= bus_rdata;
+            2: l1sp <= bus_rdata;
+            3: l2sp <= bus_rdata;
+            4: l3sp <= bus_rdata;
+            default: queue_reg_write(task_phase - 5, bus_rdata, 32'hffff_ffff);
+        endcase
+        task_addr <= task_addr + 4;
+        task_phase <= task_phase + 1'd1;
+        st <= S_TASK_LD_NEXT;
+    end
+
+    S_TASK_ST_NEXT: begin
+        if (task_phase == 0) begin
+            // v60SaveStack() after setting IS: r31 now names the interrupt
+            // stack selected by write_psw() in the execute cycle.
+            isp <= r[31];
+            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
+            bus_addr <= task_addr; bus_wdata <= tkcw;
+            st <= S_TASK_ST_ACK;
+        end
+        else if (task_phase <= 4) begin
+            if (sycw[7 + task_phase]) begin
+                bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
+                bus_addr <= task_addr;
+                case (task_phase)
+                    1: bus_wdata <= l0sp; 2: bus_wdata <= l1sp;
+                    3: bus_wdata <= l2sp; default: bus_wdata <= l3sp;
+                endcase
+                st <= S_TASK_ST_ACK;
+            end
+            else task_phase <= task_phase + 1'd1;
+        end
+        else if (task_phase <= 35) begin
+            if (task_mask[task_phase - 5]) begin
+                bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
+                bus_addr <= task_addr; bus_wdata <= rf_rdata_a;
+                st <= S_TASK_ST_ACK;
+            end
+            else task_phase <= task_phase + 1'd1;
+        end
+        else st <= S_NEXT;
+    end
+    S_TASK_ST_ACK: if (bus_ack) begin
+        bus_req <= 0; bus_we <= 0;
+        task_addr <= task_addr + 4;
+        task_phase <= task_phase + 1'd1;
+        st <= S_TASK_ST_NEXT;
+    end
+
+    // ------------------------------------------------------------------
     // exception / interrupt entry (MAME v60_do_irq):
     //   switch to interrupt context, push old PSW, push PC, PC = vector
     S_EXC_PUSH1: begin
-        // stack switch to level-0 interrupt context first
+        // Synchronous exceptions preserve IS; IRQ/NMI force the interrupt
+        // stack. CHLVL supplies a nonzero target execution level.
         logic [31:0] newpsw;
         newpsw = exc_pushval;
-        newpsw[25:24] = 2'b00;
+        newpsw[25:24] = exc_target_level;
         newpsw[18] = 0; newpsw[16] = 0; newpsw[27] = 0; newpsw[17] = 0; newpsw[29] = 0;
-        newpsw[28] = 1; newpsw[31] = 1;
+        if (exc_is_interrupt) newpsw[28] = 1;
+        newpsw[31] = 1;
         write_psw(newpsw);
-        // 3-word frames (TRAP/BRKV) push the code+size word first (A2/A3)
-        st <= exc_has_code ? S_EXC_CODE : S_EXC_PUSH2;
+        // BRKV has a leading fault-PC word; ordinary trap-class frames begin
+        // with code+size, while IRQ/NMI frames begin with old PSW.
+        st <= exc_has_extra ? S_EXC_EXTRA
+                            : exc_has_code ? S_EXC_CODE : S_EXC_PUSH2;
+    end
+    S_EXC_EXTRA: begin
+        if (!bus_req) begin
+            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
+            bus_addr <= r[31] - 4;
+            bus_wdata <= exc_extra;
+        end
+        else if (bus_ack) begin
+            bus_req <= 0; bus_we <= 0;
+            queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
+            st <= S_EXC_CODE;
+        end
     end
     S_EXC_CODE: begin         // push code+size word (trap-class only)
         if (!bus_req) begin
@@ -2380,7 +2532,9 @@ end
 function automatic f12_op1_is_addr(input [7:0] op);
     case (op)
         8'h40, 8'h42, 8'h44,            // MOVEA.B/H/W
-        8'h20, 8'h22, 8'h24: f12_op1_is_addr = 1'b1;   // IN.B/H/W
+        8'h20, 8'h22, 8'h24,            // IN.B/H/W
+        8'h49,                         // CALL target
+        8'h01: f12_op1_is_addr = 1'b1; // LDTASK register-mask operand
         default: f12_op1_is_addr = 1'b0;
     endcase
 endfunction
@@ -2390,7 +2544,8 @@ function automatic [1:0] f12_dim1(input [7:0] op);
         8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h40, 8'h41, 8'h20, 8'h21,
         8'h38, 8'h39, 8'h50, 8'h51, 8'h80, 8'h81, 8'h88,
         8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1, 8'ha8, 8'hb0, 8'hb1,
-        8'hb8, 8'h49: f12_dim1 = 2'd0;   // incl. CALL: MAME ReadAMAddress dim 0
+        8'hb8, 8'h49, 8'h4b, 8'h4d, 8'h4e, 8'h4f:
+            f12_dim1 = 2'd0;   // CALL address and CHLVL/CHKA byte operands
         // NOTE: ROTH (8b) / ROTCH (9b) must NOT appear here — their op1 is
         // the rotate COUNT, a byte (MAME ReadAM dim 0); listing them in the
         // half group made `ROT.H #imm8, r6` decode one byte long and holo's
@@ -2410,7 +2565,8 @@ function automatic [1:0] f12_dim2(input [7:0] op);
     casez (op)
         8'h09, 8'h19, 8'h29, 8'h38, 8'h39, 8'h41, 8'h50, 8'h51,
         8'h80, 8'h81, 8'h88, 8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1,
-        8'ha8, 8'hb0, 8'hb1, 8'hb8, 8'h89, 8'h99, 8'ha9, 8'hb9: f12_dim2 = 2'd0;
+        8'ha8, 8'hb0, 8'hb1, 8'hb8, 8'h89, 8'h99, 8'ha9, 8'hb9,
+        8'h4b, 8'h4d, 8'h4e, 8'h4f: f12_dim2 = 2'd0;
         8'h0a, 8'h0b, 8'h1b, 8'h2b, 8'h3a, 8'h3b, 8'h43, 8'h52, 8'h53,
         8'h82, 8'h83, 8'h8a, 8'h92, 8'h93, 8'h9a, 8'ha2, 8'ha3, 8'haa,
         8'hb2, 8'hb3, 8'hba, 8'h8b, 8'h9b, 8'hab, 8'hbb: f12_dim2 = 2'd1;
@@ -2777,7 +2933,7 @@ task automatic exec_op;
         bus_wdata <= r[29];          // push AP (R29) first
         queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         queue_reg_write(5'd29, op2, 32'hffff_ffff); // AP (R29) = op2
-        wb_val <= pc + total_len;    // return PC, pushed in S_CALL1
+        wb_val <= pc + 5'd2 + len1 + len2; // return PC, pushed in S_CALL1
         alu_r  <= op1;               // target
         st <= S_CALL1;
     end
@@ -2898,11 +3054,35 @@ task automatic exec_op;
         total_len <= 5'd1 + len1;
         st <= S_PREP1;
     end
+    8'hfc, 8'hfd: begin // STTASK: save selected task state at TR
+        task_mask <= op1;
+        task_addr <= trr;
+        task_phase <= 0;
+        task_reloaded <= 0;
+        total_len <= 5'd1 + len1;
+        write_psw(psw | 32'h1000_0000);
+        st <= S_TASK_ST_NEXT;
+    end
+    8'hfe, 8'hff: begin // CLRTLB: consume the complete AM operand; no MMU state
+        total_len <= 5'd1 + len1;
+        st <= S_NEXT;
+    end
 
     // string groups (0x58/0x5A) now set up entirely in decode + S_STR_OP1/OP2
     // (A1); they never reach exec_op.
 
     // ------------ privileged moves ------------
+    8'h01: begin // LDTASK: load selected task state from operand-2 pointer
+        logic [31:0] task_pointer;
+        task_pointer = flag2 ? rf_rdata_b : (op2val_v ? op2val : op2);
+        task_mask <= flag1 ? rf_rdata_a : op1;
+        task_addr <= task_pointer;
+        task_phase <= 0;
+        task_reloaded <= 0;
+        trr <= task_pointer;
+        write_psw(psw & ~32'h1000_0000);
+        st <= S_TASK_LD_NEXT;
+    end
     8'h02: begin // STPR: op1 = priv reg #, op2 = dest
         logic [31:0] v;
         case (op1[4:0])
@@ -2910,9 +3090,19 @@ task automatic exec_op;
             5'd3: v = l2sp; 5'd4: v = l3sp; 5'd5: v = sbr;
             5'd6: v = trr;  5'd7: v = sycw; 5'd8: v = tkcw;
             5'd9: v = pir;  5'd15: v = psw2;
+            5'd16: v = atbr0; 5'd17: v = atlr0;
+            5'd18: v = atbr1; 5'd19: v = atlr1;
+            5'd20: v = atbr2; 5'd21: v = atlr2;
+            5'd22: v = atbr3; 5'd23: v = atlr3;
+            5'd24: v = trmode;
+            5'd25: v = adtr0; 5'd26: v = adtr1;
+            5'd27: v = adtmr0; 5'd28: v = adtmr1;
             default: v = 0;
         endcase
-        wb_op2(v, 2'd2);
+        if (op1 <= 32'd28) wb_op2(v, 2'd2);
+        else begin
+            exc_vector <= 8'd8; exc_pushval <= psw; st <= S_EXC_PUSH1;
+        end
     end
     8'h12: begin // LDPR: op1 = value, op2 = priv reg #
         case (op2[4:0])
@@ -2920,15 +3110,43 @@ task automatic exec_op;
             5'd3: l2sp <= op1; 5'd4: l3sp <= op1; 5'd5: sbr <= op1;
             5'd6: trr <= op1;  5'd7: sycw <= op1; 5'd8: tkcw <= op1;
             5'd9: pir <= op1;  5'd15: psw2 <= op1;
+            5'd16: atbr0 <= op1; 5'd17: atlr0 <= op1;
+            5'd18: atbr1 <= op1; 5'd19: atlr1 <= op1;
+            5'd20: atbr2 <= op1; 5'd21: atlr2 <= op1;
+            5'd22: atbr3 <= op1; 5'd23: atlr3 <= op1;
+            5'd24: trmode <= op1;
+            5'd25: adtr0 <= op1; 5'd26: adtr1 <= op1;
+            5'd27: adtmr0 <= op1; 5'd28: adtmr1 <= op1;
             default: ;
         endcase
-        st <= S_NEXT;
+        if (op2 <= 32'd28) st <= S_NEXT;
+        else begin
+            exc_vector <= 8'd8; exc_pushval <= psw; st <= S_EXC_PUSH1;
+        end
     end
-    8'h4b: begin // CHLVL — change level: simplified trap-free level change
-        st <= S_NEXT;
+    8'h4b: begin // CHLVL: level-specific synchronous exception
+        logic [31:0] chlvl_data;
+        chlvl_data = flag2 ? rf_rdata_b : (op2val_v ? op2val : op2);
+        if (op1 > 32'd3) begin
+            exc_vector <= 8'd8;
+            exc_pushval <= psw;
+            st <= S_EXC_PUSH1;
+        end
+        else begin
+            exc_vector <= 8'd24 + op1[1:0];
+            exc_code <= {8'h18 + op1[1:0], 8'h00, 16'h0008};
+            exc_extra <= chlvl_data;
+            exc_pushval <= psw;
+            exc_retpc <= pc + 5'd2 + len1 + len2;
+            exc_has_code <= 1'b1;
+            exc_has_extra <= 1'b1;
+            exc_target_level <= op1[1:0];
+            exc_is_interrupt <= 1'b0;
+            st <= S_EXC_PUSH1;
+        end
     end
     8'h4d, 8'h4e, 8'h4f: begin // CHKA*: no MMU -> return address valid
-        f_z <= 1; st <= S_NEXT;
+        f_z <= 1; f_cy <= 0; f_s <= 0; st <= S_NEXT;
     end
     8'h20, 8'h22, 8'h24: begin  // IN — read io (mapped to bus, io space unused on S32)
         wb_op2(32'hffffffff, cur_op[2:1]);

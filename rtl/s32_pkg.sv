@@ -13,7 +13,8 @@ package s32_pkg;
     localparam [24:0] SDR_SOUNDCPU_BASE = 25'h020_0000; // 4 MB
     localparam [24:0] SDR_TILES_BASE    = 25'h060_0000; // 4 MB
     localparam [24:0] SDR_MULTIPCM_BASE = 25'h0A0_0000; // 4 MB
-    localparam [24:0] SDR_SPARE_BASE    = 25'h0E0_0000; // 2 MB
+    localparam [24:0] SDR_MCU_BASE      = 25'h0E0_0000; // V25 ROM (64 KiB)
+    localparam [24:0] SDR_SPARE_BASE    = SDR_MCU_BASE; // remainder of 2 MB slot
     localparam [24:0] SDR_SPRITES_BASE  = 25'h100_0000; // 16 MB
 
     // ------------------------------------------------------------------
@@ -30,6 +31,11 @@ package s32_pkg;
         logic       has_cd_stub;   // kokoroj SCSI/CXD stubs
         logic       dual_pcb;      // arescue/f1en bridge responder
         logic [6:0] prot_sel;      // HLE protection select (PROT_*)
+        // Sprite ROMs contain one, two, or four 4 MiB banks.  MAME mirrors
+        // the controller's 2-bit bank selection modulo that physical count.
+        // Old all-zero descriptors have no valid field and retain four banks.
+        logic       sprite_bank_valid;
+        logic [1:0] sprite_bank_mask; // 0/1/3 for 4/8/16 MiB respectively
     } board_desc_t;
 
     // HLE protection selects (prot_sel)

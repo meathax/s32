@@ -268,15 +268,15 @@ s32_rom_loader loader (
 );
 
 /////////////////////////////////   SDRAM   ///////////////////////////////////
-wire        p0_req, p0_ack, p1_req, p1_ack, p2_req, p2_ack, p3_req, p3_ack, p4_req, p4_ack;
+wire        p0_req, p0_ack, p1_req, p1_ack, p2_req, p2_ack, p3_req, p3_ack, p4_req, p4_ack, p5_req, p5_ack;
 wire        core_p1_req, core_p2_req;
 wire [24:1] p0_addr, p3_addr, p4_addr;
-wire [24:3] p1_addr;
+wire [24:3] p1_addr, p5_addr;
 wire [24:4] p2_addr;
 wire [24:3] core_p1_addr;
 wire [24:4] core_p2_addr;
 wire [15:0] p0_dout, p3_dout, p4_dout;
-wire [63:0] p1_dout;
+wire [63:0] p1_dout, p5_dout;
 wire[127:0] p2_dout;
 
 // Read fixed, non-uniform GA2 graphics blocks through the real burst ports.
@@ -338,7 +338,8 @@ sdram sdram (
     .p1_req(p1_req), .p1_addr(p1_addr), .p1_dout(p1_dout), .p1_ack(p1_ack),
     .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
     .p3_req(p3_req), .p3_addr(p3_addr), .p3_dout(p3_dout), .p3_ack(p3_ack),
-    .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack)
+    .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack),
+    .p5_req(p5_req), .p5_addr(p5_addr), .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
 ////////////////////////////   FRAMEBUFFER   //////////////////////////////////
@@ -455,8 +456,16 @@ wire        core_debug_halted;
 wire [23:0] core_debug_status;
 wire [15:0] core_debug_first_rom;
 wire  [8:0] core_debug_hcnt;
+wire  [8:0] core_debug_vcnt;
 wire [127:0] core_debug_sprite_desc;
 wire         core_debug_sprite_desc_valid;
+wire [127:0] core_debug_sprite_last_desc;
+wire [127:0] core_debug_sprite_last_draw_desc;
+wire  [23:0] core_debug_sprite_activity;
+wire  [31:0] core_debug_sprite_state;
+wire  [63:0] core_debug_sprite_counts;
+wire         core_debug_sprite_rendering;
+wire  [47:0] core_debug_sprram_cpu;
 
 s32_core core (
     .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(reset), .video_rst(video_reset),
@@ -469,6 +478,7 @@ s32_core core (
     .sdr_p2_ack(p2_ack),
     .sdr_p3_req(p3_req), .sdr_p3_addr(p3_addr), .sdr_p3_dout(p3_dout), .sdr_p3_ack(p3_ack),
     .sdr_p4_req(p4_req), .sdr_p4_addr(p4_addr), .sdr_p4_dout(p4_dout), .sdr_p4_ack(p4_ack),
+    .sdr_p5_req(p5_req), .sdr_p5_addr(p5_addr), .sdr_p5_dout(p5_dout), .sdr_p5_ack(p5_ack),
     .fb_wr_start(fbw_start), .fb_wr_buf(fbw_buf), .fb_wr_x(fbw_x), .fb_wr_y(fbw_y),
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
@@ -493,9 +503,16 @@ s32_core core (
     .out_lamps(),
     .debug_pc(core_debug_pc), .debug_halted(core_debug_halted),
     .debug_status(core_debug_status), .debug_first_rom(core_debug_first_rom),
-    .debug_hcnt(core_debug_hcnt),
+    .debug_hcnt(core_debug_hcnt), .debug_vcnt(core_debug_vcnt),
     .debug_sprite_desc(core_debug_sprite_desc),
-    .debug_sprite_desc_valid(core_debug_sprite_desc_valid)
+    .debug_sprite_desc_valid(core_debug_sprite_desc_valid),
+    .debug_sprite_last_desc(core_debug_sprite_last_desc),
+    .debug_sprite_last_draw_desc(core_debug_sprite_last_draw_desc),
+    .debug_sprite_activity(core_debug_sprite_activity),
+    .debug_sprite_state(core_debug_sprite_state),
+    .debug_sprite_counts(core_debug_sprite_counts),
+    .debug_sprite_rendering(core_debug_sprite_rendering),
+    .debug_sprram_cpu(core_debug_sprram_cpu)
 );
 
 assign AUDIO_L = aud_l;
@@ -504,21 +521,84 @@ assign AUDIO_R = aud_r;
 //////////////////////////////   VIDEO   //////////////////////////////////////
 wire [23:0] game_rgb = status[6] ? rgb_b : rgb_a;
 wire [15:0] debug_p1_word = debug_p1_data[{core_debug_hcnt[7:6], 4'b0000} +: 16];
-// Mode 5 shows the exact first production sprite-ROM transaction:
- //   x=0..15    : 21-bit physical SDRAM chunk address
- //   x=16..143  : descriptor words 0..7, 16 pixels each
- //   x=144..271 : returned ROM words 0..7, 16 pixels each
-wire [8:0] debug_p2_desc_x = core_debug_hcnt - 9'd16;
-wire [8:0] debug_p2_data_x = core_debug_hcnt - 9'd144;
-wire [15:0] debug_p2_desc_word =
-    core_debug_sprite_desc[{debug_p2_desc_x[6:4], 4'b0000} +: 16];
-wire [15:0] debug_p2_word =
-    debug_p2_data[{debug_p2_data_x[6:4], 4'b0000} +: 16];
-wire [23:0] debug_p2_rgb =
-    !(debug_p2_valid && core_debug_sprite_desc_valid) ? 24'hC00000 :
-    core_debug_hcnt < 9'd16  ? {3'b000, debug_p2_addr} :
-    core_debug_hcnt < 9'd144 ? {8'h00, debug_p2_desc_word} :
-    core_debug_hcnt < 9'd272 ? {8'h00, debug_p2_word} : game_rgb;
+// Mode 5 is a four-band sprite post-mortem. Every cell is 16 pixels wide so
+// one screenshot gives stable, exact RGB values even if p2 never requests.
+//   y=  0..55 : summary, CPU sprite-RAM writes, activity/state/counts
+//   y= 56..111: last decoded descriptor (D0..D7 tags, words 0..7)
+//   y=112..167: last draw descriptor    (E0..E7 tags, words 0..7)
+//   y=168..223: first ROM descriptor (F0..F7), data (A0..A7), addr/flags
+// Summary cells x=0,16,...,160 are: signature; CPU write count/status/address
+// high; CPU address-low/data; activity; state-low; "ST"/state-high;
+// swap/decode/END counts; JUMP/zero/draw counts; fromRAM/ROM-request/flags;
+// first p2 physical address; and p2-valid/descriptor-valid/rendering as
+// full-intensity R/G/B. CPU status byte = {seen, last_BE[1:0], 5'b0}.
+// Descriptor cell RGB = {tag, word[15:8], word[7:0]}, word 0 first.
+wire [4:0] debug_p2_cell = core_debug_hcnt[8:4];
+wire [2:0] debug_p2_word_sel = core_debug_hcnt[6:4];
+wire [15:0] debug_p2_last_word =
+    core_debug_sprite_last_desc[{debug_p2_word_sel, 4'b0000} +: 16];
+wire [15:0] debug_p2_draw_word =
+    core_debug_sprite_last_draw_desc[{debug_p2_word_sel, 4'b0000} +: 16];
+wire [15:0] debug_p2_first_word =
+    core_debug_sprite_desc[{debug_p2_word_sel, 4'b0000} +: 16];
+wire [15:0] debug_p2_rom_word =
+    debug_p2_data[{debug_p2_word_sel, 4'b0000} +: 16];
+wire [7:0] debug_p2_flags = {5'b00000, core_debug_sprite_rendering,
+                            core_debug_sprite_desc_valid, debug_p2_valid};
+reg [23:0] debug_p2_rgb;
+always @(*) begin
+    debug_p2_rgb = 24'h000000;
+    if (core_debug_vcnt < 9'd56) begin
+        case (debug_p2_cell)
+            5'd0: debug_p2_rgb = 24'h533205; // "S2", diagnostic revision 5
+            5'd1: debug_p2_rgb = core_debug_sprram_cpu[47:24];
+            5'd2: debug_p2_rgb = core_debug_sprram_cpu[23:0];
+            5'd3: debug_p2_rgb = core_debug_sprite_activity;
+            5'd4: debug_p2_rgb = core_debug_sprite_state[23:0];
+            5'd5: debug_p2_rgb = {16'h5354, core_debug_sprite_state[31:24]};
+            5'd6: debug_p2_rgb = {core_debug_sprite_counts[7:0],
+                                  core_debug_sprite_counts[15:8],
+                                  core_debug_sprite_counts[23:16]};
+            5'd7: debug_p2_rgb = {core_debug_sprite_counts[31:24],
+                                  core_debug_sprite_counts[39:32],
+                                  core_debug_sprite_counts[47:40]};
+            5'd8: debug_p2_rgb = {core_debug_sprite_counts[55:48],
+                                  core_debug_sprite_counts[63:56],
+                                  debug_p2_flags};
+            5'd9: debug_p2_rgb = {3'b000, debug_p2_addr};
+            5'd10: debug_p2_rgb = {debug_p2_valid ? 8'hff : 8'h00,
+                                   core_debug_sprite_desc_valid ? 8'hff : 8'h00,
+                                   core_debug_sprite_rendering ? 8'hff : 8'h00};
+            default: debug_p2_rgb = 24'h000000;
+        endcase
+    end
+    else if (core_debug_vcnt < 9'd112) begin
+        if (debug_p2_cell < 5'd8)
+            debug_p2_rgb = {8'hd0 + {5'b00000, debug_p2_word_sel},
+                            debug_p2_last_word};
+        else if (debug_p2_cell == 5'd8) debug_p2_rgb = core_debug_sprite_activity;
+        else if (debug_p2_cell == 5'd9) debug_p2_rgb = core_debug_sprite_state[23:0];
+    end
+    else if (core_debug_vcnt < 9'd168) begin
+        if (debug_p2_cell < 5'd8)
+            debug_p2_rgb = {8'he0 + {5'b00000, debug_p2_word_sel},
+                            debug_p2_draw_word};
+        else if (debug_p2_cell == 5'd8) debug_p2_rgb = core_debug_sprite_activity;
+        else if (debug_p2_cell == 5'd9) debug_p2_rgb = core_debug_sprite_state[23:0];
+    end
+    else begin
+        if (debug_p2_cell < 5'd8)
+            debug_p2_rgb = {8'hf0 + {5'b00000, debug_p2_word_sel},
+                            debug_p2_first_word};
+        else if (debug_p2_cell < 5'd16)
+            debug_p2_rgb = {8'ha0 + {5'b00000, debug_p2_word_sel},
+                            debug_p2_rom_word};
+        else if (debug_p2_cell == 5'd16) debug_p2_rgb = {3'b000, debug_p2_addr};
+        else if (debug_p2_cell == 5'd17) debug_p2_rgb = {16'h0000, debug_p2_flags};
+        else if (debug_p2_cell == 5'd18) debug_p2_rgb = core_debug_sprite_activity;
+        else if (debug_p2_cell == 5'd19) debug_p2_rgb = core_debug_sprite_state[23:0];
+    end
+end
 reg input_coin_seen, input_start_seen;
 always @(posedge clk_sys) begin
     if (reset) begin

@@ -7,6 +7,8 @@
 //  5. synchronous line-RAM launch latency and parity-bank alignment
 //  6. raw sprite group (not OR-adjusted effective group) controls blending
 //  7. all four color-offset modes select bank 0/1/none correctly
+//  8. backdrop static/line-color indices come from VRAM $1FF5E, not mixer $5E
+//  9. offset-before-blend arithmetic and both palette operands are phase-safe
 //============================================================================
 `timescale 1ns/1ps
 
@@ -43,6 +45,7 @@ reg  [8:0]  lb_wx = 0;
 reg  [13:0] lb_wpix = 0;
 reg         lb_bank = 0;
 reg  [15:0] spr_pix = 16'hffff;
+reg  [15:0] bg_ctrl = 16'h0000;
 wire [23:0] rgb;
 reg         rst = 1;
 wire [13:0] px_text, px_nbg0, px_nbg1, px_nbg2, px_nbg3, px_bmp;
@@ -61,7 +64,7 @@ s32_mixer mix (
     .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_be(reg_be),
     .reg_rdata(), .reg_raddr(6'h0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1), .display_en(1'b1),
-    .layer_off(6'b000000),
+    .layer_off(6'b000000), .bg_ctrl(bg_ctrl),
     .px_text(px_text), .px_nbg0(px_nbg0), .px_nbg1(px_nbg1),
     .px_nbg2(px_nbg2), .px_nbg3(px_nbg3), .px_bmp(px_bmp),
     .spr_pix(spr_pix),
@@ -110,7 +113,11 @@ integer errors = 0;
 task check(input [23:0] got, input [23:0] want, input [8:0] x);
     if (got !== want) begin
         errors = errors + 1;
-        $display("  FAIL x=%0d rgb=%06x want=%06x", x, got, want);
+        $display("  FAIL x=%0d rgb=%06x want=%06x first=%0d idx=%04x pal=%04x co=%0d r=%0d g=%0d b=%0d sum=%0d/%0d/%0d blend=%0d",
+                 x, got, want, mix.bestsel_hold, mix.idx_first,
+                 mix.first_pal, mix.co1_hold,
+                 mix.r1_pipe, mix.g1_pipe, mix.b1_pipe,
+                 mix.rr_pipe, mix.gg_pipe, mix.bb_pipe, mix.blend_hold);
     end
 endtask
 
@@ -135,6 +142,8 @@ initial begin
     wpal(15'h0002, 16'h2000);          // B=8
     wpal(15'h0003, 16'h4210);          // B=G=R=16
     wpal(15'h0021, 16'h000F);          // R=15 (pal idx 0x21)
+    wpal(15'h0400, 16'h000F);          // static backdrop: R=15
+    wpal(15'h0203, 16'h03E0);          // line backdrop: G=31
 
     // mixer: NBG0 prio F shift 0; NBG1 prio 7 shift 0; others explicitly
     // programmed low — the register file resets to 0xFFFF like MAME's
@@ -165,6 +174,7 @@ initial begin
     wreg(6'h23, 16'h0000);
     wreg(6'h24, 16'h0000);
     wreg(6'h25, 16'h0000);
+    wreg(6'h2f, 16'h0000);             // mixer $5E must not drive backdrop
 
     // line buffers (bank 0, line 0): NBG0 pen 1 at x=10; NBG1 pen 2 at x=10
     // and x=12; NBG0 pen 0x21 (pal 2, pen 1) at x=14
@@ -200,15 +210,16 @@ initial begin
         $display("  FAIL winner stage misaligned");
     end
     @(posedge clk_ram); #1;
-    if (mix.resolve_pending !== 1'b1 || mix.ph !== 4'hf) begin
+    if (mix.second_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
         errors = errors + 1;
-        $display("  FAIL partner stage misaligned");
+        $display("  FAIL partner/palette stage misaligned: pending=%b ph=%0d addr=%04x",
+                 mix.second_pending, mix.ph, mix_addr);
     end
     @(posedge clk_ram); #1;
-    if (mix.resolve_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
+    if (mix.ph !== 4'd1 || mix_addr !== 14'd2) begin
         errors = errors + 1;
-        $display("  FAIL palette launch misaligned: pending=%b ph=%0d addr=%04x",
-                 mix.resolve_pending, mix.ph, mix_addr);
+        $display("  FAIL runner palette launch misaligned: ph=%0d addr=%04x",
+                 mix.ph, mix_addr);
     end
     repeat (7) @(posedge clk_ram); #1;
     check(rgb, 24'hF8F8F8, 9'd10);
@@ -222,6 +233,17 @@ initial begin
     check(rgb, 24'h000040, 9'd12);
     px(9'd14);                         // NBG0 idx 0x21 -> R=15 -> 78,0,0
     check(rgb, 24'h780000, 9'd14);
+
+    // --- backdrop source: VRAM $1FF5E, including the per-line low 9 bits ---
+    bg_ctrl = 16'h0400;                // static palette index $0400
+    px(9'd9);
+    check(rgb, 24'h780000, 9'd9);
+    bg_ctrl = 16'h8200;                // base $0200 + (0 + y)
+    disp_y = 9'd3;
+    px(9'd9);
+    check(rgb, 24'h00F800, 9'd9);       // palette[$0203]
+    bg_ctrl = 16'h0000;
+    disp_y = 9'd0;
 
     // --- 2: blend NBG0 (winner) with NBG1 at x=10 ---
     // enable: reg 0x4E bit11, factor 3; NBG0 blend reg 0x32 (word 0x19):
@@ -307,6 +329,24 @@ initial begin
     px(9'd22); check(rgb, 24'h808080, 9'd22);
     wreg(6'h19, 16'h4000);
     px(9'd22); check(rgb, 24'h889098, 9'd22);
+
+    // --- 8: signed offsets occur before blending; second lookup is distinct ---
+    // NBG0 white uses bank1 (-32) => -1/channel. NBG1 blue uses bank0
+    // (+31) => (31,31,39). Factor 0 gives ((-1*7)+second)/8 = (3,3,4).
+    // This also catches either palette-clock phase returning the first color
+    // for both blend operands.
+    wreg(6'h20, 16'h001f); wreg(6'h21, 16'h001f); wreg(6'h22, 16'h001f);
+    wreg(6'h23, 16'h0020); wreg(6'h24, 16'h0020); wreg(6'h25, 16'h0020);
+    wreg(6'h1f, 16'h0000);
+    wreg(6'h19, 16'h0100);             // NBG0 flag0(bank1), blend NBG1
+    wreg(6'h1a, 16'h4000);             // NBG1 flag1(bank0)
+    wreg(6'h27, 16'h0800);             // blend enable, factor 0
+    px(9'd10);
+    check(rgb, 24'h181820, 9'd10);
+
+    wreg(6'h20, 16'h0001); wreg(6'h21, 16'h0002); wreg(6'h22, 16'h0003);
+    wreg(6'h23, 16'h003f); wreg(6'h24, 16'h003e); wreg(6'h25, 16'h003d);
+    wreg(6'h27, 16'h0000); wreg(6'h1a, 16'h0000);
 
     // mode 11 -> bank !layerflag, like mode 00
     wreg(6'h1f, 16'h8002); wreg(6'h19, 16'h0000);

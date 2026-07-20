@@ -25,7 +25,7 @@ framebuffer/mixer/sprite tests, decimal and bit-string groups, V60 fetch
 performance, ROM-loader/reset gating, EEPROM NVRAM semantics, SDRAM capture,
 integrated sprite/DDR backpressure, interrupt-controller collision/timer
 coverage, and signed audio-route saturation. The latest complete native
-Windows run passes **35/35 tiers** with **10/10 V60 differential seeds**.
+Windows run passes **35/35 tiers** with **50/50 V60 differential seeds**.
 The ga2-only profile also passes an independent Verilator 5.032 structural
 elaboration.
 
@@ -33,8 +33,8 @@ The copyrighted ROMs are kept locally under ignored `roms/`. The image
 builder (`tools/make_sim_images.py`) reads MAME ZIPs directly and has produced
 full SDRAM-layout images for `holo`, `ga2`, and `svf`:
 
-- **holo:** completes its EEPROM/IRQ boot path and renders about 36K non-black
-  pixels per frame in the real-ROM harness.
+- **holo:** completes its EEPROM/IRQ boot path. A fresh final-mixer run reaches
+  63,383 non-black pixels at frame 19 and captures a populated frame 20.
 - **ga2:** reaches the V25 wake-up/protection path, enables interrupts, and
   advances into attract code; the indexed-jump error found on this path is
   fixed. Its object-bucket scan also exposed an inverted V60 `SKPCUH` zero

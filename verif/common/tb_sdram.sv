@@ -49,6 +49,11 @@ reg [24:1] p4_addr = '0;
 wire [15:0] p4_dout;
 wire p4_ack;
 
+reg p5_req = 1'b0;
+reg [24:3] p5_addr = '0;
+wire [63:0] p5_dout;
+wire p5_ack;
+
 sdram dut (
     .clk(clk), .init(init), .ready(ready),
     .SDRAM_DQ(SDRAM_DQ), .SDRAM_A(SDRAM_A), .SDRAM_BA(SDRAM_BA),
@@ -62,7 +67,8 @@ sdram dut (
     .p1_req(p1_req), .p1_addr(p1_addr), .p1_dout(p1_dout), .p1_ack(p1_ack),
     .p2_req(p2_req), .p2_addr(p2_addr), .p2_dout(p2_dout), .p2_ack(p2_ack),
     .p3_req(p3_req), .p3_addr(p3_addr), .p3_dout(p3_dout), .p3_ack(p3_ack),
-    .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack)
+    .p4_req(p4_req), .p4_addr(p4_addr), .p4_dout(p4_dout), .p4_ack(p4_ack),
+    .p5_req(p5_req), .p5_addr(p5_addr), .p5_dout(p5_dout), .p5_ack(p5_ack)
 );
 
 function automatic [15:0] word_for_col(input [9:0] col);
@@ -150,6 +156,8 @@ endtask
 integer init_timeout;
 integer delayed_timeout;
 reg [15:0] delayed_expected;
+reg [15:0] concurrent_p0_expected;
+reg [63:0] delayed_p5_expected;
 initial begin
     repeat (4) @(posedge clk);
     @(negedge clk); init = 1'b0;
@@ -183,6 +191,40 @@ initial begin
         $fatal(1, "p4 request metadata changed while pending: got %h expected %h",
                p4_dout, delayed_expected);
     while (p4_ack) begin @(posedge clk); #1; end
+
+    // Hold the lowest-priority V25 line fill behind an in-flight sprite burst
+    // and a later V60 read. Its one-cycle request and aligned line address must
+    // survive both waits even after the live address bus changes.
+    delayed_p5_expected = {
+        word_for_col(10'h0a7), word_for_col(10'h0a6),
+        word_for_col(10'h0a5), word_for_col(10'h0a4)
+    };
+    concurrent_p0_expected = word_for_col(10'h055);
+    @(negedge clk); p2_addr = 21'h000010; p2_req = 1'b1;
+    @(negedge clk); p2_req = 1'b0;
+                    p5_addr = 22'h000029; p5_req = 1'b1;
+    @(negedge clk); p5_req = 1'b0; p5_addr = 22'h00007c;
+                    p0_addr = 24'h000055; p0_req = 1'b1;
+    @(negedge clk); p0_req = 1'b0; p0_addr = 24'h000199;
+    delayed_timeout = 0;
+    while (!p0_ack && delayed_timeout < 240) begin
+        @(posedge clk); #1; delayed_timeout = delayed_timeout + 1;
+    end
+    if (!p0_ack) $fatal(1, "concurrent p0 read timed out");
+    if (p0_dout !== concurrent_p0_expected)
+        $fatal(1, "concurrent p0 data wrong: got %h expected %h",
+               p0_dout, concurrent_p0_expected);
+    while (p0_ack) begin @(posedge clk); #1; end
+
+    delayed_timeout = 0;
+    while (!p5_ack && delayed_timeout < 240) begin
+        @(posedge clk); #1; delayed_timeout = delayed_timeout + 1;
+    end
+    if (!p5_ack) $fatal(1, "delayed V25 p5 burst timed out");
+    if (p5_dout !== delayed_p5_expected)
+        $fatal(1, "p5 burst metadata/order wrong: got %h expected %h",
+               p5_dout, delayed_p5_expected);
+    while (p5_ack) begin @(posedge clk); #1; end
 
     $display("SDRAM CAPTURE PASS");
     $finish;

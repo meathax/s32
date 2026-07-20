@@ -7,8 +7,10 @@ cd "$repo_root"
 
 for required in \
     roms/sim/ga2/mcu.bin \
+    rtl/cpu/v25/s32_v25_rom_cache.sv \
     rtl/cpu/v25/s32_v25_cpu.sv \
     rtl/cpu/v25/s80x86/generated/microcode.bin \
+    verif/common/tb_v25_rom_cache.sv \
     verif/common/tb_v25_firmware.sv; do
     if [[ ! -f "$required" ]]; then
         echo "V25_FIRMWARE RUNNER FAIL: missing $required" >&2
@@ -27,6 +29,18 @@ cleanup() {
 trap cleanup EXIT
 
 start_seconds=$SECONDS
+iverilog \
+    -g2012 \
+    -s tb_v25_rom_cache \
+    -o "$build_dir/tb_v25_rom_cache" \
+    rtl/cpu/v25/s32_v25_rom_cache.sv \
+    verif/common/tb_v25_rom_cache.sv
+"$build_dir/tb_v25_rom_cache" 2>&1 | tee "$build_dir/cache.log"
+if ! grep -Fq "V25 ROM CACHE PASS" "$build_dir/cache.log"; then
+    echo "V25_ROM_CACHE RUNNER FAIL: success marker missing" >&2
+    exit 1
+fi
+
 verilator \
     --binary \
     --timing \
@@ -38,6 +52,7 @@ verilator \
     --Mdir "$build_dir/obj_dir" \
     -o Vtb_v25_firmware \
     -f verif/v25/s80x86.f \
+    rtl/cpu/v25/s32_v25_rom_cache.sv \
     rtl/cpu/v25/s32_v25_cpu.sv \
     verif/common/tb_v25_firmware.sv \
     2>&1 | tee "$build_dir/compile.log"
@@ -52,6 +67,7 @@ fi
 
 # The test emits one atomic success marker only after independently checking
 # the complete 48-byte wake-up and 16-byte protection table (plus stack state).
+echo "V25_ROM_CACHE RUNNER: PASS"
 echo "V25_FIRMWARE WAKE: PASS"
 echo "V25_FIRMWARE TABLE: PASS"
 echo "V25_FIRMWARE RUNNER: PASS ($((SECONDS - start_seconds))s)"

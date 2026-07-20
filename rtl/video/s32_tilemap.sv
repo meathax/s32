@@ -159,6 +159,11 @@ always @(posedge clk) begin
     else begin
         lb_we <= 1'b0;
         scale_start <= 1'b0;
+        // Completion is a pulse, not an idle-level indication.  The line
+        // scheduler may legally accept the next scanline on the cycle this
+        // pulse is observed; leaving it high until the next start would make
+        // that newly accepted job look complete one cycle later.
+        line_done <= 1'b0;
 
         case (tst)
         T_IDLE: if (line_start) begin
@@ -546,6 +551,71 @@ always @(posedge clk) begin
                 end
             end
             else bit_count <= bit_count + 1'd1;
+        end
+    end
+end
+
+endmodule
+
+//============================================================================
+// Scanline launch guard for the tile renderer.
+//
+// line_kick crosses from the clk_sys CRT timing into clk_ram and therefore
+// remains high for more than one clk_ram edge. Convert it to one event, keep
+// the target line/buffer immutable until the renderer completes, and drop
+// rather than corrupt the active render with any missed line deadline.
+// A completion pulse and a new boundary may coincide: the old job is then
+// complete and the new one is accepted without an idle bubble.
+//============================================================================
+module s32_tile_line_scheduler (
+    input             clk,
+    input             rst,
+    input             line_kick,
+    input       [8:0] next_line,
+    input             line_done,
+    output reg        line_start,
+    output reg  [8:0] render_line,
+    output reg        lb_bank,
+    output reg        busy,
+    output reg        overrun_sticky,
+    output reg [15:0] overrun_count
+);
+
+reg kick_active;
+
+always @(posedge clk) begin
+    if (rst) begin
+        line_start     <= 1'b0;
+        render_line    <= 9'd0;
+        lb_bank        <= 1'b0;
+        busy           <= 1'b0;
+        kick_active    <= 1'b0;
+        overrun_sticky <= 1'b0;
+        overrun_count  <= 16'd0;
+    end
+    else begin
+        line_start <= 1'b0;
+        // A completed render releases the scheduler. The acceptance below
+        // has later assignment priority so done+kick immediately launches
+        // the next line while still producing exactly one start pulse.
+        if (line_done)
+            busy <= 1'b0;
+
+        if (!line_kick)
+            kick_active <= 1'b0;
+        else if (!kick_active) begin
+            kick_active <= 1'b1;
+            if (!busy || line_done) begin
+                render_line <= next_line;
+                lb_bank     <= next_line[0];
+                line_start  <= 1'b1;
+                busy        <= 1'b1;
+            end
+            else begin
+                overrun_sticky <= 1'b1;
+                if (overrun_count != 16'hffff)
+                    overrun_count <= overrun_count + 1'd1;
+            end
         end
     end
 end

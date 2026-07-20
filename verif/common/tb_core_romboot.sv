@@ -6,6 +6,7 @@
 //    +IMG=<dir>     image directory (maincpu.hex/soundcpu.hex/tiles.hex/
 //                   sprites.hex expected inside)
 //    +B0=<hex>      board descriptor byte 0 (flags), default 0
+//    +SBM=<hex>     physical sprite-ROM bank mask (0/1/3), default 3
 //    +FRAMES=<n>    frames to run (804k clk_sys each), default 3
 //    +COINAT=<n>     assert P1 coin active-low starting at harness frame n
 //    +COINLEN=<n>    coin assertion length in frames, default 1
@@ -50,8 +51,10 @@ end
 // board descriptor from plusargs
 board_desc_t board;
 integer b0;
+integer sbm;
 initial begin
     if (!$value$plusargs("B0=%h", b0)) b0 = 0;
+    if (!$value$plusargs("SBM=%h", sbm)) sbm = 3;
     board = '0;
     board.multi32     = b0[0];
     board.has_v25     = b0[1];
@@ -60,6 +63,8 @@ initial begin
     board.has_track   = b0[4];
     board.has_ppi     = b0[5];
     board.has_dsp_hle = b0[6];
+    board.sprite_bank_valid = 1'b1;
+    board.sprite_bank_mask  = sbm[1:0];
 end
 
 // ---------------------------------------------------------------------------
@@ -305,6 +310,7 @@ s32_core core (
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr), .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
     .sdr_p3_req(p3_req), .sdr_p3_addr(p3_addr), .sdr_p3_dout(p3_dout), .sdr_p3_ack(p3_ack),
     .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
+    .sdr_p5_req(), .sdr_p5_addr(), .sdr_p5_dout(64'h0), .sdr_p5_ack(1'b0),
     .fb_wr_start(fbw_start), .fb_wr_buf(fbw_buf), .fb_wr_x(fbw_x), .fb_wr_y(fbw_y),
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),

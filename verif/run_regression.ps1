@@ -337,8 +337,15 @@ try {
     Write-Tier 9 "framebuffer interface directed test (runs / shadow RMW / erase / read)"
     Run-HdlTest "t09_fb_if" "tb_fb_if" @("rtl/mem/s32_fb_if.sv", "verif/common/tb_fb_if.sv") "FB IF PASS"
 
-    Write-Tier 10 "mixer directed test (priority / palette index / blend / shadow)"
+    Write-Tier 10 "mixer directed + 512-case independent differential test"
     Run-HdlTest "t10_mixer" "tb_mixer" @("rtl/video/s32_linebuf.sv", "rtl/video/s32_mixer.sv", "rtl/video/s32_palette.sv", "verif/common/tb_mixer.sv") "MIXER PASS"
+    $mixerDiffOutput = @(Invoke-NativeCapture $PythonExe @(
+        "-m", "verif.mixer_diff.run",
+        "--modelsim-bin", $ModelSimDirectory,
+        "--seed", "5387", "--count", "512"
+    ) "mixer differential")
+    Assert-Marker $mixerDiffOutput "MIXER DIFF PASS cases=512" "mixer differential"
+    Write-RunLine "MIXER DIFFERENTIAL: PASS (512 cases)"
 
     Write-Tier 11 "sprite pixel-path directed test (pen rules / end codes / flip / zoom / indirect)"
     Run-HdlTest "t11_sprite" "tb_sprite" @("rtl/video/s32_sprite.sv", "verif/common/tb_sprite.sv") "SPRITE PASS"
@@ -376,8 +383,14 @@ try {
     Write-Tier 22 "shared tile/bitmap line-buffer latency / layer / parity isolation"
     Run-HdlTest "t22_linebuf" "tb_linebuf" @("rtl/video/s32_linebuf.sv", "verif/common/tb_linebuf.sv") "LINEBUF PASS"
 
-    Write-Tier 23 "tilemap synchronous VRAM fetch latency / NBG / TEXT / BITMAP"
+    Write-Tier 23 "tilemap VRAM fetches and deadline-safe scanline scheduling"
     Run-HdlTest "t23_tilemap_vram" "tb_tilemap_vram" @("rtl/video/s32_big_dpram.sv", "rtl/video/s32_vram.sv", "rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_vram.sv") "TILEMAP VRAM PASS" @("SIMULATION")
+    Run-HdlTest "t23_tile_scheduler" "tb_tile_scheduler" @(
+        "rtl/video/s32_tilemap.sv", "verif/common/tb_tile_scheduler.sv"
+    ) "TILE SCHEDULER PASS" @("SIMULATION")
+    Run-HdlTest "t23_tile_backpressure" "tb_tile_backpressure" @(
+        "rtl/video/s32_tilemap.sv", "verif/common/tb_tile_backpressure.sv"
+    ) "TILE BACKPRESSURE PASS" @("SIMULATION")
 
     Write-Tier 24 "byte-wide true-dual-port BRAM timing / hold / collision semantics"
     Run-HdlTest "t24_byte_dpram" "tb_byte_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_byte_dpram.sv") "BYTE DPRAM PASS"

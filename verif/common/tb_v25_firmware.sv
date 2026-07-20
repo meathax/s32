@@ -25,10 +25,15 @@ wire debug_io_seen;
 wire [15:0] debug_last_io_addr;
 wire debug_unmapped_seen;
 wire [19:0] debug_last_unmapped_addr;
+wire rom_req;
+wire [15:3] rom_addr;
+reg [63:0] rom_data = 64'hffffffffffffffff;
+reg rom_ack = 1'b0;
 
 s32_v25_cpu dut (
     .clk(clk), .rst(rst), .enable(enable), .table_sel(1'b0),
     .prg_wr(prg_wr), .prg_waddr(prg_waddr), .prg_wdata(prg_wdata),
+    .rom_req(rom_req), .rom_addr(rom_addr), .rom_data(rom_data), .rom_ack(rom_ack),
     .cs(cs), .we(we), .addr(addr), .wdata(wdata), .rdata(rdata),
     .debug_cpu_clk(debug_cpu_ce),
     .debug_io_seen(debug_io_seen),
@@ -38,6 +43,10 @@ s32_v25_cpu dut (
 );
 
 reg [7:0] raw [0:65535];
+reg [7:0] ext_rom [0:65535];
+reg rom_pending = 1'b0;
+reg [15:3] rom_addr_latched = 13'd0;
+integer rom_reads = 0;
 integer fd;
 integer got;
 integer src;
@@ -49,6 +58,38 @@ integer ce_last_cycle;
 integer ce_gap;
 reg [7:0] observed;
 
+
+// SDRAM-style program service: capture the one-cycle request, then return a
+// complete 8-byte line and acknowledgement after one wait cycle. The wrapper
+// must retain the selected word until a fractional V25 clock-enable edge.
+always @(posedge clk) begin
+    rom_ack <= 1'b0;
+    if (rst) begin
+        rom_pending <= 1'b0;
+    end else begin
+        if (rom_req) begin
+            if (rom_pending)
+                $fatal(1, "V25 cache issued a second p5 miss while pending");
+            rom_addr_latched <= rom_addr;
+            rom_pending <= 1'b1;
+            rom_reads <= rom_reads + 1;
+        end
+        if (rom_pending) begin
+            rom_data <= {
+                ext_rom[{rom_addr_latched, 3'd7}],
+                ext_rom[{rom_addr_latched, 3'd6}],
+                ext_rom[{rom_addr_latched, 3'd5}],
+                ext_rom[{rom_addr_latched, 3'd4}],
+                ext_rom[{rom_addr_latched, 3'd3}],
+                ext_rom[{rom_addr_latched, 3'd2}],
+                ext_rom[{rom_addr_latched, 3'd1}],
+                ext_rom[{rom_addr_latched, 3'd0}]
+            };
+            rom_ack <= 1'b1;
+            rom_pending <= 1'b0;
+        end
+    end
+end
 function automatic [15:0] descramble(input [15:0] i);
 begin
     descramble = {i[14], i[11], i[15], i[12], i[13], i[4], i[3], i[7],
@@ -135,24 +176,18 @@ initial begin
         $fatal(1);
     end
 
-    // Keep both clients reset/disabled while filling program RAM.
+    // Build the same descrambled image that the production loader writes into
+    // the external SDRAM MCU region.
+    for (src = 0; src < 65536; src = src + 1)
+        ext_rom[src] = raw[descramble(src[15:0])];
     repeat (4) @(posedge clk);
     rst = 1'b0;
-    for (src = 0; src < 65536; src = src + 1) begin
-        @(negedge clk);
-        prg_wr    = 1'b1;
-        // MAME: descrambled[dst] = raw[bitswap(dst)].
-        prg_waddr = src[15:0];
-        prg_wdata = raw[descramble(src[15:0])];
-    end
-    @(negedge clk);
-    prg_wr = 1'b0;
 
     // Verify the encrypted reset-vector byte is the expected table index.
     // ga2 table entry 02h translates to the far-jump opcode EAh.
-    if (dut.program_rom.mem[16'hfff0] !== 8'h02) begin
+    if (ext_rom[16'hfff0] !== 8'h02) begin
         $display("V25_FIRMWARE FAIL: reset byte %02x, expected encrypted 02",
-                 dut.program_rom.mem[16'hfff0]);
+                 ext_rom[16'hfff0]);
         $fatal(1);
     end
 
@@ -240,6 +275,10 @@ initial begin
         $fatal(1);
     end
 
+    if (rom_reads == 0) begin
+        $display("V25_FIRMWARE FAIL: external program ROM was never requested");
+        $fatal(1);
+    end
     $display("V25_FIRMWARE PASS: genuine GA2 firmware wrote wake-up, table, and stack state");
     $display("V25_FIRMWARE trace: io_seen=%0d last_io=%04x unmapped=%0d last_mem=%05x",
              debug_io_seen, debug_last_io_addr,

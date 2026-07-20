@@ -74,6 +74,7 @@ s32_core core (
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr), .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
     .sdr_p3_req(), .sdr_p3_addr(), .sdr_p3_dout(16'h0), .sdr_p3_ack(1'b0),
     .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
+    .sdr_p5_req(), .sdr_p5_addr(), .sdr_p5_dout(64'h0), .sdr_p5_ack(1'b0),
     .fb_wr_start(), .fb_wr_buf(), .fb_wr_x(), .fb_wr_y(),
     .fb_wr_valid(), .fb_wr_pix(), .fb_wr_end(),
     .fb_wr_shadow(), .fb_wr_busy(1'b0),
@@ -123,8 +124,10 @@ initial begin
     movir(32'h0000_0001, 5'd0); stab(5'd0, 32'h0030_0000);   // NBG0 tile(0,0)=code1
     movir(32'h0000_7FFF, 5'd0); stab(5'd0, 32'h0060_0002);   // palette[1] white
     movir(32'h0000_001F, 5'd0); stab(5'd0, 32'h0060_0004);   // palette[2] red
+    movir(32'h0000_001F, 5'd0); stab(5'd0, 32'h0060_0400);   // palette[$200] red backdrop
+    movir(32'h0000_0200, 5'd0); stab(5'd0, 32'h0031_FF5E);   // VRAM $1FF5E static backdrop $200
     movir(32'h0000_010F, 5'd0); stab(5'd0, 32'h0061_0022);   // mixer NBG0 prio15 palbase1
-    movir(32'h0000_0001, 5'd0); stab(5'd0, 32'h0061_002C);   // mixer background
+    movir(32'h0000_0001, 5'd0); stab(5'd0, 32'h0061_002C);   // mixer background priority 1
     // mixer regs reset to 0xFFFF like MAME's video_start memset — a real
     // program configures blending; leaving 0x4E at the default keeps blend
     // enabled at factor 7 and washes the picture out
@@ -156,6 +159,9 @@ initial begin
         core.v60.dbg_halted, core.work_ram.sim_peek(16'h0100), vs_count);
     $display("video: active_samples=%0d nonblack=%0d x_on_rgb(post-warmup)=%0d | audio x=%0d",
         active_samples, active_nonblack, x_on_rgb, x_on_aud);
+    $display("backdrop: vram_1ff5e=%04x line_ctrl=%04x palette_0200=%04x mixer_idx=%04x mixer_pal=%04x",
+        core.r1ff5e, core.mix_bg_ctrl, core.pal0.sim_peek(14'h0200),
+        core.mix0.idx_first, core.mix0.first_pal);
 
     // Acceptance gate (simulator tier): CPU boots + runs the full bus decode
     // to a clean HALT with no illegal-opcode trap; the vblank interrupt path

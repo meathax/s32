@@ -248,3 +248,33 @@ Arabian Fight and Spider-Man are diagnostic comparison cases only. The next
 hardware gate is sustained GA2 gameplay through the first-level waterfall/
 flame-heavy scene with correct palette, persistent sprites, stable DDR
 framebuffer activity, and working audio.
+
+# Round 17 — Holosseum hardware-first CPU, sprite, and mixer closure
+
+This round deliberately stopped RBF generation and physical MiSTer testing.
+It completed the hardest Holosseum-relevant blocks against pinned MAME source,
+directed RTL tests, independent scalar oracles, and full-core ROM simulation.
+
+## R17 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R17-1 | CPU | The V60 audit still had reserved-opcode, privileged-register, BRKV/TRAPFL, CALL-length, CHLVL, and task-transfer gaps. | Implemented the missing System 32 integer/system semantics and exact exception frames. `tb_v60_audit.sv` covers them directly; the final 35-tier gate retains 50/50 independent V60 differential seeds. The only deliberate general-purpose ISA exclusion is MAME's unused-on-System-32 single-precision `0x5C/0x5F` subset. |
+| R17-2 | TEST | The sprite engine had strong synthetic coverage but no frozen, populated Holosseum command-list proof using the completed V60. | A fresh full-core run reaches frame 20 and captures JUMP, two DRAWs, END. Replay performs 2,432 ROM requests, 256 runs, and 25,043 pixel writes. The physical framebuffer differs only by the known global-Y storage orientation; the visible adapter gives zero mismatches against the independent oracle. |
+| R17-3 | BUG | The backdrop generator read mixer word `$5E`. MAME reads VRAM `$1FF5E`; Holosseum normally uses `$0200`, so the old path selected palette entry zero instead of `$0200`. | Added a current-scanline `$1FF5E` snapshot and routed it into both mixers. Directed static and line-color tests explicitly program the unrelated mixer `$5E` to a different value. |
+| R17-4 | BUG | The time-multiplexed palette schedule was phase-sensitive. In one 48/96 MHz phase, a blended pixel could consume the winner color for both operands; moving the second request naively could instead replace the winner before it was retained. | The winner address now launches during winner selection, the runner-up address at P0, and the winner result is retained at P2. This fits the existing pixel budget and is safe for both 2:1 phases with the real inferred palette RAM. |
+| R17-5 | BUG | Blend expressions relied on implicit SystemVerilog sizing even though signed color offsets expand each pre-clamp channel to `-32..62`. | Added explicit signed wide products. Offset, blend, shadow, and final clamp now preserve MAME's operation order and full intermediate range. |
+| R17-6 | TEST | Bitmap coverage checked only the first low nibble of one 4-bpp word; mixer tests did not explore the cross-product of priorities, sprite modes, offsets, blends, and shadows. | Expanded the bitmap test across all 4-bpp nibbles, both 8-bpp bytes, X/Y scroll and wrap, palette formation, full-byte opacity, and clip-in/clip-out. Added an independent scalar mixer model plus deterministic packed-vector RTL harness. Four 1,024-case seeds pass, and a 512-case seed is now permanent in regression tier 10. |
+| R17-7 | BUG | In 416-wide mode the mixer receives exactly 12 `clk_ram` edges per pixel. The old control sequence attempted its P6 RGB commit on the same edge that the next `disp_x` change took priority, so most pixels retained black/stale output even though their palette fetches were correct. | Registered the winner's blend control one stage earlier and merged runner resolution/final-context capture into T3. P6 now commits one edge before the next pixel. The full-core soak rises from 2,652 to 167,076 non-black active samples without weakening its threshold, and still reports zero RGB/audio unknowns. |
+
+## R17 status
+
+The V60 System 32 software profile and 315-5386A sprite engine are frozen at
+the simulation level for Holosseum. The 315-5387/315-5388 bitmap/mixer path
+now has direct MAME-contract coverage and independent randomized evidence. A
+fresh final-mixer Holosseum run reaches 63,383 non-black pixels at frame 19;
+its populated frame-20 list again replays 2,432 ROM requests, 256 runs, and
+25,043 writes with zero visible mismatches. The complete regression passes
+35/35 tiers with 50/50 V60 seeds, and Quartus analysis/elaboration completes
+with zero errors. No fitter, assembler, RBF, deployment, or MiSTer launch was
+part of this phase.

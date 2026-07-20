@@ -183,6 +183,29 @@ begin
 end
 endtask
 
+task automatic expect_pixel(input [2:0] want_layer,
+                            input [8:0] want_x,
+                            input [13:0] want_pix);
+begin
+    found = 0;
+    for (timeout = 0; timeout < 5000 && !found; timeout = timeout + 1) begin
+        @(posedge clk_ram);
+        if (lb_we && lb_layer == want_layer && lb_x == want_x) begin
+            found = 1;
+            if (lb_pix !== want_pix) begin
+                $display("FAIL layer %0d x=%0d pixel: got %04x want %04x",
+                         want_layer, want_x, lb_pix, want_pix);
+                errors = errors + 1;
+            end
+        end
+    end
+    if (!found) begin
+        $display("FAIL no pixel for layer %0d x=%0d", want_layer, want_x);
+        errors = errors + 1;
+    end
+end
+endtask
+
 task automatic expect_first_request(input [18:0] want_addr);
 begin
     found = 0;
@@ -266,12 +289,72 @@ initial begin
     expect_first_pixel(3'd0, 14'h202f);
     wait_done;
 
-    // 4bpp bitmap word x=0 uses the low nibble.
+    // 4bpp bitmap words are little-endian nibble streams. Exercise all four
+    // pixels rather than allowing a uniform test word to hide lane reversal.
     cpu_write(16'h0000, 16'h4321);
     cpu_write(16'hff81, 16'h001f); // only BITMAP enabled
     start_render;
     expect_first_pixel(3'd5, 14'h2001);
+    expect_pixel(3'd5, 9'd1, 14'h2002);
+    expect_pixel(3'd5, 9'd2, 14'h2003);
+    expect_pixel(3'd5, 9'd3, 14'h2004);
     wait_done;
+
+    // 4bpp scroll and palette: source (x=5,y=2) is word $0101 nibble 1.
+    // $1FF8C contributes all nine palette bits above the four-bit pen.
+    cpu_write(16'h0101, 16'h00b0);
+    cpu_write(16'hffc4, 16'h0005); // bitmap X scroll
+    cpu_write(16'hffc5, 16'h0002); // bitmap Y scroll
+    cpu_write(16'hffc6, 16'h0012); // 4bpp palette base
+    render_line = 9'd0;
+    start_render;
+    expect_first_pixel(3'd5, 14'h212b);
+    wait_done;
+
+    // 8bpp mode uses little-endian bytes, wraps Y at 8 bits, and tests the
+    // complete byte for transparency (pen $10 remains opaque even though its
+    // low nibble is zero).  y=$ff + line 2 wraps to source row 1.
+    cpu_write(16'h0100, 16'h3410); // row 1, x0=$10, x1=$34
+    cpu_write(16'hff80, 16'h0800); // 8bpp bitmap
+    cpu_write(16'hffc4, 16'h0000);
+    cpu_write(16'hffc5, 16'h00ff);
+    cpu_write(16'hffc6, 16'h0030); // 8bpp palette base bits [8:4] = 3
+    render_line = 9'd2;
+    start_render;
+    expect_first_pixel(3'd5, 14'h2310);
+    expect_pixel(3'd5, 9'd1, 14'h2334);
+    wait_done;
+
+    // Bitmap clip rectangle is slot 4.  With clip-in, only x=1 is visible;
+    // clip-out inverts the same union.  The pen data may remain in a
+    // transparent line-buffer word, but bit 13 is the mixer-visible opacity.
+    cpu_write(16'h0000, 16'h1111);
+    cpu_write(16'hffc0, 16'h0001); // min X
+    cpu_write(16'hffc1, 16'h0000); // min Y
+    cpu_write(16'hffc2, 16'h0001); // max X (inclusive)
+    cpu_write(16'hffc3, 16'h0000); // max Y (inclusive)
+    cpu_write(16'hff80, 16'h0000); // 4bpp bitmap
+    cpu_write(16'hffc4, 16'h0000);
+    cpu_write(16'hffc5, 16'h0000);
+    cpu_write(16'hffc6, 16'h0000);
+    cpu_write(16'hff81, 16'h801f); // bitmap only, clip enabled, clip-in
+    render_line = 9'd0;
+    start_render;
+    expect_first_pixel(3'd5, 14'h0001);
+    expect_pixel(3'd5, 9'd1, 14'h2001);
+    wait_done;
+    cpu_write(16'hff81, 16'h841f); // same rectangle, clip-out
+    start_render;
+    expect_first_pixel(3'd5, 14'h2001);
+    expect_pixel(3'd5, 9'd1, 14'h0001);
+    wait_done;
+
+    // Restore the default bitmap controls before the tilemap-specific cases.
+    cpu_write(16'hff80, 16'h0000);
+    cpu_write(16'hff81, 16'h003f); // all six rendered layers disabled
+    cpu_write(16'hffc4, 16'h0000);
+    cpu_write(16'hffc5, 16'h0000);
+    cpu_write(16'hffc6, 16'h0000);
 
 
     // MAME update_tilemap_rowscroll uses distinct rowscroll (+0x000) and

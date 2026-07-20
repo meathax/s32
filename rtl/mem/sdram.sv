@@ -1,13 +1,14 @@
 //============================================================================
 //  Sega System 32 for MiSTer — SDRAM controller
 //  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, 4-bank interleaved.
-//  Five request ports with fixed priority (DESIGN.md §4.2):
+//  Six request ports with fixed priority (DESIGN.md §4.2):
 //    p0: V60 fetch/data (latency critical, 16-bit single)
 //    p1: tile fetch      (64-bit burst = 4 words)
 //    p2: sprite fetch    (128-bit burst = 8 words)
 //    p3: Z80 ROM         (16-bit single, byte laned)
 //    p4: MultiPCM        (16-bit single)
-//  Write port (ROM download only): shares p0 path while ioctl_download.
+//    p5: V25 program ROM  (64-bit burst = 4 words)
+//  Write port (ROM download only): highest priority while ioctl_download.
 //============================================================================
 
 module sdram (
@@ -62,7 +63,13 @@ module sdram (
     input             p4_req,
     input      [24:1] p4_addr,
     output reg [15:0] p4_dout,
-    output reg        p4_ack
+    output reg        p4_ack,
+
+    // p5: V25 program ROM - 4-word burst, aligned to 8 bytes
+    input             p5_req,
+    input      [24:3] p5_addr,
+    output reg [63:0] p5_dout,
+    output reg        p5_ack
 );
 
 reg [15:0] dq_out;
@@ -122,9 +129,10 @@ reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
 // arbitration may delay a lower-priority port long after the producer pulses
 // req or moves on to its next address.  This mirrors the latched per-slot
 // request interfaces used by mature MiSTer SDRAM frameworks.
-reg p0_pend, p1_pend, p2_pend, p3_pend, p4_pend, wr_pend;
+reg p0_pend, p1_pend, p2_pend, p3_pend, p4_pend, p5_pend, wr_pend;
 reg [24:1] p0_addr_p, p3_addr_p, p4_addr_p, wr_addr_p;
 reg [24:3] p1_addr_p;
+reg [24:3] p5_addr_p;
 reg [24:4] p2_addr_p;
 reg [15:0] wr_din_p;
 reg  [1:0] wr_be_p;
@@ -145,14 +153,17 @@ always @(posedge clk) begin
     if (p4_req && !p4_pend && !p4_ack) begin
         p4_pend <= 1'b1; p4_addr_p <= p4_addr;
     end
+    if (p5_req && !p5_pend && !p5_ack) begin
+        p5_pend <= 1'b1; p5_addr_p <= p5_addr;
+    end
     if (wr_req && !wr_pend && !wr_ack) begin
         wr_pend <= 1'b1; wr_addr_p <= wr_addr;
         wr_din_p <= wr_din; wr_be_p <= wr_be;
     end
     if (init) begin
-        {p0_pend,p1_pend,p2_pend,p3_pend,p4_pend,wr_pend} <= '0;
+        {p0_pend,p1_pend,p2_pend,p3_pend,p4_pend,p5_pend,wr_pend} <= '0;
         p0_addr_p <= '0; p1_addr_p <= '0; p2_addr_p <= '0;
-        p3_addr_p <= '0; p4_addr_p <= '0; wr_addr_p <= '0;
+        p3_addr_p <= '0; p4_addr_p <= '0; p5_addr_p <= '0; wr_addr_p <= '0;
         wr_din_p <= '0; wr_be_p <= '0;
     end
     if (p0_ack) p0_pend <= 1'b0;
@@ -160,6 +171,7 @@ always @(posedge clk) begin
     if (p2_ack) p2_pend <= 1'b0;
     if (p4_ack) p4_pend <= 1'b0;
     if (p3_ack) p3_pend <= 1'b0;
+    if (p5_ack) p5_pend <= 1'b0;
     if (wr_ack) wr_pend <= 1'b0;
 end
 
@@ -185,6 +197,7 @@ task automatic deliver(input [15:0] final_word);
                                 cap_buf[3], cap_buf[2], cap_buf[1], cap_buf[0]}; p2_ack <= 1'b1; end
         3'd3: begin p3_dout <= final_word; p3_ack <= 1'b1; end
         3'd4: begin p4_dout <= final_word; p4_ack <= 1'b1; end
+        3'd5: begin p5_dout <= {final_word, cap_buf[2], cap_buf[1], cap_buf[0]}; p5_ack <= 1'b1; end
         default: ;
     endcase
 endtask
@@ -198,7 +211,7 @@ always @(posedge clk) begin
     if (ack_stretch != 0) ack_stretch <= ack_stretch - 1'd1;
     else begin
         p0_ack <= 1'b0; p1_ack <= 1'b0; p2_ack <= 1'b0;
-        p3_ack <= 1'b0; p4_ack <= 1'b0; wr_ack <= 1'b0;
+        p3_ack <= 1'b0; p4_ack <= 1'b0; p5_ack <= 1'b0; wr_ack <= 1'b0;
     end
 
     if (init) begin
@@ -252,24 +265,33 @@ always @(posedge clk) begin
                 refw_cnt <= 3'd1;             // tRP >= 2 cycles before REF
                 state <= ST_PRE_REF;
             end
-            else if (wr_pend | p0_pend | p1_pend | p2_pend | p3_pend | p4_pend) begin
+            else if (wr_pend | p0_pend | p1_pend | p2_pend | p3_pend | p4_pend | p5_pend) begin
                 logic [24:1] a;
                 if      (wr_pend) begin grant <= 3'd7; a = wr_addr_p;           rd_total <= 4'd1; is_write <= 1'b1; end
                 else if (p0_pend) begin grant <= 3'd0; a = p0_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
                 else if (p1_pend) begin grant <= 3'd1; a = {p1_addr_p, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
                 else if (p2_pend) begin grant <= 3'd2; a = {p2_addr_p, 3'b000}; rd_total <= 4'd8; is_write <= 1'b0; end
                 else if (p3_pend) begin grant <= 3'd3; a = p3_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else              begin grant <= 3'd4; a = p4_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
+                else if (p4_pend) begin grant <= 3'd4; a = p4_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
+                else              begin grant <= 3'd5; a = {p5_addr_p, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
                 xfer_addr <= a;
                 din_r     <= wr_din_p;
                 be_r      <= wr_be_p;
-                cmd       <= CMD_ACT;
-                SDRAM_BA  <= a[24:23];
-                SDRAM_A   <= a[22:10];
                 rd_issued   <= 0;
                 rd_captured <= 0;
-                state     <= ST_RCD1;
+                // Register the arbitration result before it drives the SDRAM
+                // row-address pins.  Besides making the request mailbox a
+                // clean transaction boundary, this removes the long
+                // pending-request -> priority mux -> output-DDR path.
+                state     <= ST_ACT;
             end
+        end
+
+        ST_ACT: begin
+            cmd      <= CMD_ACT;
+            SDRAM_BA <= xfer_addr[24:23];
+            SDRAM_A  <= xfer_addr[22:10];
+            state    <= ST_RCD1;
         end
 
         // tRCD >= 21ns = 3 cycles ACT->READ/WRITE

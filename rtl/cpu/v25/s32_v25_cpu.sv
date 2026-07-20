@@ -29,6 +29,14 @@ module s32_v25_cpu (
     input  wire [15:0] prg_waddr,
     input  wire  [7:0] prg_wdata,
 
+    // Descrambled 64 KiB program image in external SDRAM. Each request fetches
+    // one aligned 8-byte cache line; acknowledgement/data may return at any
+    // time and are retained until the next virtual V25 clock enable.
+    output wire        rom_req,
+    output wire [15:3] rom_addr,
+    input  wire [63:0] rom_data,
+    input  wire        rom_ack,
+
     // V60/right side of the MB8421 (0xA00000-0xA00fff, low byte lane).
     input  wire        cs,
     input  wire        we,
@@ -185,24 +193,22 @@ endfunction
 assign opcode_xlat_out = table_sel ? arf_opcode(opcode_xlat_in)
                                      : ga2_opcode(opcode_xlat_in);
 
-// -------------------------------------------------------------------------
-// Program ROM: 64 KiB, mirrored at 00000h and f0000h.  One 16-bit CPU port
-// is arbitrated between prefetch and data reads; the loader has an independent
-// 8-bit port.  The CPU never writes its program ROM.
-// -------------------------------------------------------------------------
-reg  [14:0] rom_addr;
-reg         rom_rden;
-wire [15:0] rom_q;
+// Program ROM lives in external SDRAM and is mirrored at 00000h and f0000h.
+// Keeping the 64 KiB image out of M10Ks recovers 64 blocks required to fit the
+// real V25 alongside the System 32 video and audio hardware.
+reg        rom_ready;
+reg [15:0] rom_q;
+reg        cache_req;
+reg [15:1] cache_addr;
+wire       cache_ack;
+wire [15:0] cache_data;
 
-s32_v25_program_rom program_rom (
-    .load_clock(clk),
-    .load_wr(prg_wr),
-    .load_addr(prg_waddr),
-    .load_data(prg_wdata),
-    .cpu_clock(clk),
-    .cpu_rden(rom_rden),
-    .cpu_addr(rom_addr),
-    .cpu_q(rom_q)
+s32_v25_rom_cache program_cache (
+    .clk(clk), .rst(rst), .invalidate(prg_wr),
+    .cpu_req(cache_req), .cpu_addr(cache_addr),
+    .cpu_data(cache_data), .cpu_ack(cache_ack),
+    .rom_req(rom_req), .rom_addr(rom_addr),
+    .rom_data(rom_data), .rom_ack(rom_ack)
 );
 
 // -------------------------------------------------------------------------
@@ -238,16 +244,14 @@ s32_v25_mailbox_dpram mb_ram (
 assign rdata = dpram_v60_q;
 
 // -------------------------------------------------------------------------
-// Single-target CPU bus arbiter.  The synchronous memories get one request
-// cycle, one settling cycle, then an acknowledge with stable read data.
+// Single-target CPU bus arbiter. External ROM responses are retained across
+// fractional CE gaps; the synchronous mailbox keeps its settling cycle.
 // Data transactions take priority so prefetch cannot starve load/store.
 // -------------------------------------------------------------------------
 localparam [3:0]
     BUS_IDLE       = 4'd0,
     BUS_I_ROM_WAIT = 4'd1,
-    BUS_I_ROM_ACK  = 4'd2,
     BUS_D_ROM_WAIT = 4'd3,
-    BUS_D_ROM_ACK  = 4'd4,
     BUS_D_DP_WAIT  = 4'd5,
     BUS_D_DP_ACK   = 4'd6;
 
@@ -271,8 +275,10 @@ always @(posedge clk or posedge rst) begin
         data_ack                <= 1'b0;
         instr_rdata_r           <= 16'hffff;
         data_rdata_r            <= 16'hffff;
-        rom_addr                <= 15'd0;
-        rom_rden                <= 1'b0;
+        cache_addr              <= 15'd0;
+        cache_req               <= 1'b0;
+        rom_ready               <= 1'b0;
+        rom_q                   <= 16'hffff;
         dpram_cpu_addr          <= 10'd0;
         dpram_cpu_wdata         <= 16'd0;
         dpram_cpu_byteena       <= 2'b00;
@@ -283,17 +289,22 @@ always @(posedge clk or posedge rst) begin
         debug_unmapped_seen     <= 1'b0;
         debug_last_unmapped_addr <= 20'd0;
     end else begin
-        // BRAM enables are one clk_sys pulse.  CPU acknowledgements are only
-        // changed on a V25 CE edge, so an ACK asserted by the arbiter remains
-        // visible throughout skipped clk_sys cycles and cannot be missed.
-        rom_rden        <= 1'b0;
+        // Requests and BRAM enables are one clk_sys pulse. CPU acknowledgements
+        // change only on V25 CE edges and remain visible throughout CE gaps.
+        cache_req       <= 1'b0;
         dpram_cpu_rden  <= 1'b0;
         dpram_cpu_wren  <= 1'b0;
 
-        if (!enable) begin
+        if (cache_ack) begin
+            rom_q     <= cache_data;
+            rom_ready <= 1'b1;
+        end
+
+        if (!enable || prg_wr) begin
             bus_state  <= BUS_IDLE;
             instr_ack <= 1'b0;
             data_ack  <= 1'b0;
+            rom_ready <= 1'b0;
         end else if (v25_ce) begin
             instr_ack <= 1'b0;
             data_ack  <= 1'b0;
@@ -322,8 +333,9 @@ always @(posedge clk or posedge rst) begin
                                 // ROM writes are ignored but acknowledged.
                                 data_ack <= 1'b1;
                             end else begin
-                                rom_addr  <= data_addr[15:1];
-                                rom_rden  <= 1'b1;
+                                cache_addr <= data_addr[15:1];
+                                cache_req  <= 1'b1;
+                                rom_ready <= 1'b0;
                                 bus_state <= BUS_D_ROM_WAIT;
                             end
                         end else begin
@@ -334,8 +346,9 @@ always @(posedge clk or posedge rst) begin
                         end
                     end else if (instr_access) begin
                         if (instr_is_rom) begin
-                            rom_addr  <= instr_addr[15:1];
-                            rom_rden  <= 1'b1;
+                            cache_addr <= instr_addr[15:1];
+                            cache_req  <= 1'b1;
+                            rom_ready <= 1'b0;
                             bus_state <= BUS_I_ROM_WAIT;
                         end else begin
                             instr_rdata_r            <= 16'hffff;
@@ -346,18 +359,21 @@ always @(posedge clk or posedge rst) begin
                     end
                 end
 
-                BUS_I_ROM_WAIT: bus_state <= BUS_I_ROM_ACK;
-                BUS_I_ROM_ACK: begin
-                    instr_rdata_r <= rom_q;
-                    instr_ack     <= 1'b1;
-                    bus_state     <= BUS_IDLE;
+                BUS_I_ROM_WAIT: begin
+                    if (rom_ready || cache_ack) begin
+                        instr_rdata_r <= cache_ack ? cache_data : rom_q;
+                        instr_ack     <= 1'b1;
+                        rom_ready     <= 1'b0;
+                        bus_state     <= BUS_IDLE;
+                    end
                 end
-
-                BUS_D_ROM_WAIT: bus_state <= BUS_D_ROM_ACK;
-                BUS_D_ROM_ACK: begin
-                    data_rdata_r <= rom_q;
-                    data_ack     <= 1'b1;
-                    bus_state    <= BUS_IDLE;
+                BUS_D_ROM_WAIT: begin
+                    if (rom_ready || cache_ack) begin
+                        data_rdata_r <= cache_ack ? cache_data : rom_q;
+                        data_ack     <= 1'b1;
+                        rom_ready    <= 1'b0;
+                        bus_state    <= BUS_IDLE;
+                    end
                 end
 
                 BUS_D_DP_WAIT: bus_state <= BUS_D_DP_ACK;

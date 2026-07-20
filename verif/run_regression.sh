@@ -63,10 +63,13 @@ vvp /tmp/s32_ga2 | grep -q "GA2 PATH PASS" && echo "GA2 PATH: PASS" || { echo "G
 echo "[9/35] framebuffer interface directed test (runs / shadow RMW / erase / read)"
 iverilog -g2012 -o /tmp/s32_fbif rtl/mem/s32_fb_if.sv verif/common/tb_fb_if.sv
 vvp /tmp/s32_fbif | grep -q "FB IF PASS" && echo "FB IF: PASS" || { echo "FB IF: FAIL"; exit 1; }
-echo "[10/35] mixer directed test (priority / palette index / blend / shadow)"
+echo "[10/35] mixer directed + 512-case independent differential test"
 iverilog -g2012 -o /tmp/s32_mix rtl/video/s32_linebuf.sv rtl/video/s32_mixer.sv \
   rtl/video/s32_palette.sv verif/common/tb_mixer.sv
 vvp /tmp/s32_mix | grep -q "MIXER PASS" && echo "MIXER: PASS" || { echo "MIXER: FAIL"; exit 1; }
+python3 -m verif.mixer_diff.generate_vectors /tmp/s32_mixer_vectors.hex --seed 5387 --count 512
+iverilog -g2012 -o /tmp/s32_mixdiff rtl/video/s32_mixer.sv verif/mixer_diff/tb_mixer_diff.sv
+vvp /tmp/s32_mixdiff +VECTORS=/tmp/s32_mixer_vectors.hex | grep -q "MIXER DIFF PASS cases=512" && echo "MIXER DIFFERENTIAL: PASS (512 cases)" || { echo "MIXER DIFFERENTIAL: FAIL"; exit 1; }
 echo "[11/35] sprite pixel-path directed test (pen rules / end codes / flip / zoom / indirect)"
 iverilog -g2012 -o /tmp/s32_spr rtl/video/s32_sprite.sv verif/common/tb_sprite.sv
 vvp /tmp/s32_spr | grep -q "SPRITE PASS" && echo "SPRITE: PASS" || { echo "SPRITE: FAIL"; exit 1; }
@@ -110,11 +113,17 @@ echo "[22/35] shared tile/bitmap line-buffer latency / layer / parity isolation"
 iverilog -g2012 -o /tmp/s32_linebuf \
   rtl/video/s32_linebuf.sv verif/common/tb_linebuf.sv
 vvp /tmp/s32_linebuf | grep -q "LINEBUF PASS" && echo "LINEBUF: PASS" || { echo "LINEBUF: FAIL"; exit 1; }
-echo "[23/35] tilemap synchronous VRAM fetch latency / NBG / TEXT / BITMAP"
+echo "[23/35] tilemap VRAM fetches and deadline-safe scanline scheduling"
 iverilog -g2012 -DSIMULATION -o /tmp/s32_tilemap_vram \
   rtl/video/s32_big_dpram.sv rtl/video/s32_vram.sv \
   rtl/video/s32_tilemap.sv verif/common/tb_tilemap_vram.sv
 vvp /tmp/s32_tilemap_vram | grep -q "TILEMAP VRAM PASS" && echo "TILEMAP VRAM: PASS" || { echo "TILEMAP VRAM: FAIL"; exit 1; }
+iverilog -g2012 -DSIMULATION -s tb_tile_scheduler -o /tmp/s32_tile_scheduler \
+  rtl/video/s32_tilemap.sv verif/common/tb_tile_scheduler.sv
+vvp /tmp/s32_tile_scheduler | grep -q "TILE SCHEDULER PASS" && echo "TILE SCHEDULER: PASS" || { echo "TILE SCHEDULER: FAIL"; exit 1; }
+iverilog -g2012 -DSIMULATION -s tb_tile_backpressure -o /tmp/s32_tile_backpressure \
+  rtl/video/s32_tilemap.sv verif/common/tb_tile_backpressure.sv
+vvp /tmp/s32_tile_backpressure | grep -q "TILE BACKPRESSURE PASS" && echo "TILE BACKPRESSURE: PASS" || { echo "TILE BACKPRESSURE: FAIL"; exit 1; }
 echo "[24/35] byte-wide true-dual-port BRAM timing / hold / collision semantics"
 iverilog -g2012 -s tb_byte_dpram -o /tmp/s32_byte_dpram \
   rtl/video/s32_big_dpram.sv verif/common/tb_byte_dpram.sv

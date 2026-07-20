@@ -35,6 +35,43 @@ not compiled or included in the FPGA build.
   verifies byte, halfword and dword reads/writes at even and odd addresses,
   including exact 1/2/3 external-cycle counts.
 
+## Completeness pass (2026-07-20)
+
+The primary and grouped dispatch tables were audited again against the pinned
+MAME files.  This pass closed the following independent gaps:
+
+- reserved primary opcodes `0x6b`/`0x7b` now enter vector 8 instead of acting
+  as never-taken branches;
+- reserved `0x58`/`0x5a` string sub-opcodes now enter vector 8 instead of
+  entering an undefined string-engine state;
+- CLRTLB consumes its complete addressing-mode operand before advancing PC;
+- privileged-register indices 16..28 now implement ATBR0/ATLR0 through
+  ADTMR1, including deterministic reset state and STPR/LDPR access; PIR resets
+  to `0x6000` for V60 and `0x7000` for V70;
+- BRKV emits MAME's four-word frame (fault PC, code, old PSW, return PC);
+- synchronous exceptions preserve PSW.IS, while IRQ/NMI alone force the
+  interrupt stack;
+- TRAPFL uses the MAME TKCW/PSW floating-cause intersection rather than PSW.TP;
+- CALL decodes operand 1 as an address and pushes the full decoded return PC;
+- CHLVL implements the target execution level, vector, PSW transition, and
+  four-word frame;
+- LDTASK/STTASK transfer TKCW, enabled level stacks, and selected R0..R30 words
+  through the normal bus, update TR, and reload the active stack bank.
+
+`tb_v60_audit.sv` now proves all of these paths, including a variable-length
+F1 CALL/RET, exact BRKV and CHLVL stack layouts, and a task save/destroy/load
+round trip.  The complete 35-tier regression, including 50/50 independent V60
+differential seeds, passed after the final exception/task tranche
+(`verif/modelsim-v60-complete-gate.log`).
+
+The remaining deliberate ISA exclusion is the single-precision floating-point
+subset in MAME groups `0x5c` and `0x5f`.  No System 32 game is known to execute
+it, but MAME does implement CMPF/MOVFS/NEGFS/ABSFS/SCLFS/ADDFS/SUBFS/MULFS/
+DIVFS and CVTWS/CVTSW.  The RTL currently raises the reserved-instruction
+exception for those groups and must not be described as a complete general-
+purpose V60 until that exclusion is resolved or formally bounded to the arcade
+software profile.
+
 ## Regression evidence
 
 - `tb_v60_rotate.sv`: 7 of 8 oracle cases fail against the exact pre-fix RTL;

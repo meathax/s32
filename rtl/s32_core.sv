@@ -51,6 +51,10 @@ module s32_core #(
     output     [24:1] sdr_p4_addr,
     input      [15:0] sdr_p4_dout,
     input             sdr_p4_ack,
+    output            sdr_p5_req,
+    output     [24:3] sdr_p5_addr,
+    input      [63:0] sdr_p5_dout,
+    input             sdr_p5_ack,
 
     // DDR3 framebuffer service (s32_fb_if lives in emu top)
     output            fb_wr_start,
@@ -115,8 +119,16 @@ module s32_core #(
     output     [23:0] debug_status,
     output     [15:0] debug_first_rom,
     output      [8:0] debug_hcnt,
+    output      [8:0] debug_vcnt,
     output    [127:0] debug_sprite_desc,
-    output            debug_sprite_desc_valid
+    output            debug_sprite_desc_valid,
+    output    [127:0] debug_sprite_last_desc,
+    output    [127:0] debug_sprite_last_draw_desc,
+    output     [23:0] debug_sprite_activity,
+    output     [31:0] debug_sprite_state,
+    output     [63:0] debug_sprite_counts,
+    output            debug_sprite_rendering,
+    output     [47:0] debug_sprram_cpu
 );
 
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
@@ -282,11 +294,31 @@ s32_big_dpram #(
     .wren_b(1'b0), .q_b(sprlist_q)
 );
 
+// Record completed CPU writes, not every cycle of a held V60 bus request.
+// Packed output = {count, seen/BE/pad, last word address, last data}.
+wire       debug_sprram_seen;
+wire [7:0] debug_sprram_count;
+wire [15:0] debug_sprram_addr;
+wire [15:0] debug_sprram_data;
+wire [1:0] debug_sprram_be;
+s32_sprite_write_debug sprite_write_debug (
+    .clk(clk_sys), .rst(rst),
+    .wr_stb(wr_stb && m_we && sel_sprram),
+    .wr_addr(A[16:1]), .wr_data(m_wdata), .wr_be(m_be),
+    .seen(debug_sprram_seen), .count(debug_sprram_count),
+    .last_addr(debug_sprram_addr), .last_data(debug_sprram_data),
+    .last_be(debug_sprram_be)
+);
+assign debug_sprram_cpu = {debug_sprram_count,
+                           debug_sprram_seen, debug_sprram_be, 5'b00000,
+                           debug_sprram_addr, debug_sprram_data};
+
 // CRT timing
 wire mode_416;
 wire vbl_start, vbl_end;
 wire [8:0] hcnt, vcnt;
 assign debug_hcnt = hcnt;
+assign debug_vcnt = vcnt;
 s32_video crt (
     .clk(clk_sys), .rst(video_rst), .mode_416(mode_416),
     .ce_pix(ce_pix), .hcnt(hcnt), .vcnt(vcnt),
@@ -299,36 +331,113 @@ wire        tm_lb_we;
 wire [2:0]  tm_lb_layer;
 wire [8:0]  tm_lb_x;
 wire [13:0] tm_lb_pix;
-reg  line_start_r;
-reg  [8:0] render_line;
-reg  lb_bank = 0;
+wire        line_start_r;
+wire [8:0]  render_line;
+wire        tm_lb_bank;
+wire        tm_line_done;
+wire        tm_line_busy;
+wire        tm_line_overrun_sticky;
+wire [15:0] tm_line_overrun_count;
+wire [7:0]  io0_ph;
+// Snapshot of CPU-domain video controls used for one complete rendered line.
+// These registers are captured at the line-start boundary below.
+reg        tm_mode_416;
+reg  [1:0] tm_ext_tilebank;
+reg [15:0] tm_r1ff00, tm_r1ff02, tm_r1ff04, tm_r1ff06;
+reg [15:0] tm_r1ff5c, tm_r1ff5e, tm_r1ff88, tm_r1ff8a, tm_r1ff8c, tm_r1ff8e;
+reg [15:0] tm_scrollx [0:3], tm_scrolly [0:3];
+reg [15:0] tm_offsx [0:3], tm_offsy [0:3];
+reg [15:0] tm_pages [0:7];
+reg [15:0] tm_zoomx [0:1], tm_zoomy [0:1];
+reg [15:0] tm_clips [0:19];
+reg [15:0] mix_bg_ctrl;
+integer tm_init_i;
+integer tm_cap_i;
+initial begin
+    tm_mode_416 = 1'b1;
+    tm_ext_tilebank = 2'b00;
+    tm_r1ff00 = 16'h8000;
+    tm_r1ff02 = 0; tm_r1ff04 = 0; tm_r1ff06 = 0;
+    tm_r1ff5c = 0; tm_r1ff5e = 0;
+    mix_bg_ctrl = 0;
+    tm_r1ff88 = 0; tm_r1ff8a = 0; tm_r1ff8c = 0; tm_r1ff8e = 0;
+    for (tm_init_i = 0; tm_init_i < 4; tm_init_i = tm_init_i + 1) begin
+        tm_scrollx[tm_init_i] = 0; tm_scrolly[tm_init_i] = 0;
+        tm_offsx[tm_init_i] = 0; tm_offsy[tm_init_i] = 0;
+    end
+    for (tm_init_i = 0; tm_init_i < 8; tm_init_i = tm_init_i + 1) tm_pages[tm_init_i] = 0;
+    for (tm_init_i = 0; tm_init_i < 2; tm_init_i = tm_init_i + 1) begin
+        tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200;
+    end
+    for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) tm_clips[tm_init_i] = 0;
+end
+
+// Launch at the start of the preceding scanline.  This gives the renderer a
+// complete line period to fill the opposite parity buffer; the former hblank
+// launch left only 90-96 pixel periods and routinely missed its deadline when
+// SDRAM was contended by the V25.  ce_pix/hcnt are held for multiple clk_ram
+// edges, so the scheduler performs the required event qualification.
+wire tm_line_boundary = ce_pix && (hcnt == 9'd0);
+wire [8:0] tm_next_line = (vcnt == 9'd261) ? 9'd0 : vcnt + 1'd1;
+s32_tile_line_scheduler tile_line_scheduler (
+    .clk(clk_ram), .rst(rst),
+    .line_kick(tm_line_boundary), .next_line(tm_next_line),
+    .line_done(tm_line_done), .line_start(line_start_r),
+    .render_line(render_line), .lb_bank(tm_lb_bank), .busy(tm_line_busy),
+    .overrun_sticky(tm_line_overrun_sticky),
+    .overrun_count(tm_line_overrun_count)
+);
+
 always @(posedge clk_ram) begin
-    line_start_r <= 0;
-    // kick renderer at each hblank start for next line (sync crossing
-    // simplified). Position must follow the video mode: in 320-wide mode
-    // htotal is 409, so a fixed 416 tick never fires and no line ever
-    // renders (found by real-ROM boot: holo runs 320 mode and displayed
-    // pure black).
-    if (ce_pix && hcnt == (mode_416 ? 9'd417 : 9'd321)) begin
-        render_line <= (vcnt == 9'd261) ? 9'd0 : vcnt + 1'd1;
-        line_start_r <= 1'b1;
-        lb_bank <= ~lb_bank;
+    // The backdrop is generated by the mixer for the line currently being
+    // scanned, while the tile renderer snapshots controls for the following
+    // line.  Keep a separate current-line copy of VRAM $1FF5E so a mid-frame
+    // write cannot tear one backdrop scanline or lead it by one line.
+    if (rst)
+        mix_bg_ctrl <= 16'h0000;
+    else if (tm_line_boundary)
+        mix_bg_ctrl <= r1ff5e;
+
+    if (line_start_r) begin
+        // Snapshot the CPU-domain register file once per line. The renderer
+        // observes only this stable copy until line_done.  A missed boundary
+        // cannot mutate the in-flight line, bank, or control state.
+        tm_mode_416 <= mode_416;
+        tm_ext_tilebank <= io0_ph[1:0];
+        tm_r1ff00 <= r1ff00; tm_r1ff02 <= r1ff02;
+        tm_r1ff04 <= r1ff04; tm_r1ff06 <= r1ff06;
+        tm_r1ff5c <= r1ff5c; tm_r1ff5e <= r1ff5e;
+        tm_r1ff88 <= r1ff88; tm_r1ff8a <= r1ff8a;
+        tm_r1ff8c <= r1ff8c; tm_r1ff8e <= r1ff8e;
+        for (tm_cap_i = 0; tm_cap_i < 4; tm_cap_i = tm_cap_i + 1) begin
+            tm_scrollx[tm_cap_i] <= w_scrollx[tm_cap_i];
+            tm_scrolly[tm_cap_i] <= w_scrolly[tm_cap_i];
+            tm_offsx[tm_cap_i] <= w_offsx[tm_cap_i];
+            tm_offsy[tm_cap_i] <= w_offsy[tm_cap_i];
+        end
+        for (tm_cap_i = 0; tm_cap_i < 8; tm_cap_i = tm_cap_i + 1)
+            tm_pages[tm_cap_i] <= w_pages[tm_cap_i];
+        for (tm_cap_i = 0; tm_cap_i < 2; tm_cap_i = tm_cap_i + 1) begin
+            tm_zoomx[tm_cap_i] <= w_zoomx[tm_cap_i];
+            tm_zoomy[tm_cap_i] <= w_zoomy[tm_cap_i];
+        end
+        for (tm_cap_i = 0; tm_cap_i < 20; tm_cap_i = tm_cap_i + 1)
+            tm_clips[tm_cap_i] <= w_clips[tm_cap_i];
     end
 end
 
-wire [7:0] io0_ph;
 wire [5:0] tm_layer_off;
 wire [21:3] tile_rom_addr;
 s32_tilemap tilemap (
     .clk(clk_ram), .rst(rst),
-    .line(render_line), .line_start(line_start_r), .line_done(),
-    .mode_416(mode_416), .ext_tilebank(io0_ph[1:0]), .layer_off_o(tm_layer_off),
-    .r1ff00(r1ff00), .r1ff02(r1ff02), .r1ff04(r1ff04), .r1ff06(r1ff06),
-    .r1ff5c(r1ff5c), .r1ff5e(r1ff5e),
-    .r1ff88(r1ff88), .r1ff8a(r1ff8a), .r1ff8c(r1ff8c), .r1ff8e(r1ff8e),
-    .scrollx(w_scrollx), .scrolly(w_scrolly),
-    .offsx(w_offsx), .offsy(w_offsy),
-    .pages(w_pages), .zoomx(w_zoomx), .zoomy(w_zoomy), .clips(w_clips),
+    .line(render_line), .line_start(line_start_r), .line_done(tm_line_done),
+    .mode_416(tm_mode_416), .ext_tilebank(tm_ext_tilebank), .layer_off_o(tm_layer_off),
+    .r1ff00(tm_r1ff00), .r1ff02(tm_r1ff02), .r1ff04(tm_r1ff04), .r1ff06(tm_r1ff06),
+    .r1ff5c(tm_r1ff5c), .r1ff5e(tm_r1ff5e),
+    .r1ff88(tm_r1ff88), .r1ff8a(tm_r1ff8a), .r1ff8c(tm_r1ff8c), .r1ff8e(tm_r1ff8e),
+    .scrollx(tm_scrollx), .scrolly(tm_scrolly),
+    .offsx(tm_offsx), .offsy(tm_offsy),
+    .pages(tm_pages), .zoomx(tm_zoomx), .zoomy(tm_zoomy), .clips(tm_clips),
     .vram_addr(vid_vaddr), .vram_rdata(vram_vid_q),
     .tile_req(sdr_p1_req), .tile_addr(tile_rom_addr),
     .tile_data(sdr_p1_dout), .tile_ack(sdr_p1_ack),
@@ -344,12 +453,20 @@ wire [7:0] sprctl_q;
 wire [1:0] disp_buf;
 s32_sprite sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
+    // Old MRAs predate bank metadata and therefore retain the original
+    // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.
+    .srom_bank_mask(board.sprite_bank_valid ? board.sprite_bank_mask : 2'b11),
     // MAME schedules sprite erase/swap/render just after VBLANK ends, not at
     // its leading edge.  GA2 builds its next command list during VBLANK, so
     // launching at vbl_start can consume the list before the IRQ-side update.
-    .vblank(vbl_end), .rendering(),
+    .vblank(vbl_end), .rendering(debug_sprite_rendering),
     .debug_first_rom_desc(debug_sprite_desc),
     .debug_first_rom_valid(debug_sprite_desc_valid),
+    .debug_last_desc(debug_sprite_last_desc),
+    .debug_last_draw_desc(debug_sprite_last_draw_desc),
+    .debug_activity(debug_sprite_activity),
+    .debug_state(debug_sprite_state),
+    .debug_counts(debug_sprite_counts),
     .ctl_we(wr_stb && m_we && sel_sprctl && m_be[0]),
     .ctl_addr(A[3:1]), .ctl_wdata(m_wdata[7:0]),
     .ctl_rdata(sprctl_q), .ctl_raddr(A[3:1]),
@@ -421,7 +538,7 @@ wire [13:0] mix_px_nbg2, mix_px_nbg3, mix_px_bmp;
 s32_linebuf shared_lbuf (
     .clk(clk_ram),
     .lb_we(tm_lb_we), .lb_layer(tm_lb_layer), .lb_wx(tm_lb_x),
-    .lb_wpix(tm_lb_pix), .lb_bank(render_line[0]),
+    .lb_wpix(tm_lb_pix), .lb_bank(tm_lb_bank),
     .rd_x(hcnt), .rd_bank(vcnt[0]),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
@@ -442,7 +559,7 @@ s32_mixer mix0 (
     .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
     .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-    .display_en(io0_cnt1), .layer_off(tm_layer_off),
+    .display_en(io0_cnt1), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
     .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -480,7 +597,7 @@ generate
             .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
             .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-            .display_en(io0_cnt1), .layer_off(tm_layer_off),
+            .display_en(io0_cnt1), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
             .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
             .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
             .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -703,11 +820,24 @@ s32_v25 v25 (
     .clk(clk_sys), .rst(rst), .enable(board.has_v25),
     .table_sel(board.v25_table),
     .prg_wr(v25_prg_wr), .prg_waddr(v25_prg_waddr), .prg_wdata(v25_prg_wdata),
+`ifdef S32_REAL_V25
+    .rom_req(sdr_p5_req), .rom_addr(v25_rom_addr),
+    .rom_data(sdr_p5_dout), .rom_ack(sdr_p5_ack),
+`endif
     .cs(m_req && sel_v25 && board.has_v25 && m_be[0]), .we(m_we),
     .addr(A[11:1]), .wdata(m_wdata[7:0]), .rdata(v25_q)
 );
 
 // ---------------------------------------------------------------------------
+
+`ifdef S32_REAL_V25
+wire [15:3] v25_rom_addr;
+assign sdr_p5_addr = SDR_MCU_BASE[24:3] + {9'b0, v25_rom_addr};
+`else
+assign sdr_p5_req  = 1'b0;
+assign sdr_p5_addr = '0;
+`endif
+
 // V60 ROM fetch via SDRAM p0, through a small I/D cache (perf):
 //   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
 //   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.

@@ -35,7 +35,7 @@ Current verification evidence:
   under DDR backpressure, interrupt reset/source-ack/timer behavior, and
   signed audio-route saturation, MultiPCM semantics, V60 rotate/bus behavior,
   top-level map decode, and genuine V25 firmware. The native Windows ModelSim
-  runner completes the combined matrix with **35/35 tiers PASS** and **10/10 V60 differential
+  runner completes the combined matrix with **35/35 tiers PASS** and **50/50 V60 differential
   seeds PASS**; its detailed transcript is
   `verif/modelsim-regression.log`.
 - The ga2-only Quartus profile completes Analysis & Synthesis at a **map-only
@@ -51,7 +51,7 @@ under the ignored `roms/` tree.
 
 | Set | Evidence from the full-core real-ROM harness | Current limit |
 |---|---|---|
-| `holo` | EEPROM initialization completes, IRQs run, sprites reach the mixer, and about 36K non-black pixels/frame render. | No hardware/audio or extended-play certification. |
+| `holo` | EEPROM initialization completes, IRQs run, and the final-mixer run reaches 63,383 non-black pixels at frame 19 before capturing populated frame 20. That frame's JUMP/two-DRAW/END list replays with zero visible mismatches. | No hardware/audio or extended-play certification. |
 | `arabfgt` | An eight-frame universal-RTL probe reaches mixer, VRAM, palette, and sprite-list writes by frames 2–5 and completes without simulator errors. | Early initialization evidence only; no recognizable frame or sustained-play result yet. |
 | `spidman` | An eight-frame universal-RTL probe executes real code and I/O traffic without simulator errors. | Still in an early I/O polling sequence at frame 7; retained as a non-V25 diagnostic, not promoted to `sim`. |
 | `ga2` | V25 wake-up/protection passes and interrupts enable. Scripted coin is sampled at frames 41/42 and Start at 51/52; after the Start transition, frame 63 reaches the first populated sprite list (`spr_cmd=4`, `srom=5968`, `sprpx=52722`). Frame 64 reports `spr_opq=42393` with real pixels reaching the mixer. A 90-frame run (0–89) completes with `ROMBOOT DONE`, zero errors/warnings; rendering remains stable through frame 89 at four commands and about 5.8–6.0K sprite-ROM requests/frame (`sprpx=1374558` cumulative). The frame-80 capture visibly resolves the skull/candle Golden Axe character-select screen, `STERN`, a player sprite, and `Credits 0`. | Recognizable renderer output in simulation only: no pixel/audio equivalence, full play-through, or hardware result yet. |
@@ -98,6 +98,15 @@ play on a physical DE10-Nano. No set is hardware-`gold` yet.
 | scross (+2) | Stadium Cross | Multi 32 analog | — | rtl |
 | titlef (+2) | Title Fight | Multi 32 | — | rtl |
 | as1 (+3) | AS-1 Controller | Multi 32 + LD | — | **unsupported** |
+
+Holosseum's current `sim` evidence includes a complete EEPROM/IRQ boot to
+populated frame 20 with the final V60 System 32 profile. Its real sprite list
+replays as JUMP, two DRAWs, END (2,432 ROM requests, 25,043 written pixels)
+with zero visible mismatches against the independent 315-5386A oracle. The
+post-mixer full-core run reaches 63,383 non-black pixels at frame 19. The
+bitmap/mixer path also has directed 4/8-bpp coverage, 4,096 randomized stress
+pixels, and a permanent 512-case 315-5387 differential gate, but this remains
+simulator evidence rather than an RBF or physical-gameplay certification.
 
 ## Remaining release and compatibility gaps
 
