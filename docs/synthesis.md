@@ -40,28 +40,35 @@ declaration/source ordering, a V60 identifier collision, simulation-only
 large memory initialization loops, hierarchical reach-through, and an
 enum-returning helper that crashed the older frontend.
 
-### Latest full-chip Analysis & Synthesis result (map only)
+### Latest full-chip Holo fit and timing result
 
-The ga2 release profile (`S32_SYSTEM32_ONLY` + `S32_GA2_ONLY`) completes
-Quartus 17 Analysis & Synthesis. The current `.map.rpt` reports:
+The Holosseum release profile (`S32_SYSTEM32_ONLY` + `S32_HOLO_ONLY`) completes
+Quartus Prime Lite 17.1 seed 6 through map, fit, route, assembler, and TimeQuest.
+The current reports record:
 
-| Mapping metric | Result |
+| Full-chip metric | Result |
 |---|---:|
-| Estimated logic utilization | **26,851 / 41,910 ALMs** (64.1%) |
-| Combinational ALUTs | 41,440 |
-| Dedicated logic registers | 23,171 |
-| Block-memory bits | 3,934,136 |
-| DSP blocks | 42 |
-| PLLs | 3 |
+| Fitted logic utilization | **30,821 / 41,910 ALMs** (74%) |
+| RAM blocks | **492 / 553** (89%) |
+| Routing utilization | 27% average; 50% peak |
+| Worst setup slack | **+0.314 ns** at the 96.63 MHz core clock |
+| Worst hold slack | **+0.248 ns** or better across reported clocks |
+| RBF size | 4,266,012 bytes |
+| RBF SHA-256 | `0C241D4FBBD202A8EFACFBD7261ED31DDD4AB74BE515FBF7E1E9E5A1956094D2` |
 
-These are **map-only estimates**, not fitted resource utilization. The map
-does not prove placement/routing or timing closure, and it does not produce a
-release-qualified RBF. No successful fitter summary, timing-closure report,
-release RBF, or hardware result is recorded here.
+The original fitted Holo netlist missed setup by 2.501 ns in the mixer. Its
+serialized eight-layer priority scan fed a layer mux, variable shift, and
+palette-base addition in one cycle. Balanced winner/runner trees plus
+precomputed per-layer palette indices remove that path while retaining the
+existing pixel latency; directed and 512-case independent differential mixer
+tests remain exact. `tools/report-quartus.ps1 -RequireReady` now reports the
+artifact as deployable. This proves implementation and timing closure, not
+per-game physical-board acceptance.
 
-The profile keeps ga2's V25 and i8255 paths and removes hardware unreachable
-by ga2: the ADC, three trackballs, generic protection HLE, Burning Rival HLE,
-and Air Rescue DSP. Those blocks remain present in universal builds.
+The Holo profile removes game-specific protection, link, DSP, Multi 32, and
+V25 hardware that Holosseum cannot reach. `S80X86_PSEUDO_286_INT=0` remains a
+parse-only definition for dormant source files; it does not enable the real
+V25 datapath.
 
 The EEPROM shadow is now an explicit 64×16 dual-port Cyclone V `altsyncram`
 M10K. Data is stored inverted so the device's zero power-up state has the
@@ -92,8 +99,8 @@ ALMs, 147 combinational ALUTs, 90 registers, and 1,024 block-memory bits.
 | V60 `SKPCUH` search semantics | ✅ PASS — exact ga2 encoding plus found/exhausted/zero-length cases |
 | EEPROM M10K implementation | ✅ PASS — serial operations, synchronous upload latency, dirty/ack ordering, isolated Quartus inference |
 | Complete regression | ✅ PASS — native Windows ModelSim **35/35 tiers**, including **50/50 V60 differential seeds** and the permanent 512-case mixer differential; detailed transcript in `verif/modelsim-mixer-complete-gate.log` |
-| Quartus analysis/elaboration | ✅ PASS — final universal RTL, zero errors (no fit or RBF generated) |
-| Per-game acceptance (§11.6 hardware tier) | ga2 has partial DE10-Nano gameplay evidence; Holosseum has not yet been hardware-certified. Tracked in `docs/compat.md` |
+| Quartus full fit/timing/RBF | ✅ PASS — Holo seed 6, 74% ALMs / 89% RAM, +0.314 ns setup and at least +0.248 ns hold; current RBF generated |
+| Per-game acceptance (§11.6 hardware tier) | Holosseum reaches gameplay on DE10-Nano with controls and audio, but its colors remain wrong; Spider-Man also reaches gameplay with the gaps recorded in `docs/compat.md`. |
 
 ## §11.6 acceptance — simulator tier (run here)
 

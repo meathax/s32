@@ -27,7 +27,7 @@ wire [13:0] mix_addr;
 wire [15:0] mix_data;
 
 s32_palette pal (
-    .clk(clk_sys),
+    .clk(clk_sys), .mix_clk(clk_ram),
     .cpu_we(cpu_we), .cpu_addr(cpu_addr), .cpu_wdata(cpu_wdata),
     .cpu_be(2'b11), .cpu_rdata(), .mixer_r4e(16'h0000),
     .mix_addr(mix_addr), .mix_data(mix_data)

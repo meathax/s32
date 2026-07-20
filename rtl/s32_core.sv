@@ -590,7 +590,7 @@ s32_linebuf shared_lbuf (
 );
 
 s32_palette pal0 (
-    .clk(clk_sys),
+    .clk(clk_sys), .mix_clk(clk_ram),
     .cpu_we(m_req && m_we && is_pal0),
     .cpu_addr(A[15:1]), .cpu_wdata(m_wdata), .cpu_be(m_be),
     .cpu_rdata(pal0_cpu_q), .mixer_r4e(mix0_r4e),
@@ -629,7 +629,7 @@ generate
         // B7: Multi 32 second screen — palette bank 1 (0x680000) + mixer 1
         // (0x690000).  This branch remains available to a future Multi 32 QSF.
         s32_palette pal1 (
-            .clk(clk_sys),
+            .clk(clk_sys), .mix_clk(clk_ram),
             .cpu_we(m_req && m_we && is_pal1),
             .cpu_addr(A[15:1]), .cpu_wdata(m_wdata), .cpu_be(m_be),
             .cpu_rdata(pal1_cpu_q), .mixer_r4e(mix1_r4e),

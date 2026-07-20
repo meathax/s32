@@ -157,37 +157,41 @@ end
 reg [6:0] ep_spr_s, ep_text_s, ep_nbg0_s, ep_nbg1_s;
 reg [6:0] ep_nbg2_s, ep_nbg3_s, ep_bmp_s, ep_spr_nom_s;
 
-// winner select (8-way max), evaluated from the candidate snapshot
-reg [6:0] best;
-reg [3:0] bestsel;   // 0=text 1..4 nbg 5 bmp 6 spr 7 bg (== MAME laynum)
-always @(*) begin
-    best = ep_bg; bestsel = 4'd7;
-    if (ep_bmp_s  > best) begin best = ep_bmp_s;  bestsel = 4'd5; end
-    if (ep_nbg3_s > best) begin best = ep_nbg3_s; bestsel = 4'd4; end
-    if (ep_nbg2_s > best) begin best = ep_nbg2_s; bestsel = 4'd3; end
-    if (ep_nbg1_s > best) begin best = ep_nbg1_s; bestsel = 4'd2; end
-    if (ep_nbg0_s > best) begin best = ep_nbg0_s; bestsel = 4'd1; end
-    if (ep_text_s > best) begin best = ep_text_s; bestsel = 4'd0; end
-    if (ep_spr_s  > best) begin best = ep_spr_s;  bestsel = 4'd6; end
-end
+// Winner select (8-way max), evaluated from the candidate snapshot. Keep the
+// priority key and layer selector together through a balanced tree. A serial
+// if-chain put seven 7-bit comparisons ahead of the palette address and was
+// the post-fit 96 MHz critical path. Rank makes every non-zero key unique.
+function automatic [10:0] max_candidate(input [10:0] a, input [10:0] b);
+    max_candidate = (a[10:4] > b[10:4]) ? a : b;
+endfunction
+
+wire [10:0] win_p0 = max_candidate({ep_spr_s,  4'd6}, {ep_text_s, 4'd0});
+wire [10:0] win_p1 = max_candidate({ep_nbg0_s, 4'd1}, {ep_nbg1_s, 4'd2});
+wire [10:0] win_p2 = max_candidate({ep_nbg2_s, 4'd3}, {ep_nbg3_s, 4'd4});
+wire [10:0] win_p3 = max_candidate({ep_bmp_s,  4'd5}, {ep_bg,     4'd7});
+wire [10:0] win_q0 = max_candidate(win_p0, win_p1);
+wire [10:0] win_q1 = max_candidate(win_p2, win_p3);
+wire [10:0] win_max = max_candidate(win_q0, win_q1);
+wire [6:0] best = win_max[10:4];
+wire [3:0] bestsel = win_max[3:0]; // 0=text 1..4 nbg 5 bmp 6 spr 7 bg
 
 reg [6:0] best_hold;
 reg [3:0] bestsel_hold;
 
-// blend partner: the same scan continued below the winner
-reg [6:0] best2;
-reg [3:0] best2sel;
-always @(*) begin
-    best2 = 7'd0; best2sel = 4'd7;   // background is the floor of every scan
-    if (bestsel_hold != 4'd7) begin best2 = ep_bg; best2sel = 4'd7; end
-    if (bestsel_hold != 4'd5 && ep_bmp_s  > best2) begin best2 = ep_bmp_s;  best2sel = 4'd5; end
-    if (bestsel_hold != 4'd4 && ep_nbg3_s > best2) begin best2 = ep_nbg3_s; best2sel = 4'd4; end
-    if (bestsel_hold != 4'd3 && ep_nbg2_s > best2) begin best2 = ep_nbg2_s; best2sel = 4'd3; end
-    if (bestsel_hold != 4'd2 && ep_nbg1_s > best2) begin best2 = ep_nbg1_s; best2sel = 4'd2; end
-    if (bestsel_hold != 4'd1 && ep_nbg0_s > best2) begin best2 = ep_nbg0_s; best2sel = 4'd1; end
-    if (bestsel_hold != 4'd0 && ep_text_s > best2) begin best2 = ep_text_s; best2sel = 4'd0; end
-    if (bestsel_hold != 4'd6 && ep_spr_s  > best2) begin best2 = ep_spr_s;  best2sel = 4'd6; end
-end
+// Blend partner: mask the winner, then use the same balanced max tree.
+wire [10:0] run_p0 = max_candidate({(bestsel_hold != 4'd6) ? ep_spr_s  : 7'd0, 4'd6},
+                                   {(bestsel_hold != 4'd0) ? ep_text_s : 7'd0, 4'd0});
+wire [10:0] run_p1 = max_candidate({(bestsel_hold != 4'd1) ? ep_nbg0_s : 7'd0, 4'd1},
+                                   {(bestsel_hold != 4'd2) ? ep_nbg1_s : 7'd0, 4'd2});
+wire [10:0] run_p2 = max_candidate({(bestsel_hold != 4'd3) ? ep_nbg2_s : 7'd0, 4'd3},
+                                   {(bestsel_hold != 4'd4) ? ep_nbg3_s : 7'd0, 4'd4});
+wire [10:0] run_p3 = max_candidate({(bestsel_hold != 4'd5) ? ep_bmp_s : 7'd0, 4'd5},
+                                   {(bestsel_hold != 4'd7) ? ep_bg    : 7'd0, 4'd7});
+wire [10:0] run_q0 = max_candidate(run_p0, run_p1);
+wire [10:0] run_q1 = max_candidate(run_p2, run_p3);
+wire [10:0] run_max = max_candidate(run_q0, run_q1);
+wire [6:0] best2 = run_max[10:4];
+wire [3:0] best2sel = run_max[3:0];
 
 reg [3:0] best2sel_hold;
 
@@ -220,48 +224,43 @@ wire [19:0] li_spr  = {(r4c[1:0] == 2'b11) ? r4c[7:4] : sprreg[7:4],
                        sprreg[9:8], spr_pix[13:0] & sprpixmask[13:0]};
 wire [19:0] li_bg   = {lr_bg[7:4], lr_bg[9:8], bg_pen};
 
-reg [19:0] li_text_s, li_nbg0_s, li_nbg1_s, li_nbg2_s;
-reg [19:0] li_nbg3_s, li_bmp_s, li_spr_s, li_bg_s;
-
-reg [19:0] li_first, li_second;
-reg [19:0] li_winner, li_runner;
-always @(*) begin
-    case (bestsel)
-        4'd0: li_winner = li_text_s;  4'd1: li_winner = li_nbg0_s;
-        4'd2: li_winner = li_nbg1_s;  4'd3: li_winner = li_nbg2_s;
-        4'd4: li_winner = li_nbg3_s;  4'd5: li_winner = li_bmp_s;
-        4'd6: li_winner = li_spr_s;   default: li_winner = li_bg_s;
-    endcase
-    case (bestsel_hold)
-        4'd0: li_first = li_text_s;  4'd1: li_first = li_nbg0_s;
-        4'd2: li_first = li_nbg1_s;  4'd3: li_first = li_nbg2_s;
-        4'd4: li_first = li_nbg3_s;  4'd5: li_first = li_bmp_s;
-        4'd6: li_first = li_spr_s;   default: li_first = li_bg_s;
-    endcase
-    case (best2sel_hold)
-        4'd0: li_second = li_text_s; 4'd1: li_second = li_nbg0_s;
-        4'd2: li_second = li_nbg1_s; 4'd3: li_second = li_nbg2_s;
-        4'd4: li_second = li_nbg3_s; 4'd5: li_second = li_bmp_s;
-        4'd6: li_second = li_spr_s;  default: li_second = li_bg_s;
-    endcase
-    case (best2sel)
-        4'd0: li_runner = li_text_s; 4'd1: li_runner = li_nbg0_s;
-        4'd2: li_runner = li_nbg1_s; 4'd3: li_runner = li_nbg2_s;
-        4'd4: li_runner = li_nbg3_s; 4'd5: li_runner = li_bmp_s;
-        4'd6: li_runner = li_spr_s;  default: li_runner = li_bg_s;
-    endcase
-end
-
 function automatic [13:0] mk_palidx(input [19:0] li);
     mk_palidx = {li[19:16], 10'b0}
               + ((li[13:0] >> li[15:14]) & 14'h3ff0)
               + {10'b0, li[3:0]};
 endfunction
 
-wire [13:0] idx_first  = mk_palidx(li_first);
-wire [13:0] idx_second = mk_palidx(li_second);
-wire [13:0] idx_winner = mk_palidx(li_winner);
-wire [13:0] idx_runner = mk_palidx(li_runner);
+// Do the variable shift and palette-base addition before the candidate
+// snapshot. The priority tree then drives only a shallow 8:1 index mux.
+reg [13:0] idx_text_s, idx_nbg0_s, idx_nbg1_s, idx_nbg2_s;
+reg [13:0] idx_nbg3_s, idx_bmp_s, idx_spr_s, idx_bg_s;
+reg [13:0] idx_first, idx_second, idx_winner, idx_runner;
+always @(*) begin
+    case (bestsel)
+        4'd0: idx_winner = idx_text_s; 4'd1: idx_winner = idx_nbg0_s;
+        4'd2: idx_winner = idx_nbg1_s; 4'd3: idx_winner = idx_nbg2_s;
+        4'd4: idx_winner = idx_nbg3_s; 4'd5: idx_winner = idx_bmp_s;
+        4'd6: idx_winner = idx_spr_s; default: idx_winner = idx_bg_s;
+    endcase
+    case (bestsel_hold)
+        4'd0: idx_first = idx_text_s; 4'd1: idx_first = idx_nbg0_s;
+        4'd2: idx_first = idx_nbg1_s; 4'd3: idx_first = idx_nbg2_s;
+        4'd4: idx_first = idx_nbg3_s; 4'd5: idx_first = idx_bmp_s;
+        4'd6: idx_first = idx_spr_s; default: idx_first = idx_bg_s;
+    endcase
+    case (best2sel_hold)
+        4'd0: idx_second = idx_text_s; 4'd1: idx_second = idx_nbg0_s;
+        4'd2: idx_second = idx_nbg1_s; 4'd3: idx_second = idx_nbg2_s;
+        4'd4: idx_second = idx_nbg3_s; 4'd5: idx_second = idx_bmp_s;
+        4'd6: idx_second = idx_spr_s; default: idx_second = idx_bg_s;
+    endcase
+    case (best2sel)
+        4'd0: idx_runner = idx_text_s; 4'd1: idx_runner = idx_nbg0_s;
+        4'd2: idx_runner = idx_nbg1_s; 4'd3: idx_runner = idx_nbg2_s;
+        4'd4: idx_runner = idx_nbg3_s; 4'd5: idx_runner = idx_bmp_s;
+        4'd6: idx_runner = idx_spr_s; default: idx_runner = idx_bg_s;
+    endcase
+end
 
 // ---------------------------------------------------------------------------
 // blend controls (reg 0x4E: bit11 enable, bits 10:8 factor;
@@ -369,8 +368,8 @@ endfunction
 
 // ---------------------------------------------------------------------------
 // pixel pipeline: two palette lookups per pixel, then MAME's 5-bit-domain
-// arithmetic. Palette port is registered on clk_sys (2 clk_ram); three
-// clk_ram clocks cover the worst edge alignment and registered RAM address.
+// arithmetic. Palette port is registered directly on clk_ram; the existing
+// schedule retains ample margin around its one-clock registered address.
 // Pixel period is 12 clk_ram in 416 mode and >= 14 in 320 mode.
 //   T0 (disp_x changes): synchronous line-RAM read is issued
 //   T1: snapshot candidates from the RAM outputs
@@ -433,9 +432,7 @@ always @(posedge clk) begin
     logic signed [11:0] rr, gg, bb;
 
     dx_d <= disp_x;
-    // The palette RAM is clocked at clk_sys while the mixer runs at 2x that
-    // rate.  Register its output before the offset/blend DSP chain so the RAM
-    // clock crossing is a short path to one fast-domain register.
+    // Register the palette output before the offset/blend DSP chain.
     pal_data_r <= pal_data;
     if (rst) begin
         ph <= 4'hF;
@@ -462,14 +459,14 @@ always @(posedge clk) begin
         ep_nbg3_s    <= ep_nbg3;
         ep_bmp_s     <= ep_bmp;
         ep_spr_nom_s <= ep_spr_nom;
-        li_text_s    <= li_text;
-        li_nbg0_s    <= li_nbg0;
-        li_nbg1_s    <= li_nbg1;
-        li_nbg2_s    <= li_nbg2;
-        li_nbg3_s    <= li_nbg3;
-        li_bmp_s     <= li_bmp;
-        li_spr_s     <= li_spr;
-        li_bg_s      <= li_bg;
+        idx_text_s   <= mk_palidx(li_text);
+        idx_nbg0_s   <= mk_palidx(li_nbg0);
+        idx_nbg1_s   <= mk_palidx(li_nbg1);
+        idx_nbg2_s   <= mk_palidx(li_nbg2);
+        idx_nbg3_s   <= mk_palidx(li_nbg3);
+        idx_bmp_s    <= mk_palidx(li_bmp);
+        idx_spr_s    <= mk_palidx(li_spr);
+        idx_bg_s     <= mk_palidx(li_bg);
         spr_group_s  <= spr_group;
         spr_group_raw_s <= spr_group_raw;
         spr_shadow_src_s <= spr_shadow_src;
@@ -487,8 +484,7 @@ always @(posedge clk) begin
         bestsel_hold <= bestsel;
         // The candidate snapshot already makes the winner and its palette
         // index stable. Start the registered palette lookup here, two stages
-        // before P0, so both the inferred RAM and either 2:1 clock phase have
-        // enough latency before first_pal is retained at P2.
+        // before P0, leaving ample latency before first_pal is retained at P2.
         pal_addr_r <= idx_winner;
         // Register the winning layer's blend control here.  It is then stable
         // when the runner-up is resolved on the next edge, avoiding a
@@ -512,8 +508,7 @@ always @(posedge clk) begin
         ph <= ph + 1'd1;
         if (ph == 4'd0) begin
             // The first address was issued in winner_pending. Switch now so
-            // the second registered lookup crosses from clk_sys before P4
-            // for either phase of the 2:1 clock relationship.
+            // the second registered lookup is available well before P4.
             pal_addr_r <= idx2_hold;
         end
         else if (ph == 4'd2) begin

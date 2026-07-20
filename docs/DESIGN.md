@@ -797,10 +797,10 @@ Register file: `0x610000` (screen 0) / `0x690000` (screen 1, Multi 32),
   combinational on the CPU port.
 - When mixer reg `0x4E & 0x0880` ≠ 0, CPU writes also mirror into
   `offset ^ 0x2000` (blend pair), duplicated by the palette write port.
-- Physical: one BRAM per screen, CPU port + one registered mixer read port.
-  Winner and runner-up reads are time-multiplexed at 2× the system clock;
-  the first address is issued at winner selection, the second at pipeline P0,
-  and the first result is retained at P2 so both 2:1 clock phases are safe.
+- Physical: one dual-clock BRAM per screen, with the CPU port on `clk_sys`
+  and the registered mixer read port on `clk_ram`. Winner and runner-up reads
+  are time-multiplexed in the mixer domain; the physical-bank select is
+  registered with the row address so all 14 palette-address bits stay aligned.
 - Final 15-bit color + offsets → 24-bit RGB output (5→8 bit expansion after
   signed-offset clamp), matching the 315-5242 DAC hybrid.
 

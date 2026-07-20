@@ -373,6 +373,8 @@ end
 // ---------------------------------------------------------------------------
 integer n_vram_wr = 0, n_pal_wr = 0, n_spr_wr = 0, n_io_wr = 0;
 integer n_intc_wr = 0, n_wram_wr = 0, n_exc = 0, n_irq = 0;
+integer n_pal_alias_lo = 0, n_pal_alias_hi = 0;
+integer n_pal_bank_lo = 0, n_pal_bank_hi = 0;
 integer vs_count = 0;
 integer snd_rom_reqs = 0, snd_opcodes = 0;
 integer snd_bank_lo = 0, snd_bank_hi = 0;
@@ -388,7 +390,17 @@ always @(posedge clk_sys) begin
             4'h2: n_wram_wr = n_wram_wr + 1;
             4'h3: n_vram_wr = n_vram_wr + 1;
             4'h4: n_spr_wr  = n_spr_wr + 1;
-            4'h6: n_pal_wr  = n_pal_wr + 1;
+            4'h6: begin
+                n_pal_wr = n_pal_wr + 1;
+                // CPU byte A15 selects MAME's alternate-format alias while
+                // A14 selects the physical 0x2000-word palette half. Keeping
+                // both statistics separate lets real-ROM runs distinguish an
+                // alias-conversion problem from a mixer bank-address problem.
+                if (core.A[15]) n_pal_alias_hi = n_pal_alias_hi + 1;
+                else            n_pal_alias_lo = n_pal_alias_lo + 1;
+                if (core.A[14]) n_pal_bank_hi = n_pal_bank_hi + 1;
+                else            n_pal_bank_lo = n_pal_bank_lo + 1;
+            end
             4'hC: n_io_wr   = n_io_wr + 1;
             4'hD: n_intc_wr = n_intc_wr + 1;
             default: ;
@@ -920,6 +932,8 @@ initial begin
             core.mix0.mreg[6'h16], core.mix0.mreg[6'h00],
             core.mix0.px_text, core.mix0.display_en,
             fbw_buf, fbr_buf_l, core.disp_buf, fbw_pix, fbr_pix);
+        $display("   pal: alias_lo/hi=%0d/%0d bank_lo/hi=%0d/%0d",
+            n_pal_alias_lo, n_pal_alias_hi, n_pal_bank_lo, n_pal_bank_hi);
         $display("   vid: m416=%b rdreq/frame=%0d kick/frame=%0d wr_y_last=%0d rd_y=%0d spr_cmd=%0d srom=%0d spr_opq=%0d inrd=%0d/%0d p1a=%0d",
             core.mode_416, rdreq_cnt, kick_cnt, fbw_y, fbr_y_l,
             spr_cmd_cnt, srom_req_cnt, spr_opq_cnt, coin_rd_cnt, start_rd_cnt,

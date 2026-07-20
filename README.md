@@ -19,10 +19,16 @@ System 32 profile now boots through frame 20 in full-core simulation, reaches
 320-wide display activity, and produces a populated JUMP/two-DRAW/END sprite
 list whose 25,043 visible writes match the independent MAME-derived oracle
 exactly. The release descriptor also applies Holosseum's required cabinet Y
-orientation. A fitted, timing-clean RBF and sustained MiSTer play remain the
-acceptance gates. Earlier GA2 hardware runs reached controllable gameplay and
-remain useful historical integration evidence, but GA2 is not this profile's
-current target.
+orientation. The Holo-only Quartus Lite 17.1 seed-6 build now fits at 74% ALM
+and 89% RAM use, meets the 96.63 MHz core clock with +0.314 ns setup slack,
+and emits a current RBF. On MiSTer, Holosseum boots into controllable gameplay
+with sound and the expected mirrored-sprite floor effect; its hardware palette
+remains incorrect after the dual-clock palette-read correction and is the
+active video acceptance issue. Spider-Man
+also reaches gameplay on this build with correct colors/palette and controls;
+its sound has missing/incorrect elements and enemy attacks remain defective.
+Earlier GA2 hardware runs reached controllable gameplay and remain useful
+historical integration evidence, but GA2 is not this profile's current target.
 
 The regression now has **35 tiers** (`verif/run_regression.sh`, plus the
 native Windows ModelSim runner `verif/run_regression.ps1`): RTL lint, V60

@@ -7,7 +7,8 @@
 //============================================================================
 
 module s32_palette (
-    input             clk,
+    input             clk,          // CPU write/read clock (clk_sys)
+    input             mix_clk,      // mixer read clock (clk_ram)
 
     // CPU port
     input             cpu_we,
@@ -66,6 +67,17 @@ wire [15:0] wr_mask       = conv ? from_alt(cpu_lane_mask) : cpu_lane_mask;
 wire [15:0] wr_native     = conv ? from_alt(cpu_wdata)     : cpu_wdata;
 wire [12:0] cpu_row       = a[12:0];
 wire [12:0] mix_row       = mix_addr[12:0];
+reg         mix_bank_q;
+initial mix_bank_q = 1'b0;
+
+// Port B is synchronous to the mixer.  Register the physical-bank selector
+// on the same edge as the RAM row address so all fourteen address bits refer
+// to the same lookup.  The previous implementation clocked the RAM address at
+// clk_sys while driving it from clk_ram and selected the bank combinationally;
+// that unchecked multi-bit crossing produced stable pixels from wrong palette
+// entries on hardware even though single-clock simulation passed.
+always @(posedge mix_clk)
+    mix_bank_q <= mix_addr[13];
 
 reg         pend_we;
 reg         pend_bank;
@@ -146,18 +158,20 @@ generate
                      : wr_native[pal_bit];
 
         s32_palette_plane_ram bank0 (
-            .clk(clk), .addr_a(bank0_addr), .data_a(bank0_d),
+            .clk(clk), .mix_clk(mix_clk),
+            .addr_a(bank0_addr), .data_a(bank0_d),
             .wren_a(bank0_we), .q_a(bank0_cpu_q),
             .addr_b(mix_row), .q_b(bank0_mix_q)
         );
         s32_palette_plane_ram bank1 (
-            .clk(clk), .addr_a(bank1_addr), .data_a(bank1_d),
+            .clk(clk), .mix_clk(mix_clk),
+            .addr_a(bank1_addr), .data_a(bank1_d),
             .wren_a(bank1_we), .q_a(bank1_cpu_q),
             .addr_b(mix_row), .q_b(bank1_mix_q)
         );
 
         assign rd_native[pal_bit] = a[13] ? bank1_cpu_q : bank0_cpu_q;
-        assign mix_data[pal_bit] = mix_addr[13] ? bank1_mix_q : bank0_mix_q;
+        assign mix_data[pal_bit] = mix_bank_q ? bank1_mix_q : bank0_mix_q;
     end
 endgenerate
 
@@ -169,6 +183,7 @@ endmodule
 // keeps normal RTL simulation independent of Intel simulation libraries.
 module s32_palette_plane_ram (
     input         clk,
+    input         mix_clk,
     input  [12:0] addr_a,
     input         data_a,
     input         wren_a,
@@ -185,7 +200,7 @@ altsyncram ram (
     .wren_a(wren_a),
     .q_a(q_a),
 
-    .clock1(clk),
+    .clock1(mix_clk),
     .address_b(addr_b),
     .data_b(1'b0),
     .wren_b(1'b0),
@@ -226,7 +241,11 @@ defparam
     ram.outdata_reg_a = "UNREGISTERED",
     ram.outdata_reg_b = "UNREGISTERED",
     ram.power_up_uninitialized = "FALSE",
-    ram.read_during_write_mode_mixed_ports = "OLD_DATA",
+    // Cyclone V cannot promise old/new ordering when the CPU and mixer ports
+    // collide under different clocks.  Games do not rely on the one-pixel
+    // collision value; DONT_CARE is the supported dual-clock M10K mode and
+    // all non-colliding registered reads remain deterministic.
+    ram.read_during_write_mode_mixed_ports = "DONT_CARE",
     // Cyclone V M10Ks use NEW_DATA for a bidirectional port.  This is safe
     // here: written planes take pend_native, while untouched planes have
     // wren_a low and therefore still capture the old source bit.
@@ -250,10 +269,12 @@ end
 
 always @(posedge clk) begin
     q_a_r <= mem[addr_a];
-    q_b_r <= mem[addr_b];
     if (wren_a)
         mem[addr_a] <= data_a;
 end
+
+always @(posedge mix_clk)
+    q_b_r <= mem[addr_b];
 `endif
 
 endmodule

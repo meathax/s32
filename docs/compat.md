@@ -2,8 +2,10 @@
 
 Status legend: `rtl` = RTL implemented, not yet exercised with that real set ·
 `sim` = actual ROM ZIP reaches a meaningful boot/render milestone in the
-full-core simulator · `gold` = verified against reference output and hardware ·
-`wip` = known gaps · `unsupported` = out of scope (see DESIGN.md §1.3)
+full-core simulator · `hw` = boots and reaches playable operation on MiSTer,
+but still has known correctness gaps · `gold` = verified against reference
+output and hardware · `wip` = known gaps without the `hw` milestone ·
+`unsupported` = out of scope (see DESIGN.md §1.3)
 
 `sim` is deliberately not `gold`: the real-ROM harness idealizes external
 DDR/audio service and does not prove physical timing, sustained gameplay, or
@@ -51,9 +53,9 @@ under the ignored `roms/` tree.
 
 | Set | Evidence from the full-core real-ROM harness | Current limit |
 |---|---|---|
-| `holo` | EEPROM initialization completes, IRQs run, and the final-mixer run reaches 63,383 non-black pixels at frame 19 before capturing populated frame 20. That frame's JUMP/two-DRAW/END list replays with zero visible mismatches. A production-T80 full-core trace proves CNT2 release and 130,470 sound-CPU opcode cycles by frame 1. The focused real-ROM audio gate initializes both production JT12 YM cores (2,208/2,184 writes) and RF5C68 (156 register + 12,287 wave-RAM writes) with no unknown FM, PCM, or mixed-output samples. | No reference-audio comparison, hardware, or extended-play certification. |
+| `holo` | EEPROM initialization completes, IRQs run, and the final-mixer run reaches 63,383 non-black pixels at frame 19 before capturing populated frame 20. That frame's JUMP/two-DRAW/END list replays with zero visible mismatches. A production-T80 full-core trace proves CNT2 release and 130,470 sound-CPU opcode cycles by frame 1. The focused real-ROM audio gate initializes both production JT12 YM cores (2,208/2,184 writes) and RF5C68 (156 register + 12,287 wave-RAM writes) with no unknown FM, PCM, or mixed-output samples. On MiSTer it boots into gameplay with working controls, sound, and the expected mirrored-sprite floor effect. | Hardware colors/palette remain wrong after the dual-clock palette-read correction. Reference audio, extended play, and start-to-end certification remain open. |
 | `arabfgt` | An eight-frame universal-RTL probe reaches mixer, VRAM, palette, and sprite-list writes by frames 2–5 and completes without simulator errors. | Early initialization evidence only; no recognizable frame or sustained-play result yet. |
-| `spidman` | An eight-frame universal-RTL probe executes real code and I/O traffic without simulator errors. | Still in an early I/O polling sequence at frame 7; retained as a non-V25 diagnostic, not promoted to `sim`. |
+| `spidman` | An eight-frame universal-RTL probe executes real code and I/O traffic without simulator errors. On MiSTer it boots into gameplay with correct colors/palette, working controls and working sound. | Hardware sound is incomplete/incorrect in places, and enemy attack behavior has known gameplay defects. Extended-play and reference-accuracy certification remain open. |
 | `ga2` | V25 wake-up/protection passes and interrupts enable. Scripted coin is sampled at frames 41/42 and Start at 51/52; after the Start transition, frame 63 reaches the first populated sprite list (`spr_cmd=4`, `srom=5968`, `sprpx=52722`). Frame 64 reports `spr_opq=42393` with real pixels reaching the mixer. A 90-frame run (0–89) completes with `ROMBOOT DONE`, zero errors/warnings; rendering remains stable through frame 89 at four commands and about 5.8–6.0K sprite-ROM requests/frame (`sprpx=1374558` cumulative). The frame-80 capture visibly resolves the skull/candle Golden Axe character-select screen, `STERN`, a player sprite, and `Credits 0`. | Recognizable renderer output in simulation only: no pixel/audio equivalence, full play-through, or hardware result yet. |
 | `svf` | Startup delay exits around frame 46 versus about 45 expected; display/rendering is active by frame 79; an 82-frame run and frame-80 PPM completed. | Harness does not validate real DDR/audio timing. |
 
@@ -84,14 +86,14 @@ play on a physical DE10-Nano. No set is hardware-`gold` yet.
 | f1en (+2) | F1 Exhaust Note | dual-direct | bridge responder | rtl |
 | f1lap (+2) | F1 Super Lap | analog | FD1149 vblank HLE (f1lapt: none) | rtl |
 | ga2 (+2) | Golden Axe: Revenge of Death Adder | V25 (ga2 table) | real V25 CPU | sim |
-| holo | Holosseum | regular | — | sim |
+| holo | Holosseum | regular | — | hw |
 | jpark (+3) | Jurassic Park | analog | MRA patch | rtl |
 | kokoroj (+1), kokoroj2 | Soreike Kokology 1/2 | CD | SCSI stubs; CD audio stretch | wip |
 | radm (+1) | Rad Mobile | analog | — (EEPROM preload) | rtl |
 | radr (+2) | Rad Rally | analog | — (EEPROM preload) | rtl |
 | slipstrm (+1) | Slip Stream | analog | — | rtl |
 | sonic (+1) | SegaSonic The Hedgehog | trackball | level-load HLE (rev C) | rtl |
-| spidman (+2) | Spider-Man | 4-player | — | rtl |
+| spidman (+2) | Spider-Man | 4-player | — | hw |
 | svf (+4) | Super Visual Football / J.League | regular | jleague hook | sim |
 | harddunk (+1) | Hard Dunk | Multi 32 6P | — | rtl |
 | orunners (+2) | OutRunners | Multi 32 analog | — | rtl |
@@ -125,8 +127,12 @@ simulator evidence rather than an RBF or physical-gameplay certification.
   `0xFFFF`. The focused serial/NVRAM test, isolated Quartus inference test,
   and full regression pass; an actual MiSTer save/reload cycle remains part
   of board validation.
-- **Real-ROM coverage:** only `holo`, `ga2`, and `svf` have current simulation
-  evidence, and none has extended gameplay or pixel/audio-reference coverage.
+- **Real-ROM coverage:** `holo`, `ga2`, and `svf` have current full-core
+  simulation evidence. Holosseum and Spider-Man additionally reach playable
+  operation on MiSTer. Holosseum's palette remains wrong after the palette
+  clock-domain correction; Spider-Man's
+  palette and controls are correct, but its missing/incorrect sounds and
+  enemy-attack behavior prevent accuracy or extended-play certification.
 - **V60:** the integer/string/decimal/bit-string paths now have directed
   coverage, including a 20-byte F1 instruction whose second displacement is
   at fetch-buffer offset 16 and ga2's encoded `SKPCUH` found/exhausted

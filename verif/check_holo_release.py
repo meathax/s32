@@ -11,7 +11,8 @@ assert 'VERILOG_MACRO "S32_SYSTEM32_ONLY=1"' in qsf, "release is not System 32-o
 assert 'VERILOG_MACRO "S32_HOLO_ONLY=1"' in qsf, "release is not Holosseum-only"
 assert 'VERILOG_MACRO "S32_GA2_ONLY=1"' not in qsf, "GA2 pruning leaked into Holo release"
 assert 'VERILOG_MACRO "S32_REAL_V25=1"' not in qsf, "unused V25 enabled in Holo release"
-assert "S80X86_PSEUDO_286_INT" not in qsf, "unused pseudo-286 option enabled"
+assert 'VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"' in qsf, \
+    "dormant V25 sources do not have a deterministic interrupt-mode parse option"
 
 matches = []
 for path in (ROOT / "mra").glob("*.mra"):

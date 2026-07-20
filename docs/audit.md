@@ -323,11 +323,16 @@ captures remain under ignored `roms/`.
 | R19-6 | AUDIO | The mixer ratios were only approximate and clipped too early relative to MAME's configured routes. | System 32 now mixes YM1 `0.30` + YM2 `0.30` + RF5C68 `0.40`; Multi 32 keeps the documented cross-YM `0.15` + MultiPCM `0.35` routes, with wide signed accumulation and final saturation. |
 | R19-7 | MEMORY/IRQ | Fixed read priority could starve lower SDRAM clients, while timer 1 used an approximate 15.5× host-clock period. | Added bounded six-client round-robin read arbitration (download writes remain highest only while reset) and an exact 50 MHz/16 NCO for timer 1. Directed tests prove a low-priority request completes under continuous p0 demand and bound the N=1 timer period to 3,959 host clocks. |
 | R19-8 | REAL ROM | The post-fix sprite path needed fresh game-driven proof. | A new Holo run reaches frame 20 with no V60 exception and captures JUMP, two DRAWs, and END. Replay performs 2,432 ROM requests, 256 runs, and 25,043 pixel writes. Visible output matches the independent sprite oracle exactly; physical-only differences are the intentional global-Y storage adapter. |
+| R19-9 | FIT/TIMING | The first fitted Holo profile exposed a 16-level mixer path from the serialized eight-layer priority scan through palette-index arithmetic, missing the 96.63 MHz core clock by 2.501 ns. Quartus Standard evaluation mode also withheld programming files. | Replaced both winner scans with balanced max trees and moved each layer's variable-shift/palette-base calculation before the existing candidate snapshot. Directed and 512-case independent mixer tests remain exact. Quartus Lite 17.1 seed 5 now fits at 30,560/41,910 ALMs (73%) and 492/553 RAM blocks (89%), with +0.485 ns setup and +0.245 ns hold slack. Assembler emits a current 4,266,012-byte RBF with SHA-256 `11BEE5770FB394E6CCB837C3165B649DF88D777210E167E6518EF9D23281542D`. |
+| R19-10 | HARDWARE | Spider-Man was previously retained only as an early non-V25 simulation diagnostic. | A real MiSTer run now reaches gameplay with correct colors/palette, working controls, and working sound. Missing/incorrect sound effects and defective enemy attacks remain; this is a hardware-playable milestone, not compatibility certification. Its correct palette is useful control evidence that the common RGB extraction and DAC channel order are sound, narrowing Holosseum's bad colors toward its palette addressing/clocking behavior. |
+| R19-11 | VIDEO/FIT | The palette BRAM mixer address crossed from the 2x mixer clock while its physical-bank bit was selected in the system-clock domain, so the row and bank could become misaligned. | Moved the palette read port and its bank selection fully into `clk_ram`, registered the complete logical address together, and added behavioral plus Quartus-primitive palette/mixer tests. Seed 6 fits at 30,821/41,910 ALMs (74%) and 492/553 RAM blocks (89%), with +0.314 ns setup and at least +0.248 ns hold slack. The resulting RBF has SHA-256 `0C241D4FBBD202A8EFACFBD7261ED31DDD4AB74BE515FBF7E1E9E5A1956094D2`. MiSTer testing showed Holosseum's colors unchanged, disproving this clock-domain defect as the palette-corruption root cause; Holo-specific mixer offsets/blending remain under investigation. |
 
 ## R19 release status
 
-The checked-in Quartus profile is now `S32_SYSTEM32_ONLY + S32_HOLO_ONLY`,
-with V25/pseudo-286 release macros removed. The deploy helper defaults to the
-Holosseum MRA and still refuses any RBF without successful fitter/timing
-reports and a matching hash. A fitted RBF and MiSTer acceptance are the next
-gates; simulation evidence is not represented as hardware completion.
+The checked-in Quartus profile is now `S32_SYSTEM32_ONLY + S32_HOLO_ONLY`.
+`S32_REAL_V25` remains absent; `S80X86_PSEUDO_286_INT=0` is defined only so
+the dormant V25 source list parses in Quartus 17. The deploy helper defaults
+to the Holosseum MRA and refuses any RBF without successful current fitter,
+timing, and hash checks. Seed 6 now meets timing and produces a release RBF.
+Deployment confirms gameplay, audio, controls, and mirrored sprite output;
+correct Holosseum colors and structured extended-play acceptance remain open.

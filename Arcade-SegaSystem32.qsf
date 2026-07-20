@@ -13,7 +13,7 @@ set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
 set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
 set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
 
-set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
+set_global_assignment -name LAST_QUARTUS_VERSION "17.1.0 Lite Edition"
 
 set_global_assignment -name GENERATE_RBF_FILE ON
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
@@ -52,7 +52,7 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 5
+set_global_assignment -name SEED 6
 
 # This revision deliberately targets single-screen Sega System 32.  It keeps
 # the future Multi 32 RTL path in source, but compiles out the second palette /
@@ -63,6 +63,10 @@ set_global_assignment -name VERILOG_MACRO "S32_SYSTEM32_ONLY=1"
 # board.  It needs neither the V25 nor the variant protection/analog/dual-PCB
 # blocks, leaving maximum Cyclone V headroom for the V60 and video path.
 set_global_assignment -name VERILOG_MACRO "S32_HOLO_ONLY=1"
+# files.qip retains the real-V25 source for compatibility builds. Its upstream
+# Flags module requires this compile-time choice even when S32_REAL_V25 is off;
+# defining it does not instantiate V25 hardware in the Holosseum profile.
+set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
 
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 

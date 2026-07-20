@@ -6,6 +6,11 @@ module tb_palette;
 
 reg clk = 0;
 always #5 clk = ~clk;
+reg mix_clk = 0;
+initial begin
+    #1;
+    forever #3 mix_clk = ~mix_clk;
+end
 
 reg         cpu_we = 0;
 reg  [14:0] cpu_addr = 0;
@@ -17,7 +22,7 @@ reg  [13:0] mix_addr = 0;
 wire [15:0] mix_data;
 
 s32_palette dut (
-    .clk(clk),
+    .clk(clk), .mix_clk(mix_clk),
     .cpu_we(cpu_we), .cpu_addr(cpu_addr), .cpu_wdata(cpu_wdata),
     .cpu_be(cpu_be), .cpu_rdata(cpu_rdata), .mixer_r4e(mixer_r4e),
     .mix_addr(mix_addr), .mix_data(mix_data)
@@ -32,6 +37,7 @@ function automatic [15:0] from_alt(input [15:0] v);
 endfunction
 
 integer errors = 0;
+integer cdc_iter;
 
 task check16(input [15:0] got, input [15:0] want, input [255:0] what);
     if (got !== want) begin
@@ -69,9 +75,9 @@ task expect_cpu(input [14:0] addr, input [15:0] want, input [255:0] what);
 endtask
 
 task expect_mix(input [13:0] addr, input [15:0] want, input [255:0] what);
-    @(negedge clk);
+    @(negedge mix_clk);
     mix_addr = addr;
-    @(posedge clk); #1;
+    @(posedge mix_clk); #1;
     check16(mix_data, want, what);
 endtask
 
@@ -107,6 +113,16 @@ initial begin
     expect_cpu(15'h0012, 16'h12EF, "native high-byte write");
     expect_mix(14'h0012, 16'h12EF, "independent mixer read");
 
+    // Exercise the real dual-clock port across both physical halves.  A bank
+    // selector taken directly from the new address would be one lookup ahead
+    // of the registered RAM row and would fail this alternating sequence.
+    write_word(15'h0101, 16'h4211, 2'b11, 1'b0);
+    write_word(15'h2102, 16'h2ACE, 2'b11, 1'b0);
+    for (cdc_iter = 0; cdc_iter < 16; cdc_iter = cdc_iter + 1) begin
+        expect_mix(14'h0101, 16'h4211, "dual-clock lower-bank lookup");
+        expect_mix(14'h2102, 16'h2ACE, "dual-clock upper-bank lookup");
+    end
+
     // Converted view: a full write followed by both byte lanes.  Expected
     // values are formed in alias space and then permuted back to storage.
     write_word(15'h4044, 16'hD39A, 2'b11, 1'b0);
@@ -127,8 +143,10 @@ initial begin
     // write-both preserves each half's own disabled byte.
     write_word(15'h0033, 16'hABCD, 2'b11, 1'b0);
     write_word(15'h2033, 16'h1357, 2'b11, 1'b0);
-    @(negedge clk);
+    @(negedge mix_clk);
     mix_addr = 14'h2033;
+    @(posedge mix_clk); #1;
+    @(negedge clk);
     cpu_addr = 15'h0033;
     cpu_wdata = 16'h00EF;
     cpu_be = 2'b01;
@@ -141,8 +159,7 @@ initial begin
     mixer_r4e = 16'h0000;
     @(posedge clk); #1;
     check16(cpu_rdata, 16'hABEF, "write-both source merged word");
-    check16(mix_data, 16'h1357, "pending edge has read-before-write data");
-    @(posedge clk); #1;
+    @(posedge mix_clk); #1;
     check16(mix_data, 16'h13EF, "pending partner masked write committed");
     expect_cpu(15'h2033, 16'h13EF, "write-both partner preserves own high byte");
 

@@ -19,6 +19,7 @@ verif/quartus_ram_infer/*/*.rpt
 verif/quartus_ram_infer/*/*.summary
 *.rbf
 *.qws
+*_assignment_defaults.qdf
 work/
 transcript
 *.wlf
@@ -42,6 +43,7 @@ verif/modelsim_romboot/*
 verif/**/msim/
 verif/**/output/
 verif/tools/*_tmp/
+/verif/*_work/
 /verif/quartus_v60/s32_v60_twoport.sv
 
 # Local screenshots, simulator transcripts, and crash diagnostics

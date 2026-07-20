@@ -11,7 +11,7 @@ module palette_infer_top (
 );
 
 s32_palette dut (
-    .clk(clk),
+    .clk(clk), .mix_clk(clk),
     .cpu_we(cpu_we),
     .cpu_addr(cpu_addr),
     .cpu_wdata(cpu_wdata),

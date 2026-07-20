@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$ProjectRoot = "",
     [string]$Revision = "Arcade-SegaSystem32",
     [switch]$AsJson,
     [switch]$RequireReady
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = Split-Path -Parent $PSScriptRoot
+}
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $outputDir = Join-Path $ProjectRoot "output_files"
 
@@ -70,10 +73,19 @@ $newestBuildInput = $buildInputs | Sort-Object LastWriteTimeUtc -Descending | Se
 $mapSummaryFile = Get-Item -LiteralPath $mapSummaryPath -ErrorAction SilentlyContinue
 $fitSummaryFile = Get-Item -LiteralPath $fitSummaryPath -ErrorAction SilentlyContinue
 $staSummaryFile = Get-Item -LiteralPath $staSummaryPath -ErrorAction SilentlyContinue
+$fitCoversInputs = $fitSuccessful -and [bool]$fitSummaryFile -and
+    (-not $newestBuildInput -or $fitSummaryFile.LastWriteTimeUtc -ge $newestBuildInput.LastWriteTimeUtc)
+# A fitter-only seed change legitimately lets Quartus smart-recompile skip
+# Analysis & Synthesis. In that case the older successful map is still the
+# netlist consumed by a new fitter run. Accept it only when that successful fit
+# is newer than every build input; an RTL/QSF edit after the fit still makes the
+# complete result stale.
 $mapIsCurrent = $mapSuccessful -and [bool]$mapSummaryFile -and
-    (-not $newestBuildInput -or $mapSummaryFile.LastWriteTimeUtc -ge $newestBuildInput.LastWriteTimeUtc)
+    ((-not $newestBuildInput -or $mapSummaryFile.LastWriteTimeUtc -ge $newestBuildInput.LastWriteTimeUtc) -or
+     $fitCoversInputs)
 $fitIsCurrent = $fitSuccessful -and $mapIsCurrent -and [bool]$fitSummaryFile -and
-    $fitSummaryFile.LastWriteTimeUtc -ge $mapSummaryFile.LastWriteTimeUtc
+    $fitSummaryFile.LastWriteTimeUtc -ge $mapSummaryFile.LastWriteTimeUtc -and
+    $fitCoversInputs
 $staIsCurrent = $fitIsCurrent -and [bool]$staSummaryFile -and
     $staSummaryFile.LastWriteTimeUtc -ge $fitSummaryFile.LastWriteTimeUtc
 
