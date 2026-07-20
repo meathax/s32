@@ -158,6 +158,8 @@ integer delayed_timeout;
 reg [15:0] delayed_expected;
 reg [15:0] concurrent_p0_expected;
 reg [63:0] delayed_p5_expected;
+reg saw_concurrent_p0;
+reg saw_concurrent_p5;
 initial begin
     repeat (4) @(posedge clk);
     @(negedge clk); init = 1'b0;
@@ -206,25 +208,41 @@ initial begin
     @(negedge clk); p5_req = 1'b0; p5_addr = 22'h00007c;
                     p0_addr = 24'h000055; p0_req = 1'b1;
     @(negedge clk); p0_req = 1'b0; p0_addr = 24'h000199;
+    saw_concurrent_p0 = 1'b0;
+    saw_concurrent_p5 = 1'b0;
     delayed_timeout = 0;
-    while (!p0_ack && delayed_timeout < 240) begin
-        @(posedge clk); #1; delayed_timeout = delayed_timeout + 1;
+    while (!(saw_concurrent_p0 && saw_concurrent_p5) && delayed_timeout < 300) begin
+        @(posedge clk); #1;
+        delayed_timeout = delayed_timeout + 1;
+        if (p0_ack) begin
+            saw_concurrent_p0 = 1'b1;
+            if (p0_dout !== concurrent_p0_expected)
+                $fatal(1, "concurrent p0 data wrong: got %h expected %h",
+                       p0_dout, concurrent_p0_expected);
+        end
+        if (p5_ack) begin
+            saw_concurrent_p5 = 1'b1;
+            if (p5_dout !== delayed_p5_expected)
+                $fatal(1, "p5 burst metadata/order wrong: got %h expected %h",
+                       p5_dout, delayed_p5_expected);
+        end
     end
-    if (!p0_ack) $fatal(1, "concurrent p0 read timed out");
-    if (p0_dout !== concurrent_p0_expected)
-        $fatal(1, "concurrent p0 data wrong: got %h expected %h",
-               p0_dout, concurrent_p0_expected);
-    while (p0_ack) begin @(posedge clk); #1; end
+    if (!saw_concurrent_p0) $fatal(1, "concurrent p0 read timed out");
+    if (!saw_concurrent_p5) $fatal(1, "bounded p5 read timed out");
 
+    // Continuous p0 demand must not starve a one-cycle low-priority p5 line
+    // fill.  Keep p0 asserted while p5 waits and require the p5 grant within
+    // a small, implementation-independent transaction bound.
+    @(negedge clk); p0_addr = 24'h000033; p0_req = 1'b1;
+                    p5_addr = 22'h000012; p5_req = 1'b1;
+    @(negedge clk); p5_req = 1'b0;
     delayed_timeout = 0;
-    while (!p5_ack && delayed_timeout < 240) begin
+    while (!p5_ack && delayed_timeout < 300) begin
         @(posedge clk); #1; delayed_timeout = delayed_timeout + 1;
     end
-    if (!p5_ack) $fatal(1, "delayed V25 p5 burst timed out");
-    if (p5_dout !== delayed_p5_expected)
-        $fatal(1, "p5 burst metadata/order wrong: got %h expected %h",
-               p5_dout, delayed_p5_expected);
-    while (p5_ack) begin @(posedge clk); #1; end
+    if (!p5_ack) $fatal(1, "round-robin starvation bound violated");
+    @(negedge clk); p0_req = 1'b0;
+    while (p0_ack || p5_ack) begin @(posedge clk); #1; end
 
     $display("SDRAM CAPTURE PASS");
     $finish;

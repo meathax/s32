@@ -49,6 +49,7 @@ endtask
 
 integer errors = 0;
 integer i;
+integer timer1_clocks;
 
 initial begin
     repeat (3) @(posedge clk);
@@ -135,6 +136,22 @@ initial begin
         errors = errors + 1;
     end
     ctl_write(3'd3, 2'b10, 16'hf700);
+
+    // Timer 1 uses the independent 50 MHz/16 source.  N=1 is 256 source
+    // ticks, or about 3959 clocks at 48.324 MHz; bound the fractional phase
+    // to one host clock around the exact ratio.
+    ctl_write(3'd5, 2'b11, 16'h0001);
+    timer1_clocks = 0;
+    while (!dut.pending[4] && timer1_clocks < 4100) begin
+        @(posedge clk); #1;
+        timer1_clocks = timer1_clocks + 1;
+    end
+    if (!dut.pending[4] || timer1_clocks < 3958 || timer1_clocks > 3960) begin
+        $display("FAIL timer1 cadence clocks=%0d pending=%02x",
+                 timer1_clocks, dut.pending);
+        errors = errors + 1;
+    end
+    ctl_write(3'd3, 2'b10, 16'hef00);
 
     // Writes to byte offsets 12..15 ring the sound CPU for one clock.
     ctl_write(3'd6, 2'b01, 16'h00a5);

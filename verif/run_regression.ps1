@@ -70,6 +70,25 @@ function Invoke-NativeCapture {
     }
     Add-RawLog $lines
 
+    # ModelSim Intel 10.5b occasionally exits 211 with its own SIGSEGV stack
+    # during long -novopt full-core runs.  The identical compiled soak is
+    # deterministic and passes when relaunched, so retry this simulator-only
+    # process fault once; all RTL/test failures keep their original result.
+    if ($exitCode -eq 211 -and [IO.Path]::GetFileName($FilePath) -ieq "vsim.exe") {
+        Write-RunLine "${Label}: ModelSim internal exit 211; retrying once"
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $retryLines = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { $_.ToString() })
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $savedPreference
+        }
+        Add-RawLog $retryLines
+        $lines = $retryLines
+    }
+
     if ($exitCode -ne 0) {
         $lines | Select-Object -Last 120 | ForEach-Object { Write-Host $_ }
         throw "$Label exited with code $exitCode. See $LogPath"
@@ -328,7 +347,7 @@ try {
 
     Write-Tier 1 "full-core lint compile (universal + System32-only profile)"
     Run-HdlTest "t01_lint_universal" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE UNIVERSAL LINT PASS" @("SIMULATION")
-    Run-HdlTest "t01_lint_ga2" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE S32-ONLY LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY")
+    Run-HdlTest "t01_lint_holo" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE HOLO PROFILE LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_HOLO_ONLY")
     Write-RunLine "CORE BUILD PROFILES: PASS"
 
     Write-Tier 2 "V60 smoke test"
@@ -339,7 +358,7 @@ try {
 
     Write-Tier 4 "full-core integration boot (universal + System32-only profile)"
     Run-HdlTest "t04_boot_universal" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION") @("-novopt")
-    Run-HdlTest "t04_boot_ga2" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY") @("-novopt")
+    Run-HdlTest "t04_boot_holo" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_HOLO_ONLY") @("-novopt")
     Write-RunLine "CORE BUILD-PROFILE BOOTS: PASS"
 
     Write-Tier 5 "V60 differential co-sim vs independent reference ($Seeds seeds)"
@@ -352,9 +371,11 @@ try {
     Run-HdlTest "t07_v60_audit" "tb_v60_audit" ($V60Sources + "verif/v60/tb_v60_audit.sv") "AUDIT PASS"
     Run-HdlTest "t07_v60_search" "tb_v60_search" ($V60Sources + "verif/v60/tb_v60_search.sv") "V60 SEARCH PASS"
 
-    Write-Tier 8 "GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
-    $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 release MRA check")
-    Assert-Marker $releaseOutput "GA2 RELEASE MRA PASS" "GA2 release MRA check"
+    Write-Tier 8 "Holo release contract + GA2 compatibility boot path"
+    $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_holo_release.py") "Holo release MRA check")
+    Assert-Marker $releaseOutput "HOLO RELEASE MRA PASS" "Holo release MRA check"
+    $ga2MraOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 compatibility MRA check")
+    Assert-Marker $ga2MraOutput "GA2 COMPAT MRA PASS" "GA2 compatibility MRA check"
     Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY") @("-novopt")
 
     Write-Tier 9 "framebuffer interface directed test (runs / shadow RMW / erase / read)"
@@ -408,12 +429,16 @@ try {
 
     Write-Tier 23 "tilemap VRAM fetches and deadline-safe scanline scheduling"
     Run-HdlTest "t23_tilemap_vram" "tb_tilemap_vram" @("rtl/video/s32_big_dpram.sv", "rtl/video/s32_vram.sv", "rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_vram.sv") "TILEMAP VRAM PASS" @("SIMULATION")
+    Run-HdlTest "t23_tilemap_scale" "tb_tilemap_scale" @("rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_scale.sv") "TILEMAP SCALE PASS"
     Run-HdlTest "t23_tile_scheduler" "tb_tile_scheduler" @(
         "rtl/video/s32_tilemap.sv", "verif/common/tb_tile_scheduler.sv"
     ) "TILE SCHEDULER PASS" @("SIMULATION")
     Run-HdlTest "t23_tile_backpressure" "tb_tile_backpressure" @(
         "rtl/video/s32_tilemap.sv", "verif/common/tb_tile_backpressure.sv"
     ) "TILE BACKPRESSURE PASS" @("SIMULATION")
+    Run-HdlTest "t23_video_mode" "tb_video_mode" @(
+        "rtl/video/s32_video.sv", "verif/common/tb_video_mode.sv"
+    ) "VIDEO MODE LATCH PASS"
 
     Write-Tier 24 "byte-wide true-dual-port BRAM timing / hold / collision semantics"
     Run-HdlTest "t24_byte_dpram" "tb_byte_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_byte_dpram.sv") "BYTE DPRAM PASS"

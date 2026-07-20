@@ -1,7 +1,7 @@
 //============================================================================
 //  Sega System 32 for MiSTer — SDRAM controller
 //  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, 4-bank interleaved.
-//  Six request ports with fixed priority (DESIGN.md §4.2):
+//  Six request ports with bounded round-robin arbitration (DESIGN.md §4.2):
 //    p0: V60 fetch/data (latency critical, 16-bit single)
 //    p1: tile fetch      (64-bit burst = 4 words)
 //    p2: sprite fetch    (128-bit burst = 8 words)
@@ -112,6 +112,7 @@ typedef enum logic [3:0] {
 state_t state = ST_IDLE;
 
 reg [2:0]  grant;
+reg [2:0]  rr_next;
 reg [3:0]  rd_total;        // words to read (1/4/8)
 reg [3:0]  rd_issued;
 reg [3:0]  rd_captured;
@@ -136,6 +137,24 @@ reg [24:3] p5_addr_p;
 reg [24:4] p2_addr_p;
 reg [15:0] wr_din_p;
 reg  [1:0] wr_be_p;
+
+// Reads rotate after every grant.  This prevents continuous V60 cache misses
+// from starving sprite/audio traffic while retaining the download write port
+// as the sole highest-priority client (game logic is held reset during it).
+reg       read_valid;
+reg [2:0] read_grant;
+always @* begin
+    read_valid = 1'b1;
+    read_grant = rr_next;
+    case (rr_next)
+        3'd0: if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else read_valid=0;
+        3'd1: if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else read_valid=0;
+        3'd2: if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else read_valid=0;
+        3'd3: if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else read_valid=0;
+        3'd4: if (p4_pend) read_grant=4; else if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else read_valid=0;
+        default: if (p5_pend) read_grant=5; else if (p0_pend) read_grant=0; else if (p1_pend) read_grant=1; else if (p2_pend) read_grant=2; else if (p3_pend) read_grant=3; else if (p4_pend) read_grant=4; else read_valid=0;
+    endcase
+end
 
 always @(posedge clk) begin
     if (p0_req && !p0_pend && !p0_ack) begin
@@ -223,6 +242,7 @@ always @(posedge clk) begin
         dqm      <= 2'b11;
         cl_pipe  <= 4'b0000;
         ack_stretch <= 0;
+        rr_next <= 3'd0;
     end
     else if (!init_done) begin
         init_cnt <= init_cnt - 1'd1;
@@ -265,15 +285,22 @@ always @(posedge clk) begin
                 refw_cnt <= 3'd1;             // tRP >= 2 cycles before REF
                 state <= ST_PRE_REF;
             end
-            else if (wr_pend | p0_pend | p1_pend | p2_pend | p3_pend | p4_pend | p5_pend) begin
+            else if (wr_pend | read_valid) begin
                 logic [24:1] a;
                 if      (wr_pend) begin grant <= 3'd7; a = wr_addr_p;           rd_total <= 4'd1; is_write <= 1'b1; end
-                else if (p0_pend) begin grant <= 3'd0; a = p0_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else if (p1_pend) begin grant <= 3'd1; a = {p1_addr_p, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
-                else if (p2_pend) begin grant <= 3'd2; a = {p2_addr_p, 3'b000}; rd_total <= 4'd8; is_write <= 1'b0; end
-                else if (p3_pend) begin grant <= 3'd3; a = p3_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else if (p4_pend) begin grant <= 3'd4; a = p4_addr_p;           rd_total <= 4'd1; is_write <= 1'b0; end
-                else              begin grant <= 3'd5; a = {p5_addr_p, 2'b00};  rd_total <= 4'd4; is_write <= 1'b0; end
+                else begin
+                    grant <= read_grant;
+                    is_write <= 1'b0;
+                    rr_next <= (read_grant == 3'd5) ? 3'd0 : read_grant + 1'd1;
+                    case (read_grant)
+                        3'd0: begin a = p0_addr_p;           rd_total <= 4'd1; end
+                        3'd1: begin a = {p1_addr_p, 2'b00};  rd_total <= 4'd4; end
+                        3'd2: begin a = {p2_addr_p, 3'b000}; rd_total <= 4'd8; end
+                        3'd3: begin a = p3_addr_p;           rd_total <= 4'd1; end
+                        3'd4: begin a = p4_addr_p;           rd_total <= 4'd1; end
+                        default: begin a = {p5_addr_p, 2'b00}; rd_total <= 4'd4; end
+                    endcase
+                end
                 xfer_addr <= a;
                 din_r     <= wr_din_p;
                 be_r      <= wr_be_p;

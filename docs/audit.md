@@ -303,3 +303,31 @@ and output-knownness now have direct evidence. Copyrighted ROM data remains
 under ignored `roms/`; committed tests expose only aggregate counters. Audio
 waveform equivalence and a complete Holo command/music sequence still require
 a captured main-to-sound command trace or later physical/reference-audio test.
+
+# Round 19 — Holosseum release-profile closure
+
+This pass converts the generic/GA2-oriented release path into a deterministic
+Holosseum target and closes the highest-risk pre-fit platform/video findings.
+It uses MAME 0.285 as the pinned behavioral reference; ROMs and generated
+captures remain under ignored `roms/`.
+
+## R19 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R19-1 | REFERENCE | There was no reproducible Holosseum reference session and the documented controls incorrectly listed four buttons. | Added a fixed-frame MAME Lua/PowerShell capture harness with ROM verification, XML, input pulses, screenshots, AVI/WAV, trace, and SHA manifest. MAME reports two players, 8-way controls, and two buttons. |
+| R19-2 | RESET/LOAD | ROM download could start before SDRAM initialization, and the V60 depended on simulator seeding for deterministic cold power-up. | Synchronize SDRAM `ready` into `clk_sys`, hold the loader/CPU until ready, backpressure ioctl, initialize architectural GPRs once at power-up, and preserve normal soft-reset register semantics. `tb_rom_loader` proves no early descriptor/write side effects. |
+| R19-3 | ORIENTATION/TIMING | Holosseum's `ORIENTATION_FLIP_Y` was absent and width writes could change pixel cadence/totals mid-frame. | Descriptor byte 1 bit 1 now selects final cabinet Y orientation for tile source lines and sprite scanout. Horizontal mode is latched only at a complete frame boundary; `tb_video_mode` covers both live transition directions without runt lines. |
+| R19-4 | SPRITES | Combined auto erase/swap physically cleared the displayed DDR buffer before ownership changed, exposing partially erased lines. | Publish the completed back buffer first, erase the now-hidden old front, and render the next frame into it. Erase-only semantics remain unchanged. The directed controller and real sprite-to-`s32_fb_if` tests pass; synthesized underrun telemetry now records any line fetch still outstanding at active-line start. |
+| R19-5 | TILEMAP | NBG0/1 used reduced 10.10 coordinates, ignored `$1FF10/$1FF14` fractional words, truncated the 12-bit zoom denominator, and always treated centers as signed 10-bit. | Implemented MAME's exact `(0x200<<20)/zoom` 12.20 reciprocal, 12-bit clamp/range, fractional X/Y origins, modulo-32-bit coordinate math, global/layer flips, and the neutral 9-bit versus zoomed 10-bit signed-center rule. Directed tests cover power-of-two/arbitrary/max denominators, fractional shadows, the neutral `$1FF` center case, and backpressure. |
+| R19-6 | AUDIO | The mixer ratios were only approximate and clipped too early relative to MAME's configured routes. | System 32 now mixes YM1 `0.30` + YM2 `0.30` + RF5C68 `0.40`; Multi 32 keeps the documented cross-YM `0.15` + MultiPCM `0.35` routes, with wide signed accumulation and final saturation. |
+| R19-7 | MEMORY/IRQ | Fixed read priority could starve lower SDRAM clients, while timer 1 used an approximate 15.5× host-clock period. | Added bounded six-client round-robin read arbitration (download writes remain highest only while reset) and an exact 50 MHz/16 NCO for timer 1. Directed tests prove a low-priority request completes under continuous p0 demand and bound the N=1 timer period to 3,959 host clocks. |
+| R19-8 | REAL ROM | The post-fix sprite path needed fresh game-driven proof. | A new Holo run reaches frame 20 with no V60 exception and captures JUMP, two DRAWs, and END. Replay performs 2,432 ROM requests, 256 runs, and 25,043 pixel writes. Visible output matches the independent sprite oracle exactly; physical-only differences are the intentional global-Y storage adapter. |
+
+## R19 release status
+
+The checked-in Quartus profile is now `S32_SYSTEM32_ONLY + S32_HOLO_ONLY`,
+with V25/pseudo-286 release macros removed. The deploy helper defaults to the
+Holosseum MRA and still refuses any RBF without successful fitter/timing
+reports and a matching hash. A fitted RBF and MiSTer acceptance are the next
+gates; simulation evidence is not represented as hardware completion.

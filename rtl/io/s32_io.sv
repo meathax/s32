@@ -497,13 +497,17 @@ module s32_intc (
 reg [7:0] ctl [0:15];
 reg [4:0] pending;
 
-// timers: t0 at MAIN/2 (24.16 MHz CE assumed = ce counts), t1 at 50MHz/16.
-// Implemented with fractional accumulators on clk_sys=48.324MHz.
+// Timers: t0 at MAIN/2 and t1 at the independent 50 MHz crystal /16.
 reg [23:0] t0_cnt, t1_cnt;
 reg        t0_run, t1_run;
+reg [23:0] t1_acc;
+// round((3.125 MHz / 48.324 MHz) * 2^24)
+localparam [23:0] T1_STEP = 24'd1084943;
+wire [24:0] t1_sum = {1'b0, t1_acc} + {1'b0, T1_STEP};
+wire        t1_tick = t1_sum[24];
 
 wire       t0_expire = t0_run && (t0_cnt == 0);
-wire       t1_expire = t1_run && (t1_cnt == 0);
+wire       t1_expire = t1_run && t1_tick && (t1_cnt == 0);
 wire [4:0] pending_sources = {t1_expire, t0_expire, sound_irq,
                               vblank_end, vblank_start};
 
@@ -526,6 +530,7 @@ always @(posedge clk) begin
         z80_doorbell <= 1'b0;
         t0_run <= 1'b0; t1_run <= 1'b0;
         t0_cnt <= 24'd0; t1_cnt <= 24'd0;
+        t1_acc <= 24'd0;
         rdata <= 8'hff;
         // MAME/device-reset contract: the complete 16-byte register file
         // starts at FF. Leaving vector/timer bytes uninitialized can expose
@@ -547,10 +552,11 @@ always @(posedge clk) begin
             else t0_cnt <= t0_cnt - 1'd1;
         end
         if (t1_run) begin
-            if (t1_cnt == 0) begin
-                t1_run <= 0;
+            t1_acc <= t1_sum[23:0];
+            if (t1_tick) begin
+                if (t1_cnt == 0) t1_run <= 0;
+                else t1_cnt <= t1_cnt - 1'd1;
             end
-            else t1_cnt <= t1_cnt - 1'd1;
         end
 
         if (cs && we) begin
@@ -579,12 +585,16 @@ always @(posedge clk) begin
                     n = {(be[1] ? wdata[11:8] : ctl[11][3:0]),
                          (be[0] ? wdata[7:0]  : ctl[10])};
                     if (n != 0) begin
-                        // period = 0x100*N / 3.125MHz -> *48.3/3.125 ≈ N*0x100*15.5
-                        t1_cnt <= (({n, 8'b0} << 4) - ({n, 8'b0} >> 1)) - 1'b1;
+                        // MAME/hardware: 0x100*N ticks at exactly 50 MHz/16.
+                        // Count in timer-source ticks and use the NCO above;
+                        // the old 15.5x clk_sys approximation drifted early.
+                        t1_cnt <= {n, 8'b0} - 1'b1;
+                        t1_acc <= 24'd0;
                         t1_run <= 1'b1;
                     end
                     else begin
                         t1_cnt <= 24'd0;
+                        t1_acc <= 24'd0;
                         t1_run <= 1'b0;
                     end
                 end

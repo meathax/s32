@@ -53,6 +53,13 @@ module s32_v60 #(
 // architectural state
 // ---------------------------------------------------------------------------
 reg [31:0] r[0:31];             // general registers, r[31]=active SP
+integer init_reg_i;
+// Deterministic FPGA cold power-up without changing the real V60 reset
+// contract: subsequent reset assertions leave GPR contents untouched.
+initial begin
+    for (init_reg_i = 0; init_reg_i < 32; init_reg_i = init_reg_i + 1)
+        r[init_reg_i] = 32'd0;
+end
 reg [31:0] pc;
 reg [31:0] sbr, sycw, tkcw, pir, psw2;
 reg [31:0] isp, l0sp, l1sp, l2sp, l3sp;   // shadow stacks (inactive copies)
@@ -541,7 +548,9 @@ always @(posedge clk) begin
 if (rst) begin
     st <= S_RESET;
     bus_req <= 0; bus_we <= 0; irq_ack <= 0;
+    bus_addr <= 0; bus_size <= 0; bus_wdata <= 0;
     halted <= 0;
+    dbg_pc <= START_PC;
     nmi_seen <= 0;
     nmi_r <= 0;
     xdiv_active <= 0;

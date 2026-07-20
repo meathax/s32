@@ -126,6 +126,7 @@ def run_trace(
                 "tb_core_romboot",
                 f"+IMG={image_dir.resolve()}",
                 "+B0=0",
+                "+B1=2",
                 "+SBM=1",
                 f"+FRAMES={frames}",
                 "-do",

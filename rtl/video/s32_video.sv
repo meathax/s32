@@ -10,6 +10,7 @@ module s32_video (
     input             mode_416,
 
     output reg        ce_pix,
+    output reg        mode_active,
     output reg  [8:0] hcnt,
     output reg  [8:0] vcnt,
     output reg        hblank,
@@ -23,7 +24,7 @@ module s32_video (
 // dot clock CE: /6 of 48.324 = 8.054 (416 mode); /7.5 -> approximate /15 of
 // 96.6 for 320 mode; here fractional accumulator for exactness.
 reg [7:0] ce_acc;
-wire [7:0] ce_add = mode_416 ? 8'd40 : 8'd32;   // 40/240=1/6 ; 32/240=/7.5
+wire [7:0] ce_add = mode_active ? 8'd40 : 8'd32; // 40/240=1/6 ; 32/240=/7.5
 always @(posedge clk) begin
     if (rst) begin ce_acc <= 0; ce_pix <= 0; end
     else begin
@@ -34,8 +35,8 @@ always @(posedge clk) begin
     end
 end
 
-wire [8:0] htotal = mode_416 ? 9'd511 : 9'd409;
-wire [8:0] hdisp  = mode_416 ? 9'd415 : 9'd319;
+wire [8:0] htotal = mode_active ? 9'd511 : 9'd409;
+wire [8:0] hdisp  = mode_active ? 9'd415 : 9'd319;
 localparam [8:0] VTOTAL = 9'd261;
 localparam [8:0] VDISP  = 9'd223;
 
@@ -45,6 +46,7 @@ assign vblank_end   = vb_end_r;
 
 always @(posedge clk) begin
     if (rst) begin
+        mode_active <= mode_416;
         hcnt <= 0; vcnt <= 0;
         hblank <= 0; vblank <= 0; hsync <= 0; vsync <= 0;
         vb_start_r <= 0; vb_end_r <= 0;
@@ -60,6 +62,10 @@ always @(posedge clk) begin
                     vcnt <= 0;
                     vblank <= 0;
                     vb_end_r <= 1'b1;
+                    // Width affects dot cadence and horizontal totals.  Apply
+                    // it only between complete frames so a live register
+                    // write cannot truncate or stretch the current line.
+                    mode_active <= mode_416;
                 end
                 else begin
                     vcnt <= vcnt + 1'd1;

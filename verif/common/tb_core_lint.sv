@@ -43,7 +43,12 @@ module tb_core_lint;
         if (core.is_multi32 !== 1'b0)   $fatal(1, "System32 profile accepted Multi 32 mode");
         #1;
         if (core.rgb_b !== core.rgb_a)  $fatal(1, "System32 Screen B output does not mirror A");
+`ifdef S32_HOLO_ONLY
+        if (core.GAME_ONLY !== 1'b1) $fatal(1, "Holosseum release pruning not enabled");
+        $display("CORE HOLO PROFILE LINT PASS");
+`else
         $display("CORE S32-ONLY LINT PASS");
+`endif
 `else
         if (core.SYSTEM32_ONLY !== 1'b0) $fatal(1, "universal profile parameter unexpectedly enabled");
         if (core.WRAM_WORDS != 65536)    $fatal(1, "universal work RAM is not 64K x 16");

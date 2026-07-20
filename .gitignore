@@ -49,6 +49,7 @@ verif/tools/*_tmp/
 /c5_pin_model_dump.txt
 /console_history
 verif/modelsim-*.log
+/verif/t*-retry.log
 *.vstf
 
 # Quartus diagnostics contain machine-specific crash/build details

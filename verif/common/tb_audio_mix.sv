@@ -28,7 +28,7 @@ module tb_audio_mix;
 
         fm1_l = 16'sd1000; fm2_l = 16'sd2000; rf_l = 16'sd3000;
         fm1_r = -16'sd1000; fm2_r = -16'sd2000; rf_r = -16'sd3000;
-        check_output(16'sd3750, -16'sd3750, "System32 ratios");
+        check_output(16'sd2100, -16'sd2100, "System32 MAME gains");
 
         fm1_l = 16'sh7fff; fm2_l = 16'sh7fff; rf_l = 16'sh7fff;
         fm1_r = 16'sh8000; fm2_r = 16'sh8000; rf_r = 16'sh8000;
@@ -37,16 +37,15 @@ module tb_audio_mix;
         is_multi32 = 1'b1;
         fm1_l = 16'sd400; fm1_r = 16'sd800;
         mp_l = 16'sd1000; mp_r = -16'sd1000;
-        check_output(16'sd1900, -16'sd1300, "Multi32 cross-route");
+        check_output(16'sd470, -16'sd290, "Multi32 MAME cross-route gains");
 
         fm1_l = 16'sh7fff; fm1_r = 16'sh7fff;
         mp_l = 16'sh7fff; mp_r = 16'sh7fff;
-        check_output(16'sh7fff, 16'sh7fff, "Multi32 saturation");
+        check_output(16'sd16383, 16'sd16383, "Multi32 routed gain");
 
         if (errors == 0) $display("AUDIO MIX PASS");
         else             $display("AUDIO MIX FAIL errors=%0d", errors);
         $finish;
     end
 endmodule
-
 

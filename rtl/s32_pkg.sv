@@ -36,6 +36,7 @@ package s32_pkg;
         // Old all-zero descriptors have no valid field and retain four banks.
         logic       sprite_bank_valid;
         logic [1:0] sprite_bank_mask; // 0/1/3 for 4/8/16 MiB respectively
+        logic       flip_y;         // cabinet/game orientation (holo)
     } board_desc_t;
 
     // HLE protection selects (prot_sel)

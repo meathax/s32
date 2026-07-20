@@ -53,7 +53,8 @@ iverilog -g2012 -o /tmp/s32_v60_search \
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_search.sv
 vvp /tmp/s32_v60_search | grep -q "V60 SEARCH PASS" && echo "V60 SEARCH: PASS" || { echo "V60 SEARCH: FAIL"; exit 1; }
 echo "[8/35] GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
-python3 verif/check_ga2_release.py | grep -q "GA2 RELEASE MRA PASS" || { echo "GA2 RELEASE MRA: FAIL"; exit 1; }
+python3 verif/check_holo_release.py | grep -q "HOLO RELEASE MRA PASS" || { echo "HOLO RELEASE MRA: FAIL"; exit 1; }
+python3 verif/check_ga2_release.py | grep -q "GA2 COMPAT MRA PASS" || { echo "GA2 COMPAT MRA: FAIL"; exit 1; }
 iverilog -g2012 -DSIMULATION -DS32_SYSTEM32_ONLY -DS32_GA2_ONLY -o /tmp/s32_ga2 \
   rtl/s32_pkg.sv rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv \
   rtl/video/*.sv rtl/audio/s32_rf5c68.sv rtl/audio/s32_multipcm.sv \

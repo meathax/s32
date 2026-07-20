@@ -326,6 +326,7 @@ def capture(
             "tb_holo_sprite_capture",
             f"+IMG={image_dir.resolve()}",
             "+B0=0",
+            "+B1=2",
             "+SBM=1",
             f"+FRAMES={frames[-1] + 1}",
             f"+CAPROOT={output.resolve()}",

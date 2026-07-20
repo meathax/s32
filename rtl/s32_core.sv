@@ -136,9 +136,11 @@ module s32_core #(
 // retains the descriptor-selected path when SYSTEM32_ONLY is false.
 wire is_multi32 = SYSTEM32_ONLY ? 1'b0 : board.multi32;
 `ifdef S32_GA2_ONLY
-localparam GA2_ONLY = 1'b1;
+localparam GAME_ONLY = 1'b1;
+`elsif S32_HOLO_ONLY
+localparam GAME_ONLY = 1'b1;
 `else
-localparam GA2_ONLY = 1'b0;
+localparam GAME_ONLY = 1'b0;
 `endif
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,8 @@ wire        io0_cnt1, io0_cnt2;
 wire [15:0] vid_vaddr;
 wire [15:0] r1ff00, r1ff02, r1ff04, r1ff06, r1ff5c, r1ff5e;
 wire [15:0] r1ff88, r1ff8a, r1ff8c, r1ff8e;
+wire [15:0] w_scrollfracx [0:1];
+wire [15:0] w_scrollfracy [0:1];
 wire [15:0] w_scrollx [0:3];
 wire [15:0] w_scrolly [0:3];
 wire [15:0] w_offsx [0:3];
@@ -272,6 +276,7 @@ s32_vram vram (
     .vid_addr(vid_vaddr), .vid_rdata(vram_vid_q),
     .reg_1ff00(r1ff00), .reg_1ff02(r1ff02), .reg_1ff04(r1ff04),
     .reg_1ff06(r1ff06),
+    .reg_scrollfracx(w_scrollfracx), .reg_scrollfracy(w_scrollfracy),
     .reg_scrollx(w_scrollx), .reg_scrolly(w_scrolly),
     .reg_offsx(w_offsx), .reg_offsy(w_offsy),
     .reg_pages(w_pages), .reg_zoomx(w_zoomx), .reg_zoomy(w_zoomy),
@@ -315,12 +320,14 @@ assign debug_sprram_cpu = {debug_sprram_count,
 
 // CRT timing
 wire mode_416;
+wire mode_416_active;
 wire vbl_start, vbl_end;
 wire [8:0] hcnt, vcnt;
 assign debug_hcnt = hcnt;
 assign debug_vcnt = vcnt;
 s32_video crt (
     .clk(clk_sys), .rst(video_rst), .mode_416(mode_416),
+    .mode_active(mode_416_active),
     .ce_pix(ce_pix), .hcnt(hcnt), .vcnt(vcnt),
     .hblank(hb), .vblank(vb), .hsync(hs), .vsync(vs),
     .vblank_start(vbl_start), .vblank_end(vbl_end)
@@ -345,6 +352,7 @@ reg        tm_mode_416;
 reg  [1:0] tm_ext_tilebank;
 reg [15:0] tm_r1ff00, tm_r1ff02, tm_r1ff04, tm_r1ff06;
 reg [15:0] tm_r1ff5c, tm_r1ff5e, tm_r1ff88, tm_r1ff8a, tm_r1ff8c, tm_r1ff8e;
+reg [15:0] tm_scrollfracx [0:1], tm_scrollfracy [0:1];
 reg [15:0] tm_scrollx [0:3], tm_scrolly [0:3];
 reg [15:0] tm_offsx [0:3], tm_offsy [0:3];
 reg [15:0] tm_pages [0:7];
@@ -367,6 +375,7 @@ initial begin
     end
     for (tm_init_i = 0; tm_init_i < 8; tm_init_i = tm_init_i + 1) tm_pages[tm_init_i] = 0;
     for (tm_init_i = 0; tm_init_i < 2; tm_init_i = tm_init_i + 1) begin
+        tm_scrollfracx[tm_init_i] = 0; tm_scrollfracy[tm_init_i] = 0;
         tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200;
     end
     for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) tm_clips[tm_init_i] = 0;
@@ -379,6 +388,11 @@ end
 // edges, so the scheduler performs the required event qualification.
 wire tm_line_boundary = ce_pix && (hcnt == 9'd0);
 wire [8:0] tm_next_line = (vcnt == 9'd261) ? 9'd0 : vcnt + 1'd1;
+// Holosseum is mounted with ORIENTATION_FLIP_Y.  Keep timing and line-buffer
+// parity in visible-screen order, but render the vertically mirrored source
+// scanline into that bank.
+wire [8:0] tm_source_line = (board.flip_y && render_line <= 9'd223)
+                          ? (9'd223 - render_line) : render_line;
 s32_tile_line_scheduler tile_line_scheduler (
     .clk(clk_ram), .rst(rst),
     .line_kick(tm_line_boundary), .next_line(tm_next_line),
@@ -402,7 +416,7 @@ always @(posedge clk_ram) begin
         // Snapshot the CPU-domain register file once per line. The renderer
         // observes only this stable copy until line_done.  A missed boundary
         // cannot mutate the in-flight line, bank, or control state.
-        tm_mode_416 <= mode_416;
+        tm_mode_416 <= mode_416_active;
         tm_ext_tilebank <= io0_ph[1:0];
         tm_r1ff00 <= r1ff00; tm_r1ff02 <= r1ff02;
         tm_r1ff04 <= r1ff04; tm_r1ff06 <= r1ff06;
@@ -418,6 +432,8 @@ always @(posedge clk_ram) begin
         for (tm_cap_i = 0; tm_cap_i < 8; tm_cap_i = tm_cap_i + 1)
             tm_pages[tm_cap_i] <= w_pages[tm_cap_i];
         for (tm_cap_i = 0; tm_cap_i < 2; tm_cap_i = tm_cap_i + 1) begin
+            tm_scrollfracx[tm_cap_i] <= w_scrollfracx[tm_cap_i];
+            tm_scrollfracy[tm_cap_i] <= w_scrollfracy[tm_cap_i];
             tm_zoomx[tm_cap_i] <= w_zoomx[tm_cap_i];
             tm_zoomy[tm_cap_i] <= w_zoomy[tm_cap_i];
         end
@@ -430,11 +446,12 @@ wire [5:0] tm_layer_off;
 wire [21:3] tile_rom_addr;
 s32_tilemap tilemap (
     .clk(clk_ram), .rst(rst),
-    .line(render_line), .line_start(line_start_r), .line_done(tm_line_done),
+    .line(tm_source_line), .line_start(line_start_r), .line_done(tm_line_done),
     .mode_416(tm_mode_416), .ext_tilebank(tm_ext_tilebank), .layer_off_o(tm_layer_off),
     .r1ff00(tm_r1ff00), .r1ff02(tm_r1ff02), .r1ff04(tm_r1ff04), .r1ff06(tm_r1ff06),
     .r1ff5c(tm_r1ff5c), .r1ff5e(tm_r1ff5e),
     .r1ff88(tm_r1ff88), .r1ff8a(tm_r1ff8a), .r1ff8c(tm_r1ff8c), .r1ff8e(tm_r1ff8e),
+    .scrollfracx(tm_scrollfracx), .scrollfracy(tm_scrollfracy),
     .scrollx(tm_scrollx), .scrolly(tm_scrolly),
     .offsx(tm_offsx), .offsy(tm_offsy),
     .pages(tm_pages), .zoomx(tm_zoomx), .zoomy(tm_zoomy), .clips(tm_clips),
@@ -496,22 +513,49 @@ assign mode_416 = mode_416_r;
 reg       fb_rd_req_r;
 reg [1:0] fb_rd_buf_r;
 reg [7:0] fb_rd_y_r;
-wire fb_rd_kick = ce_pix && hcnt == (mode_416 ? 9'd420 : 9'd324);
+// Qualification telemetry: a line request still outstanding when its visible
+// scanline starts means the mixer is consuming stale sprite data.  Keep this
+// synthesizable and hierarchically visible without burdening the release I/O.
+reg       fb_rd_underrun_sticky;
+reg [15:0] fb_rd_underrun_count;
+reg       fb_rd_deadline_seen;
+wire fb_rd_kick = ce_pix && hcnt == (mode_416_active ? 9'd420 : 9'd324);
+wire fb_rd_deadline = ce_pix && hcnt == 9'd0 && vcnt < 9'd224;
 always @(posedge clk_ram) begin
     if (rst) begin
         fb_rd_req_r <= 1'b0;
         fb_rd_buf_r <= 2'd0;
         fb_rd_y_r   <= 8'd0;
+        fb_rd_underrun_sticky <= 1'b0;
+        fb_rd_underrun_count <= 16'd0;
+        fb_rd_deadline_seen <= 1'b0;
     end
-    else if (fb_rd_req_r) begin
-        if (fb_rd_ack) fb_rd_req_r <= 1'b0;
-    end
-    else if (!fb_rd_ack && fb_rd_kick) begin
-        fb_rd_req_r <= 1'b1;
-        fb_rd_buf_r <= {1'b0, disp_buf[0]};
-        // CRT lines are 0..261. Truncating line 261 before adding produced
-        // line 6 instead of the next frame's line 0.
-        fb_rd_y_r <= (vcnt == 9'd261) ? 8'd0 : vcnt[7:0] + 8'd1;
+    else begin
+        if (!fb_rd_deadline) fb_rd_deadline_seen <= 1'b0;
+        else if (!fb_rd_deadline_seen) begin
+            fb_rd_deadline_seen <= 1'b1;
+            if (fb_rd_req_r && !fb_rd_ack) begin
+                fb_rd_underrun_sticky <= 1'b1;
+                if (~&fb_rd_underrun_count)
+                    fb_rd_underrun_count <= fb_rd_underrun_count + 1'd1;
+            end
+        end
+
+        if (fb_rd_req_r) begin
+            if (fb_rd_ack) fb_rd_req_r <= 1'b0;
+        end
+        else if (!fb_rd_ack && fb_rd_kick) begin
+            fb_rd_req_r <= 1'b1;
+            fb_rd_buf_r <= {1'b0, disp_buf[0]};
+            // CRT lines are 0..261. Truncating line 261 before adding produced
+            // line 6 instead of the next frame's line 0.
+            if (vcnt == 9'd261)
+                fb_rd_y_r <= board.flip_y ? 8'd223 : 8'd0;
+            else if (board.flip_y && vcnt < 9'd223)
+                fb_rd_y_r <= 8'd222 - vcnt[7:0];
+            else
+                fb_rd_y_r <= vcnt[7:0] + 8'd1;
+        end
     end
 end
 assign fb_rd_req = fb_rd_req_r;
@@ -685,7 +729,7 @@ wire sel_track = sel_ioex && (A[5:3] <= 3'b010) && board.has_track;
 wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && board.has_ppi;
 genvar t;                         // declare outside the generate-for (Quartus 17.0)
 generate
-    if (GA2_ONLY) begin : g_ga2_no_analog
+    if (GAME_ONLY) begin : g_game_no_analog
         // GA2's 0x22 descriptor has neither ADC nor trackball hardware.
         // Removing these runtime-dead peripherals also removes their input
         // selection muxes from the dedicated release.
@@ -753,7 +797,7 @@ wire [15:0] dsp_q, dual_q;
 wire [7:0]  v25_q;
 
 generate
-    if (GA2_ONLY) begin : g_ga2_no_other_protection
+    if (GAME_ONLY) begin : g_game_no_other_protection
         // GA2 uses the V25 mailbox below.  Generic HLE, Burning Rival and
         // Air Rescue DSP protection are unreachable in the dedicated MRA.
         assign pr_req = 1'b0;
@@ -796,7 +840,7 @@ generate
 endgenerate
 
 generate
-    if (GA2_ONLY) begin : g_no_dualpcb
+    if (GAME_ONLY) begin : g_no_dualpcb
         // GA2 is a single-board System 32 title.  Keeping this runtime-dead
         // 4KB array cost 32,784 registers in Quartus 17 because its original
         // read/write shape did not infer block RAM.
@@ -951,7 +995,7 @@ always @(posedge clk_sys) begin
                 sel_shared:  rmux <= {8'hff, sh_rdata};
                 sel_comm:    rmux <= 16'hffff;      // s32comm absent: link not connected
                 sel_dual:    rmux <= board.dual_pcb ? dual_q : 16'hffff;
-                sel_v25:     if (GA2_ONLY)
+                sel_v25:     if (GAME_ONLY)
                                  rmux <= {8'hff, v25_q};
                              else
                                  rmux <= board.has_v25 ? {8'hff, v25_q} :
@@ -959,7 +1003,7 @@ always @(posedge clk_sys) begin
                 sel_prot_a:  rmux <= board.has_dsp_hle ? dsp_q : 16'hffff;
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
-                sel_ioex:    if (GA2_ONLY)
+                sel_ioex:    if (GAME_ONLY)
                                  rmux <= sel_ppi ? {8'hff, ppi_q} : 16'hffff;
                              else
                                  rmux <= sel_adc   ? {8'hff, 7'h7f, adc_bit} :

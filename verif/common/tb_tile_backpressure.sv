@@ -40,6 +40,7 @@ always @(posedge clk) begin
 end
 
 reg [15:0] scrollx [0:3], scrolly [0:3];
+reg [15:0] scrollfracx [0:1], scrollfracy [0:1];
 reg [15:0] offsx [0:3], offsy [0:3];
 reg [15:0] pages [0:7];
 reg [15:0] zoomx [0:1], zoomy [0:1];
@@ -53,6 +54,8 @@ initial begin
     for (i = 0; i < 8; i = i + 1)
         pages[i] = 0;
     for (i = 0; i < 2; i = i + 1) begin
+        scrollfracx[i] = 0;
+        scrollfracy[i] = 0;
         zoomx[i] = 16'h0200;
         zoomy[i] = 16'h0200;
     end
@@ -98,6 +101,7 @@ s32_tilemap tilemap (
     .r1ff5c(16'h0000), .r1ff5e(16'h0000),
     .r1ff88(16'h0000), .r1ff8a(16'h0000),
     .r1ff8c(16'h0000), .r1ff8e(16'h0000),
+    .scrollfracx(scrollfracx), .scrollfracy(scrollfracy),
     .scrollx(scrollx), .scrolly(scrolly),
     .offsx(offsx), .offsy(offsy), .pages(pages),
     .zoomx(zoomx), .zoomy(zoomy), .clips(clips),

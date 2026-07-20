@@ -23,6 +23,7 @@ wire [15:0] vid_rdata;
 
 wire [15:0] r1ff00, r1ff02, r1ff04, r1ff06, r1ff5c, r1ff5e;
 wire [15:0] r1ff88, r1ff8a, r1ff8c, r1ff8e;
+wire [15:0] scrollfracx [0:1], scrollfracy [0:1];
 wire [15:0] scrollx [0:3], scrolly [0:3], offsx [0:3], offsy [0:3];
 wire [15:0] pages [0:7], zoomx [0:1], zoomy [0:1], clips [0:19];
 
@@ -32,7 +33,9 @@ s32_vram vram (
     .cpu_be(cpu_be), .cpu_rdata(cpu_rdata),
     .vid_addr(vid_addr), .vid_rdata(vid_rdata),
     .reg_1ff00(r1ff00), .reg_1ff02(r1ff02), .reg_1ff04(r1ff04),
-    .reg_1ff06(r1ff06), .reg_scrollx(scrollx), .reg_scrolly(scrolly),
+    .reg_1ff06(r1ff06),
+    .reg_scrollfracx(scrollfracx), .reg_scrollfracy(scrollfracy),
+    .reg_scrollx(scrollx), .reg_scrolly(scrolly),
     .reg_offsx(offsx), .reg_offsy(offsy), .reg_pages(pages),
     .reg_zoomx(zoomx), .reg_zoomy(zoomy), .reg_1ff5c(r1ff5c),
     .reg_1ff5e(r1ff5e), .reg_clips(clips), .reg_1ff88(r1ff88),
@@ -60,7 +63,9 @@ s32_tilemap dut (
     .r1ff00(r1ff00), .r1ff02(r1ff02), .r1ff04(r1ff04),
     .r1ff06(r1ff06), .r1ff5c(r1ff5c), .r1ff5e(r1ff5e),
     .r1ff88(r1ff88), .r1ff8a(r1ff8a), .r1ff8c(r1ff8c),
-    .r1ff8e(r1ff8e), .scrollx(scrollx), .scrolly(scrolly),
+    .r1ff8e(r1ff8e),
+    .scrollfracx(scrollfracx), .scrollfracy(scrollfracy),
+    .scrollx(scrollx), .scrolly(scrolly),
     .offsx(offsx), .offsy(offsy), .pages(pages), .zoomx(zoomx),
     .zoomy(zoomy), .clips(clips), .vram_addr(vid_addr),
     .vram_rdata(vid_rdata), .tile_req(tile_req), .tile_addr(tile_addr),
@@ -274,12 +279,35 @@ initial begin
         errors = errors + 1;
     end
 
+    // Fractional NBG0 scroll words are real render inputs, not padding.
+    // Preserve their full CPU-visible value; the renderer consumes X[15:8]
+    // and Y[15:9] as MAME's 12.20 fractional coordinate.
+    cpu_write(16'hff88, 16'ha500);
+    cpu_write(16'hff8a, 16'h5a00);
+    if (scrollfracx[0] !== 16'ha500 || scrollfracy[0] !== 16'h5a00) begin
+        $display("FAIL fractional scroll shadows: x=%04x y=%04x",
+                 scrollfracx[0], scrollfracy[0]);
+        errors = errors + 1;
+    end
+    cpu_write(16'hff88, 16'h0000);
+    cpu_write(16'hff8a, 16'h0000);
+
     // NBG0 name word 1 must request code 1, row 0 (address 0x10).
     cpu_write(16'h0000, 16'h0001);
     cpu_write(16'hff81, 16'h003e); // only NBG0 enabled
     start_render;
     expect_first_tile(19'h00010, 3'd1, 14'h2001);
     wait_done;
+
+    // At neutral zoom MAME sign-extends the center as 9 bits.  Therefore
+    // center $1ff means -1 and destination x=0 samples source x=1 (pen 2),
+    // not source x=513 as a permanent 10-bit interpretation would produce.
+    cpu_write(16'hff98, 16'h01ff);
+    start_render;
+    expect_first_request(19'h00010);
+    expect_first_pixel(3'd1, 14'h2002);
+    wait_done;
+    cpu_write(16'hff98, 16'h0000);
 
     // TEXT name and glyph are two distinct synchronous VRAM reads.
     cpu_write(16'h0000, 16'h0402); // palette 2, character 2

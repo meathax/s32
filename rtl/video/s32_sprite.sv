@@ -75,7 +75,9 @@ module s32_sprite #(
 reg [7:0] ctl [0:7];
 reg [7:0] ctl_latched [0:7];
 reg       render_count;             // MAME m_sprite_render_count (0/1)
-reg       render_after_erase;       // combined command: erase, then swap/render
+reg       render_after_erase;       // combined command: render after hidden erase
+reg       erase_after_swap;         // combined command: swap before destructive clear
+reg       erase_buf_sel;            // buffer selected before a combined swap
 reg       erase_mon;                // Multi32 erase visits both monitors
 reg [15:0] post_vblank_count;
 
@@ -96,7 +98,7 @@ end
 
 // list walker / renderer FSM
 typedef enum logic [4:0] {
-    R_IDLE, R_SWAP, R_ERASE, R_ERASEW,
+    R_IDLE, R_SWAP, R_RENDER, R_ERASE, R_ERASEW,
     R_FETCH, R_FETCHP, R_FETCHW, R_DECODE, R_SCALE,
     R_INDTAB, R_INDTABP, R_INDTABW,
     R_ROW, R_ROWDATA, R_ROWDATAW,
@@ -270,6 +272,7 @@ always @(posedge clk) begin
         fb_wr_valid <= 0; fb_wr_start <= 0; fb_wr_end <= 0;
         fb_wr_shadow <= 0;
         render_count <= 0; render_after_erase <= 0;
+        erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
         jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
@@ -319,15 +322,27 @@ always @(posedge clk) begin
                 end
             end
             ctl[0] <= 0;
-            if (command[1]) begin
-                render_after_erase <= command[0];
+            if (command == 2'b11) begin
+                // Publish the completed back buffer first, then clear the old
+                // front buffer while it is hidden.  The logical result is the
+                // same as MAME's instantaneous erase/swap, without exposing a
+                // partially-cleared display while DDR erase takes real time.
+                erase_after_swap <= 1'b1;
+                render_after_erase <= 1'b0;
+                rs <= R_SWAP;
+            end
+            else if (command[1]) begin
+                render_after_erase <= 1'b0;
+                erase_after_swap <= 1'b0;
                 rendering <= 1'b0;
                 fb_er_y <= 0;
                 erase_mon <= 1'b0;
+                erase_buf_sel <= disp_buf[0];
                 rs <= R_ERASE;
             end
             else if (command[0]) begin
                 render_after_erase <= 1'b0;
+                erase_after_swap <= 1'b0;
                 rs <= R_SWAP;
             end
             else rs <= R_IDLE;
@@ -339,7 +354,21 @@ always @(posedge clk) begin
             disp_buf <= {1'b0, ~disp_buf[0]}; // bit0 is the sole A/B selector
             for (int i = 0; i < 8; i++) ctl_latched[i] <= ctl[i];
             ctl[0] <= 0;
-            render_after_erase <= 1'b0;
+            if (erase_after_swap) begin
+                erase_buf_sel <= disp_buf[0];
+                erase_after_swap <= 1'b0;
+                render_after_erase <= 1'b1;
+                rendering <= 1'b0;
+                fb_er_y <= 8'd0;
+                erase_mon <= 1'b0;
+                rs <= R_ERASE;
+            end
+            else begin
+                render_after_erase <= 1'b0;
+                rs <= R_RENDER;
+            end
+        end
+        R_RENDER: begin
             rendering <= 1'b1;
             list_idx <= 0;
             list_count <= 0;
@@ -352,7 +381,7 @@ always @(posedge clk) begin
         R_ERASE: begin
             debug_activity[1] <= 1'b1;
             fb_er_req <= 1'b1;
-            fb_er_buf <= {erase_mon, disp_buf[0]};
+            fb_er_buf <= {erase_mon, erase_buf_sel};
             rs <= R_ERASEW;
         end
         R_ERASEW: if (fb_er_ack) begin
@@ -366,7 +395,10 @@ always @(posedge clk) begin
                     fb_er_y <= 8'd0;
                     rs <= R_ERASE;
                 end
-                else rs <= render_after_erase ? R_SWAP : R_DONE;
+                else begin
+                    render_after_erase <= 1'b0;
+                    rs <= render_after_erase ? R_RENDER : R_DONE;
+                end
             end
             else begin
                 fb_er_y <= fb_er_y + 1'd1;

@@ -17,6 +17,7 @@ import s32_pkg::*;
 module s32_rom_loader (
     input             clk,
     input             rst,
+    input             mem_ready,
 
     input             ioctl_download,
     input       [7:0] ioctl_index,
@@ -65,7 +66,10 @@ reg        busy;
 reg        index0_seen;
 integer    desc_i;
 
-assign ioctl_wait = busy;
+// Hold the MiSTer host off until the SDRAM controller has completed its JEDEC
+// power-up sequence. Accepting descriptor or ROM bytes earlier desynchronises
+// the fixed stream because those writes cannot yet be serviced.
+assign ioctl_wait = busy | ~mem_ready;
 
 // MAME describes the ROM as:
 //   descrambled[dst] = raw[bitswap(dst, 14,11,15,12,13,4,3,7,
@@ -112,7 +116,7 @@ always @(posedge clk) begin
             busy       <= 1'b0;
         end
 
-        if (ioctl_download && ioctl_wr) begin
+        if (mem_ready && ioctl_download && ioctl_wr) begin
             if (ioctl_index == 8'd0) begin
                 if (ioctl_addr < OFF_MAINCPU) begin
                     // descriptor
@@ -130,6 +134,7 @@ always @(posedge clk) begin
                         desc_r.prot_sel    <= desc_bytes[2][6:0];
                         desc_r.sprite_bank_valid <= desc_bytes[3][7];
                         desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
+                        desc_r.flip_y            <= desc_bytes[1][1];
                     end
                 end
                 else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
@@ -182,12 +187,12 @@ always @(posedge clk) begin
 
         // Only an actual index-0 transaction can change the boot gate. Wait
         // for its final SDRAM request to acknowledge before releasing reset.
-        if (ioctl_download && ioctl_wr && ioctl_index == 8'd0 && ioctl_addr == 0) begin
+        if (mem_ready && ioctl_download && ioctl_wr && ioctl_index == 8'd0 && ioctl_addr == 0) begin
             rom_loaded  <= 1'b0;
             eep_loaded  <= 1'b0;
             index0_seen <= 1'b1;
         end
-        if (!ioctl_download && index0_seen && !busy && !sdr_wr_req) begin
+        if (mem_ready && !ioctl_download && index0_seen && !busy && !sdr_wr_req) begin
             rom_loaded  <= 1'b1;
             index0_seen <= 1'b0;
         end

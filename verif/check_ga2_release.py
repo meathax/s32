@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-"""Static release-contract check for the sole supported hardware target: GA2."""
+"""Static GA2 MRA integrity check retained as a non-release compatibility gate."""
 
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
-qsf = (ROOT / "Arcade-SegaSystem32.qsf").read_text(encoding="utf-8")
-assert 'VERILOG_MACRO "S32_SYSTEM32_ONLY=1"' in qsf, "release build is not System 32-only"
-assert 'VERILOG_MACRO "S32_GA2_ONLY=1"' in qsf, "release build is not GA2-only"
-assert 'VERILOG_MACRO "S32_REAL_V25=1"' in qsf, "release build does not enable the real V25"
-assert 'VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"' in qsf, "s80x86 interrupt mode is not fixed"
-
 matches = []
 for path in (ROOT / "mra").glob("*.mra"):
     tree = ET.parse(path)
@@ -44,4 +38,4 @@ assert len(mcu) == 1 and mcu[0].get("crc") == "77634daa", "GA2 V25 MCU program i
 nvram = root.find("nvram[@index='3']")
 assert nvram is not None and nvram.get("size") == "128", "GA2 EEPROM contract changed"
 
-print(f"GA2 RELEASE MRA PASS: {path.name}")
+print(f"GA2 COMPAT MRA PASS: {path.name}")

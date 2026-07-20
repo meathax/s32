@@ -152,9 +152,10 @@ On Windows, a passwordless-SSH MiSTer can be updated with:
 pwsh -File tools/deploy-mister.ps1 -MisterHost root@<MISTER-IP>
 ```
 
-The deployment script uploads the GA2 MRA and RBF under temporary names,
-first requires a successful fit, non-negative reported timing slack, and a
-current matching RBF. It then checks SHA-256 hashes on the MiSTer and only
+The deployment script defaults to the Holosseum MRA. It first requires a
+successful fit, non-negative reported timing slack, and a current matching
+RBF, then uploads both files under temporary names. It checks SHA-256 hashes
+on the MiSTer and only
 atomically moves verified files into place. It never copies or modifies ROM
 files. For a qualified build retained in an isolated directory, pass that
 directory with `-ReportRoot` and its RBF with `-RbfPath`.
@@ -167,8 +168,9 @@ Quartus 17 compatibility and PLL-elaboration blockers found during the first
 mapping passes have been fixed, including generated Qsys port names, source
 ordering, a V60 identifier collision, simulation-only memory initialization,
 hierarchical signal reach-through, and an enum-returning helper that crashed
-the older Quartus frontend. The ga2-only profile now completes Analysis &
-Synthesis at a **map-only estimate of 26,851 / 41,910 ALMs**.
+the older Quartus frontend. The earlier ga2-only profile completed Analysis &
+Synthesis at a **map-only estimate of 26,851 / 41,910 ALMs**. The checked-in
+Holosseum profile must establish its own fit/timing report before deployment.
 
 Before the V60 write-port refactor, seeds 5–7 all reached successful placement
 but failed routing with 70–77% peak interconnect use. Seed 5 reported 39,851 /
@@ -189,6 +191,6 @@ The following release gates remain **open**:
 
 After any compile, run `tools/report-quartus.ps1 -RequireReady` and inspect
 `output_files/*.fit.rpt` and `output_files/*.sta.rpt`; the mere presence of
-an RBF is not a timing-closure claim. The current first hardware target is ga2;
-use the evidence and open release gates in `docs/ga2-readiness.md` rather
-than inferring readiness from the map estimate.
+an RBF is not a timing-closure claim. The current hardware target is
+Holosseum; use the Round 19 evidence and open release gates in
+`docs/audit.md` rather than inferring readiness from the map estimate.

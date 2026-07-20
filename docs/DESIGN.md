@@ -140,7 +140,7 @@ Parents with all clones from the MAME driver (63 sets across 24 parents).
 | `f1en` (+`f1enu`, `f1enj`) | F1 Exhaust Note | 1991 | dual-direct | wheel + 2 pedals per PCB | twin cab (shared-RAM bridge) |
 | `f1lap` (+`f1lapt`, `f1lapj`) | F1 Super Lap | 1993 | analog | wheel + 2 pedals | FD1149 vblank writes (HLE §8.4); `f1lapt` factory-unprotected |
 | `ga2` (+`ga2u`, `ga2j`) | Golden Axe: The Revenge of Death Adder | 1992 | V25 (`ga2` opcode table) | 4P × (8-way + 3 buttons) | V25 protection MCU |
-| `holo` | Holosseum | 1992 | regular | 2P × (8-way + 4 buttons) | no tile ROMs — bitmap+sprites only; `ORIENTATION_FLIP_Y` |
+| `holo` | Holosseum | 1992 | regular | 2P × (8-way + 2 buttons) | no tile ROMs — bitmap+sprites only; `ORIENTATION_FLIP_Y` |
 | `jpark` (+`jparkj`, `jparkja`, `jparkjc`) | Jurassic Park | 1993 | analog | 2× positional gun via ADC | vblank nudge (HLE §8.4); motion-cab outputs |
 | `kokoroj` (+`kokoroja`) | Soreike Kokology | 1992 | CD | 2P buttons + mic | audio CD undumped → not-working in MAME |
 | `kokoroj2` | Soreike Kokology Vol. 2 | 1993 | CD | 2P buttons + mic | audio CD dumped; printer unemulated |
@@ -299,11 +299,13 @@ and sprite control register writes are unaffected by Z80 reset.
 
 ### 3.4 Board-variant configuration
 
-One RBF supports both board types. The MRA feeds a **board descriptor byte**
-(ioctl index 0, §9.3): `{multi32, has_v25, v25_table_sel, has_adc, has_track,
-has_ppi, has_dsp_hle, has_cd_stub, dual_pcb}` plus per-game input-mapping
-selects. All optional blocks are instantiated unconditionally (they are small;
-the V25 is gated — see §10 fitting fallback) and enabled by this descriptor.
+The MRA starts ioctl index 0 with a 64-byte board descriptor. Byte 0 contains
+`{multi32, has_v25, v25_table_sel, has_adc, has_track, has_ppi, has_dsp_hle,
+has_cd_stub}` in ascending bit order. Byte 1 bit 0 selects the dual-PCB bridge
+and bit 1 requests final cabinet Y orientation (set for Holosseum). Byte 2 is
+the protection selector. Byte 3 bit 7 validates physical sprite-bank metadata
+and bits 1:0 hold the bank mask (`0/1/3` for 4/8/16 MiB). Remaining bytes are
+reserved. Release profiles may compile out descriptor-unreachable blocks.
 
 ---
 
@@ -339,8 +341,10 @@ Static layout (fits 32 MB):
 | `0x0E0_0000` | 2 MB | spare / V25 mirror / future |
 | `0x100_0000` | 16 MB | `sprites` |
 
-Arbiter: fixed-priority, round-robin within class, on `clk_ram` with
-bank-interleaved scheduling (4 SDRAM banks → hide tRP/tRCD):
+The ROM-download write port has priority while game logic is held reset. Once
+running, the six read clients use bounded round-robin arbitration on `clk_ram`;
+the starting client advances after every grant, so continuous CPU traffic
+cannot starve sprite, tile, sound, or V25 reads. Transfers remain:
 
 1. **V60 instruction/data fetch** (latency-critical): 16-bit, single-word CAS
    with an 8-word (16-byte) direct-mapped prefetch line + a small 4-line

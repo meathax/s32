@@ -26,6 +26,8 @@ module s32_vram (
     output reg [15:0] reg_1ff02,    // enables / clip modes
     output reg [15:0] reg_1ff04,    // rowscroll/rowselect ctl
     output reg [15:0] reg_1ff06,    // clip selects
+    output reg [15:0] reg_scrollfracx [0:1], // $1FF10/$1FF18 (bits 15:8)
+    output reg [15:0] reg_scrollfracy [0:1], // $1FF14/$1FF1C (bits 15:9)
     output reg [15:0] reg_scrollx [0:3],  // $1FF12/$1FF1A/$1FF22/$1FF2A
     output reg [15:0] reg_scrolly [0:3],  // $1FF16/$1FF1E/$1FF26/$1FF2E
     output reg [15:0] reg_offsx   [0:3],  // $1FF30/34/38/3C
@@ -75,9 +77,13 @@ always @(posedge clk) begin
             7'h01: reg_1ff02 <= merge_be(reg_1ff02, cpu_wdata, cpu_be);
             7'h02: reg_1ff04 <= merge_be(reg_1ff04, cpu_wdata, cpu_be);
             7'h03: reg_1ff06 <= merge_be(reg_1ff06, cpu_wdata, cpu_be);
+            7'h08: reg_scrollfracx[0] <= merge_be(reg_scrollfracx[0], cpu_wdata, cpu_be);
             7'h09: reg_scrollx[0] <= merge_be(reg_scrollx[0], cpu_wdata, cpu_be);
+            7'h0a: reg_scrollfracy[0] <= merge_be(reg_scrollfracy[0], cpu_wdata, cpu_be);
             7'h0b: reg_scrolly[0] <= merge_be(reg_scrolly[0], cpu_wdata, cpu_be);
+            7'h0c: reg_scrollfracx[1] <= merge_be(reg_scrollfracx[1], cpu_wdata, cpu_be);
             7'h0d: reg_scrollx[1] <= merge_be(reg_scrollx[1], cpu_wdata, cpu_be);
+            7'h0e: reg_scrollfracy[1] <= merge_be(reg_scrollfracy[1], cpu_wdata, cpu_be);
             7'h0f: reg_scrolly[1] <= merge_be(reg_scrolly[1], cpu_wdata, cpu_be);
             7'h11: reg_scrollx[2] <= merge_be(reg_scrollx[2], cpu_wdata, cpu_be);
             7'h13: reg_scrolly[2] <= merge_be(reg_scrolly[2], cpu_wdata, cpu_be);
@@ -138,6 +144,8 @@ initial begin
     end
     for (__vr = 0; __vr < 8; __vr = __vr + 1) reg_pages[__vr] = 0;
     for (__vr = 0; __vr < 2; __vr = __vr + 1) begin
+        reg_scrollfracx[__vr] = 0;
+        reg_scrollfracy[__vr] = 0;
         reg_zoomx[__vr] = 16'h0200;  // 1.0 (neutral zoom)
         reg_zoomy[__vr] = 16'h0200;
     end

@@ -21,7 +21,7 @@ if (-not $ReportRoot) {
     $ReportRoot = $repoRoot
 }
 if (-not $MraPath) {
-    $MraPath = Join-Path $repoRoot "mra\Golden Axe The Revenge of Death Adder (World, Rev B).mra"
+    $MraPath = Join-Path $repoRoot "mra\Holosseum (US, Rev A).mra"
 }
 
 foreach ($command in @("ssh", "scp")) {
@@ -62,10 +62,14 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $SkipMra) {
     $resolvedMra = (Resolve-Path -LiteralPath $MraPath).Path
     $localMraHash = (Get-FileHash -LiteralPath $resolvedMra -Algorithm SHA256).Hash.ToLowerInvariant()
-    $remoteMraTemp = "/media/fat/_Arcade/.SegaS32-ga2.mra.upload"
-    $remoteMraFinal = "/media/fat/_Arcade/Golden Axe The Revenge of Death Adder (World, Rev B).mra"
+    $mraLeaf = [IO.Path]::GetFileName($resolvedMra)
+    if ($mraLeaf.Contains("'")) {
+        throw "MRA filenames containing an apostrophe are not supported by the safe SSH quoting path."
+    }
+    $remoteMraTemp = "/media/fat/_Arcade/.SegaS32.mra.upload"
+    $remoteMraFinal = "/media/fat/_Arcade/$mraLeaf"
 
-    Write-Host "Uploading and verifying GA2 MRA..."
+    Write-Host "Uploading and verifying $mraLeaf..."
     & scp @sshOptions $resolvedMra "${MisterHost}:${remoteMraTemp}"
     if ($LASTEXITCODE -ne 0) {
         throw "MRA upload failed."

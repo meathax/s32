@@ -159,8 +159,8 @@ task frame;
     fbcnt = 0;
     @(posedge clk); vblank <= 1;
     @(posedge clk); vblank <= 0;
-    // The command enters R_ERASE after four clocks and asserts its request on
-    // the following edge; starting earlier would violate MAME's delayed event.
+    // The delayed event may spend one cycle publishing the completed back
+    // buffer before it begins erasing the now-hidden old front buffer.
     for (k = 0; k < 4; k = k + 1) begin
         @(posedge clk); #1;
         if (fbe_req) begin
@@ -168,7 +168,9 @@ task frame;
             $display("  FAIL sprite command started before post-VBLANK delay");
         end
     end
-    @(posedge clk); #1;
+    for (k = 0; k < 3 && !fbe_req; k = k + 1) begin
+        @(posedge clk); #1;
+    end
     if (!fbe_req) begin
         errors = errors + 1;
         $display("  FAIL sprite command missing after post-VBLANK delay");

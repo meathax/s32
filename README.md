@@ -14,9 +14,15 @@ FPGA implementation of this processor family.
 
 ## Current status
 
-🕹️ **First GA2 hardware gameplay reached. The real World Rev B ROM boots on
-MiSTer and physical Start/movement/attack/jump controls work; video color and
-sprites are still incorrect, and the demo can stutter and visibly freeze.**
+🕹️ **Current release focus: Holosseum (US, Rev A).** Its non-V25 regular
+System 32 profile now boots through frame 20 in full-core simulation, reaches
+320-wide display activity, and produces a populated JUMP/two-DRAW/END sprite
+list whose 25,043 visible writes match the independent MAME-derived oracle
+exactly. The release descriptor also applies Holosseum's required cabinet Y
+orientation. A fitted, timing-clean RBF and sustained MiSTer play remain the
+acceptance gates. Earlier GA2 hardware runs reached controllable gameplay and
+remain useful historical integration evidence, but GA2 is not this profile's
+current target.
 
 The regression now has **35 tiers** (`verif/run_regression.sh`, plus the
 native Windows ModelSim runner `verif/run_regression.ps1`): RTL lint, V60
@@ -26,8 +32,8 @@ performance, ROM-loader/reset gating, EEPROM NVRAM semantics, SDRAM capture,
 integrated sprite/DDR backpressure, interrupt-controller collision/timer
 coverage, and signed audio-route saturation. The latest complete native
 Windows run passes **35/35 tiers** with **50/50 V60 differential seeds**.
-The ga2-only profile also passes an independent Verilator 5.032 structural
-elaboration.
+The dedicated game profiles also retain independent structural elaboration
+and compatibility boot coverage.
 
 The copyrighted ROMs are kept locally under ignored `roms/`. The image
 builder (`tools/make_sim_images.py`) reads MAME ZIPs directly and has produced

@@ -27,20 +27,22 @@ wire signed [19:0] rf_r_w  = {{4{rf_r[15]}},  rf_r};
 wire signed [19:0] mp_l_w  = {{4{mp_l[15]}},  mp_l};
 wire signed [19:0] mp_r_w  = {{4{mp_r[15]}},  mp_r};
 
-// MAME-derived route ratios retained from the original core implementation:
-// System 32: two FM routes at x2 plus RF5C68 at x3.
-// Multi 32: cross-routed FM at x2 plus MultiPCM at x6.
+// Exact MAME route gains expressed as small integers:
+// System 32: YM1 0.30 + YM2 0.30 + RF5C68 0.40 (divide by 10).
+// Multi 32: cross-routed YM 0.15 + MultiPCM 0.35 (divide by 20).
 wire signed [19:0] mix_l = is_multi32
-    ? (fm1_r_w <<< 1) + (mp_l_w <<< 2) + (mp_l_w <<< 1)
-    : ((fm1_l_w + fm2_l_w) <<< 1) + (rf_l_w <<< 1) + rf_l_w;
+    ? (fm1_r_w <<< 1) + fm1_r_w + (mp_l_w <<< 3) - mp_l_w
+    : (fm1_l_w <<< 1) + fm1_l_w + (fm2_l_w <<< 1) + fm2_l_w
+      + (rf_l_w <<< 2);
 wire signed [19:0] mix_r = is_multi32
-    ? (fm1_l_w <<< 1) + (mp_r_w <<< 2) + (mp_r_w <<< 1)
-    : ((fm1_r_w + fm2_r_w) <<< 1) + (rf_r_w <<< 1) + rf_r_w;
+    ? (fm1_l_w <<< 1) + fm1_l_w + (mp_r_w <<< 3) - mp_r_w
+    : (fm1_r_w <<< 1) + fm1_r_w + (fm2_r_w <<< 1) + fm2_r_w
+      + (rf_r_w <<< 2);
 
 function automatic signed [15:0] scale_and_clip(input logic signed [19:0] sample);
     logic signed [19:0] scaled;
     begin
-        scaled = sample >>> 2;
+        scaled = is_multi32 ? (sample / 20'sd20) : (sample / 20'sd10);
         if (scaled > AUDIO_MAX)      scale_and_clip = 16'sh7fff;
         else if (scaled < AUDIO_MIN) scale_and_clip = 16'sh8000;
         else                         scale_and_clip = scaled[15:0];
@@ -51,4 +53,3 @@ assign audio_l = scale_and_clip(mix_l);
 assign audio_r = scale_and_clip(mix_r);
 
 endmodule
-

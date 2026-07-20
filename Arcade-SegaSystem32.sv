@@ -141,6 +141,8 @@ localparam CONF_STR = {
 ////////////////////////////   CLOCKS/PLL   ///////////////////////////////////
 wire clk_sys, clk_ram, pll_locked;
 wire rom_loaded;
+wire sdram_ready;
+reg  sdram_ready_meta, sdram_ready_sys;
 pll pll (
     .refclk_clk(CLK_50M),
     .reset_reset(1'b0),
@@ -156,7 +158,20 @@ assign CLK_VIDEO = clk_sys;
 // drained into SDRAM. The loader itself is reset only by PLL startup so soft
 // reset and NVRAM transfers do not forget that ROM is already resident.
 wire video_reset = RESET | status[0] | buttons[1] | ~pll_locked;
-wire reset = video_reset | ioctl_download | ~rom_loaded;
+wire reset = video_reset | ioctl_download | ~rom_loaded | ~sdram_ready_sys;
+
+// Synchronise the controller-ready level from clk_ram before it gates the
+// loader and the game logic in clk_sys.
+always @(posedge clk_sys) begin
+    if (!pll_locked) begin
+        sdram_ready_meta <= 1'b0;
+        sdram_ready_sys  <= 1'b0;
+    end
+    else begin
+        sdram_ready_meta <= sdram_ready;
+        sdram_ready_sys  <= sdram_ready_meta;
+    end
+end
 
 // fractional clock enables (DESIGN.md §3.3)
 reg ce_cpu, ce_z80, ce_fm, ce_pcm;
@@ -273,6 +288,7 @@ wire [15:0] eep_wdata;
 
 s32_rom_loader loader (
     .clk(clk_sys), .rst(~pll_locked),
+    .mem_ready(sdram_ready_sys),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr), .ioctl_dout(ioctl_dout),
     .ioctl_wait(ioctl_wait),
@@ -345,7 +361,7 @@ always @(posedge clk_ram) begin
 end
 
 sdram sdram (
-    .clk(clk_ram), .init(~pll_locked), .ready(),
+    .clk(clk_ram), .init(~pll_locked), .ready(sdram_ready),
     .SDRAM_DQ(SDRAM_DQ), .SDRAM_A(SDRAM_A), .SDRAM_BA(SDRAM_BA),
     .SDRAM_DQML(SDRAM_DQML), .SDRAM_DQMH(SDRAM_DQMH),
     .SDRAM_nCS(SDRAM_nCS), .SDRAM_nCAS(SDRAM_nCAS),

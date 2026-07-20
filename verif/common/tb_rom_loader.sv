@@ -17,6 +17,7 @@ import s32_pkg::*;
 
 reg clk = 1'b0;
 reg rst = 1'b1;
+reg mem_ready = 1'b0;
 always #5 clk = ~clk;
 
 reg         ioctl_download = 1'b0;
@@ -46,6 +47,7 @@ wire        rom_loaded;
 
 s32_rom_loader dut (
     .clk(clk), .rst(rst),
+    .mem_ready(mem_ready),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index),
     .ioctl_wr(ioctl_wr), .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout), .ioctl_wait(ioctl_wait),
@@ -146,7 +148,7 @@ begin
     check(sdr_wr_addr === 24'd0, "reset sdr_wr_addr");
     check(sdr_wr_din === 16'd0, "reset sdr_wr_din");
     check(sdr_wr_be === 2'd0, "reset sdr_wr_be");
-    check(ioctl_wait === 1'b0, "reset ioctl_wait");
+    check(ioctl_wait === ~mem_ready, "reset ioctl_wait follows memory ready");
     check(v25_wr === 1'b0 && v25_waddr === 16'd0 && v25_wdata === 8'd0,
           "reset V25 write port");
     check(eep_wr === 1'b0 && eep_waddr === 6'd0 && eep_wdata === 16'd0,
@@ -164,6 +166,21 @@ initial begin
     check_reset_state();
     @(negedge clk);
     rst = 1'b0;
+    // Traffic presented before SDRAM readiness is not accepted and the host
+    // remains backpressured.
+    ioctl_download = 1'b1;
+    ioctl_index = 8'd0;
+    ioctl_addr = 27'd0;
+    ioctl_dout = 8'hde;
+    ioctl_wr = 1'b1;
+    repeat (2) @(posedge clk);
+    #1;
+    check(ioctl_wait && !sdr_wr_req && !rom_loaded && board_desc === '0,
+          "pre-ready download has no side effects");
+    @(negedge clk);
+    ioctl_wr = 1'b0;
+    ioctl_download = 1'b0;
+    mem_ready = 1'b1;
     repeat (2) @(posedge clk);
 
     // Index 2 is a factory EEPROM image, not a program ROM download.  It may
@@ -196,7 +213,7 @@ initial begin
 
     // Populate/latch a nonzero descriptor so the final reset check also
     // proves descriptor state is deterministic.
-    send_byte(8'd0, 27'd1, 8'h01);
+    send_byte(8'd0, 27'd1, 8'h03);
     send_byte(8'd0, 27'd2, 8'h7F);
     send_byte(8'd0, 27'd3, 8'h81);
     send_byte(8'd0, 27'd63, 8'h00);
@@ -204,6 +221,7 @@ initial begin
     check(board_desc.sprite_bank_valid &&
           board_desc.sprite_bank_mask === 2'b01,
           "descriptor sprite bank metadata");
+    check(board_desc.flip_y === 1'b1, "descriptor vertical orientation");
 
     // First and last words of every SDRAM-backed region.  Distinct byte data
     // on each pair catches stale byte_lo and endian errors as well as mapping.

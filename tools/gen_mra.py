@@ -35,15 +35,15 @@ STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
 
 # board descriptor per parent (DESIGN.md §3.4):
 #   b0: flags {multi32,v25,v25table,adc,track,ppi,dsp_hle,cd_stub}
-#   b1: {dual_pcb}
+#   b1: bit0=dual_pcb, bit1=vertical orientation flip
 #   b2: prot_sel
 #   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
 PROT = dict(NONE=0, SONIC=1, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
 def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0, dsp=0, cd=0,
-         dual=0, prot=0):
+         dual=0, flip_y=0, prot=0):
     b0 = (multi32 | v25 << 1 | v25table << 2 | adc << 3 | track << 4 |
           ppi << 5 | dsp << 6 | cd << 7)
-    d = bytes([b0, dual, prot]) + bytes(61)
+    d = bytes([b0, dual | (flip_y << 1), prot]) + bytes(61)
     return d
 
 GAMES = {
@@ -57,7 +57,7 @@ GAMES = {
     "f1en":     desc(adc=1, dual=1),
     "f1lap":    desc(adc=1, prot=PROT["F1LAP"]),
     "ga2":      desc(v25=1, v25table=0, ppi=1),
-    "holo":     desc(),
+    "holo":     desc(flip_y=1),
     "jpark":    desc(adc=1),
     "kokoroj":  desc(cd=1),
     "kokoroj2": desc(cd=1),
