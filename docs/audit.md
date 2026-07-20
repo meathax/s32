@@ -278,3 +278,28 @@ its populated frame-20 list again replays 2,432 ROM requests, 256 runs, and
 35/35 tiers with 50/50 V60 seeds, and Quartus analysis/elaboration completes
 with zero errors. No fitter, assembler, RBF, deployment, or MiSTer launch was
 part of this phase.
+
+# Round 18 — Holosseum production audio closure
+
+This round continued without an RBF or MiSTer launch. It checked the regular
+System 32 sound board against the pinned MAME driver/RF5C68 device and current
+official Jotego JT12 source (`eaab7e1de6594982a299bc9101dc882384b85685`).
+
+## R18 findings
+
+| # | Class | Finding | Resolution |
+|---|---|---|---|
+| R18-1 | BUG | Port `F1` was hardwired to zero, although MAME models it as a stateful byte latch. Ports `D8-DF` also incorrectly aliased the `D0-D7` interrupt-control mirror, and Multi 32 returned YM1 data from its unmapped `90-9F` range. | Added the `F1` latch, restricted the interrupt-control high page to its real mirror, and return open-bus `FF` for the absent Multi 32 second YM. Directed bus cases cover all three. |
+| R18-2 | BUG | Separate nonblocking updates of the sound pending bits allowed a same-cycle ACK to overwrite a fresh YM/V60 source event. | Added a merged pending-bit next-state calculation. ACK is applied first and new source events win, so an arriving interrupt remains pending. The collision is now a directed test. |
+| R18-3 | TEST | The fast full-core simulator used a stub Z80 and no aggregate sound evidence; the production T80 test only proved a synthetic program. | Added production-T80 real-ROM and full-core Holo gates. CNT2 is low through frame 0, then the V60 releases it; by frame 1 the T80 has executed 130,470 opcode cycles and made 15,659 ROM transactions with no unknown audio. The focused five-million-cycle Holo sound-ROM run uses both production JT12s and records 560,905 opcode cycles, 2,208/2,184 FM writes, 156 RF5C68 register writes, 12,287 wave-RAM writes, and 63,314 shared-RAM reads, with zero unknown FM, PCM, or mixed samples. |
+| R18-4 | BUG/TEST | The top stopped `ce_fm` during board/ROM-load reset, but JT12's internally divided operator/envelope rings only flush while its enabled clock advances. The JT12 operator-slot sequencer also relied on a `SIMULATION`-only initializer instead of its reset input. A clean production-style compile therefore left FM outputs `X`. | Split FM onto its own fractional NCO, rephased only while the PLL is unlocked, so the YM clock keeps running throughout board reset while the Z80 remains halted. Added a synchronous reset to JT12's 24-slot sequencer plus `tb_jt12_reset.sv`, long-reset modeling, prerelease knownness checks, and per-source X counters. The isolated clean-build gate and real Holo ROM run now pass with deterministic outputs; regression tier 30 compiles the production JT12 QIP without the simulation initializer. |
+| R18-5 | ACCURACY | The full-core ROM harness generated RF5C68 CE with an integer `/4` approximation (12.081 MHz). | Replaced it with the exact production `16952/65536` fractional NCO for 12.5 MHz from 48.324 MHz. |
+
+## R18 status
+
+The regular System 32 sound address map, banking, latch behavior, interrupt
+collision semantics, T80 boot path, dual-YM programming, RF5C68 programming,
+and output-knownness now have direct evidence. Copyrighted ROM data remains
+under ignored `roms/`; committed tests expose only aggregate counters. Audio
+waveform equivalence and a complete Holo command/music sequence still require
+a captured main-to-sound command trace or later physical/reference-audio test.

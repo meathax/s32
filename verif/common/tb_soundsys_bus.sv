@@ -50,6 +50,19 @@ module tb_soundsys_bus;
         end
     endtask
 
+    task automatic io_read_check(input [7:0] port, input [7:0] expected);
+        begin
+            bus_addr = {8'h00, port};
+            iorq_n = 1'b0; rd_n = 1'b0; m1_n = 1'b1;
+            #1;
+            if (dut.z_din !== expected)
+                $fatal(1, "port %02x read %02x, expected %02x",
+                       port, dut.z_din, expected);
+            idle_bus();
+            @(posedge clk); #1;
+        end
+    endtask
+
     initial begin
         force dut.z_addr   = bus_addr;
         force dut.z_dout   = bus_dout;
@@ -74,6 +87,17 @@ module tb_soundsys_bus;
         io_write(8'hb0, 8'h05);
         if (dut.sound_bank !== 9'h0ea)
             $fatal(1, "sound ROM bank permutation wrong: %03x", dut.sound_bank);
+
+        // F1 is a stateful board latch in MAME, not a constant-zero dummy.
+        io_write(8'hf1, 8'h5a);
+        io_read_check(8'hf1, 8'h5a);
+
+        // D0-D3 mirror at D4-D7 only.  The upper half of the D-page is
+        // unmapped and must not silently change interrupt routing.
+        io_write(8'hd0, 8'h01);
+        io_write(8'hd8, 8'h55);
+        if (dut.snd_irq_ctl[0] !== 8'h01)
+            $fatal(1, "unmapped D8 port aliased D0 interrupt control");
 
         // A123 in bank EA maps to byte 1d4123.  The request is word aligned,
         // WAIT remains asserted through arbitrary SDRAM delay, and odd-byte
@@ -106,6 +130,18 @@ module tb_soundsys_bus;
         if (dut.z_int_n !== 1'b1)
             $fatal(1, "sound IRQ ack-AND did not clear pending vector");
 
+        // A fresh source on the same edge as an ACK is not stale state and
+        // must survive.  This guards the merged pending-bit next-state logic.
+        bus_addr = 16'h00c1; bus_dout = 8'h00;
+        iorq_n = 1'b0; wr_n = 1'b0; m1_n = 1'b1;
+        v60_doorbell = 1'b1;
+        @(posedge clk); #1;
+        idle_bus(); v60_doorbell = 1'b0;
+        @(posedge clk); #1;
+        if (dut.z_int_n !== 1'b0)
+            $fatal(1, "simultaneous sound IRQ source was lost to ACK");
+        io_write(8'hc1, 8'h00);
+
         bus_addr = 16'h00c4; bus_dout = 8'h00;
         iorq_n = 1'b0; wr_n = 1'b0; m1_n = 1'b1;
         @(posedge clk); #1;
@@ -117,6 +153,7 @@ module tb_soundsys_bus;
         // and sound chips must retain their programmed state.
         io_write(8'hd0, 8'h02);
         is_multi32 = 1'b1;
+        io_read_check(8'h90, 8'hff);
         io_write(8'hb0, 8'h35);
         z80_reset = 1'b1;
         repeat (3) @(posedge clk);

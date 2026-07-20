@@ -197,7 +197,14 @@ always @(*) begin
 end
 
 always @(posedge clk) begin : up_counter
-    if( clk_en ) begin
+    // Do not rely on the SIMULATION-only initial block (or FPGA power-up
+    // defaults) for the 24-slot operator sequencer.  An unknown cur_op/cur_ch
+    // feeds back through the register and operator rings indefinitely.
+    if( rst ) begin
+        cur_op <= 2'd0;
+        cur_ch <= 3'd0;
+        zero   <= 1'b1;
+    end else if( clk_en ) begin
         { cur_op, cur_ch }  <= { next_op, next_ch };
         zero    <= next == 5'd0;
     end

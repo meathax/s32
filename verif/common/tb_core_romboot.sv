@@ -42,10 +42,27 @@ always @(posedge clk_sys) begin
     zdiv <= (zdiv == 5) ? 3'd0 : zdiv + 1'd1;
     ce_z80 <= (zdiv == 0);
 end
-reg ce_pcm = 0;  reg [1:0] pdiv = 0;
+reg ce_fm = 0; reg [15:0] fm_acc = 0;
 always @(posedge clk_sys) begin
-    pdiv <= pdiv + 1'd1;
-    ce_pcm <= (pdiv == 0);
+    logic [16:0] fm_sum;
+    // Mirror the production free-running FM NCO, including while rst is high.
+    fm_sum = fm_acc + 17'd10923;
+    ce_fm <= fm_sum[16];
+    fm_acc <= fm_sum[15:0];
+end
+reg ce_pcm = 0;  reg [15:0] pcm_acc = 0;
+always @(posedge clk_sys) begin
+    logic [16:0] pcm_sum;
+    if (rst) begin
+        pcm_acc <= 16'd0;
+        ce_pcm <= 1'b0;
+    end
+    else begin
+        // 12.5 MHz / 48.324 MHz, identical to the production top-level NCO.
+        pcm_sum = pcm_acc + 17'd16952;
+        ce_pcm <= pcm_sum[16];
+        pcm_acc <= pcm_sum[15:0];
+    end
 end
 
 // board descriptor from plusargs
@@ -301,10 +318,11 @@ endgenerate
 wire hs, vs, hb, vb;
 wire [23:0] rgb_a;
 wire        ce_pix;
+wire signed [15:0] audio_l, audio_r;
 
 s32_core core (
     .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .video_rst(rst), .board(board),
-    .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_z80), .ce_pcm(ce_pcm),
+    .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr), .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr), .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
@@ -329,7 +347,7 @@ s32_core core (
     .trk_btn(tbt_a),
     .ppi_pa(8'hff), .ppi_pb(8'hff), .ppi_pc(8'hff),
     .rgb_a(rgb_a), .rgb_b(), .ce_pix(ce_pix), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
-    .audio_l(), .audio_r(), .out_lamps(),
+    .audio_l(audio_l), .audio_r(audio_r), .out_lamps(),
     .debug_pc(), .debug_halted(), .debug_status(), .debug_first_rom(), .debug_hcnt()
 );
 
@@ -352,6 +370,11 @@ end
 integer n_vram_wr = 0, n_pal_wr = 0, n_spr_wr = 0, n_io_wr = 0;
 integer n_intc_wr = 0, n_wram_wr = 0, n_exc = 0, n_irq = 0;
 integer vs_count = 0;
+integer snd_rom_reqs = 0, snd_opcodes = 0;
+integer snd_bank_lo = 0, snd_bank_hi = 0;
+integer snd_fm1 = 0, snd_fm2 = 0, snd_rfreg = 0, snd_rfram = 0;
+integer snd_irqctl = 0, snd_audio_x = 0;
+reg snd_zrom_req_d = 0;
 reg vs_d;
 always @(posedge clk_sys) begin
     vs_d <= vs;
@@ -366,6 +389,19 @@ always @(posedge clk_sys) begin
             4'hD: n_intc_wr = n_intc_wr + 1;
             default: ;
         endcase
+    end
+    if (!rst) begin
+        snd_zrom_req_d <= core.sound.zrom_req;
+        if (core.sound.zrom_req && !snd_zrom_req_d) snd_rom_reqs = snd_rom_reqs + 1;
+        if (!core.sound.z_m1_n && !core.sound.z_mreq_n) snd_opcodes = snd_opcodes + 1;
+        if (core.sound.z_io_wr && core.sound.z_addr[7:4] == 4'ha) snd_bank_lo = snd_bank_lo + 1;
+        if (core.sound.z_io_wr && core.sound.z_addr[7:4] == 4'hb) snd_bank_hi = snd_bank_hi + 1;
+        if (core.sound.z_io_wr && core.sound.z_addr[7:4] == 4'h8) snd_fm1 = snd_fm1 + 1;
+        if (core.sound.z_io_wr && core.sound.z_addr[7:4] == 4'h9) snd_fm2 = snd_fm2 + 1;
+        if (core.sound.z_mem_wr && core.sound.pcm_cs && !core.sound.z_addr[12]) snd_rfreg = snd_rfreg + 1;
+        if (core.sound.z_mem_wr && core.sound.pcm_cs &&  core.sound.z_addr[12]) snd_rfram = snd_rfram + 1;
+        if (core.sound.z_io_wr && core.sound.z_addr[7:4] == 4'hd) snd_irqctl = snd_irqctl + 1;
+        if (^{audio_l, audio_r} === 1'bx) snd_audio_x = snd_audio_x + 1;
     end
 end
 
@@ -836,7 +872,9 @@ end
 integer frames, f, p1_ev;
 initial begin
     if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
-    repeat (20) @(posedge clk_sys);
+    // Model the long board ROM-load reset: this fully flushes the production
+    // jt12's 24-stage rings at its internally divided operator cadence.
+    repeat (2048) @(posedge clk_sys);
     rst = 0;
     for (f = 0; f < frames; f = f + 1) begin
         in_p1a_r = 8'hff;
@@ -882,6 +920,10 @@ initial begin
             core.mode_416, rdreq_cnt, kick_cnt, fbw_y, fbr_y_l,
             spr_cmd_cnt, srom_req_cnt, spr_opq_cnt, coin_rd_cnt, start_rd_cnt,
             p1a_rd_cnt);
+        $display("   snd: rom=%0d op=%0d bank=%0d/%0d(%03x) fm=%0d/%0d rf=%0d/%0d irqctl=%0d audio=%0d/%0d x=%0d",
+            snd_rom_reqs, snd_opcodes, snd_bank_lo, snd_bank_hi,
+            core.sound.sound_bank, snd_fm1, snd_fm2, snd_rfreg, snd_rfram,
+            snd_irqctl, audio_l, audio_r, snd_audio_x);
         rdreq_cnt = 0; kick_cnt = 0; spr_cmd_cnt = 0; srom_req_cnt = 0; spr_opq_cnt = 0;
         p1a_rd_cnt = 0; coin_rd_cnt = 0; start_rd_cnt = 0;
     end

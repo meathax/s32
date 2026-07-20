@@ -34,7 +34,12 @@ builder (`tools/make_sim_images.py`) reads MAME ZIPs directly and has produced
 full SDRAM-layout images for `holo`, `ga2`, and `svf`:
 
 - **holo:** completes its EEPROM/IRQ boot path. A fresh final-mixer run reaches
-  63,383 non-black pixels at frame 19 and captures a populated frame 20.
+  63,383 non-black pixels at frame 19 and captures a populated frame 20. A
+  production-T80 full-core gate also proves the V60's CNT2 release starts the
+  real sound CPU (130,470 opcode cycles by frame 1). In the focused real-ROM
+  audio gate, Holo performs 2,208/2,184 writes to the two production JT12 YM
+  interfaces, 156 RF5C68 register writes, and 12,287 wave-RAM writes with no
+  unknown FM, PCM, or mixed-output samples.
 - **ga2:** reaches the V25 wake-up/protection path, enables interrupts, and
   advances into attract code; the indexed-jump error found on this path is
   fixed. Its object-bucket scan also exposed an inverted V60 `SKPCUH` zero

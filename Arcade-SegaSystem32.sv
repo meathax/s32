@@ -160,12 +160,12 @@ wire reset = video_reset | ioctl_download | ~rom_loaded;
 
 // fractional clock enables (DESIGN.md §3.3)
 reg ce_cpu, ce_z80, ce_fm, ce_pcm;
-reg [15:0] acc_cpu, acc_z80, acc_pcm;
+reg [15:0] acc_cpu, acc_z80, acc_fm, acc_pcm;
 wire is_multi32 = board_desc.multi32;
 always @(posedge clk_sys) begin
     logic [16:0] s;
     if (reset) begin
-        ce_cpu <= 1'b0; ce_z80 <= 1'b0; ce_fm <= 1'b0; ce_pcm <= 1'b0;
+        ce_cpu <= 1'b0; ce_z80 <= 1'b0; ce_pcm <= 1'b0;
         acc_cpu <= 16'd0; acc_z80 <= 16'd0; acc_pcm <= 16'd0;
     end
     else begin
@@ -177,11 +177,28 @@ always @(posedge clk_sys) begin
         s = acc_z80 + (is_multi32 ? 16'd10849 : 16'd10923);
         ce_z80 <= s[16];
         acc_z80 <= s[15:0];
-        ce_fm  <= ce_z80;
         // pcm: 12.5/48.324 ; 10/48.324
         s = acc_pcm + (is_multi32 ? 16'd13561 : 16'd16952);
         ce_pcm <= s[16];
         acc_pcm <= s[15:0];
+    end
+end
+
+// JT12's resettable operator/envelope rings advance only on its enabled
+// clock.  Keep the FM chip clock running throughout board/ROM-load reset;
+// tying it to the halted Z80 CE leaves those rings unreset and can poison the
+// stereo mixer with unknown/random startup state.  PLL unlock is the only
+// condition that stops and rephases this NCO.
+always @(posedge clk_sys) begin
+    logic [16:0] s;
+    if (!pll_locked) begin
+        ce_fm <= 1'b0;
+        acc_fm <= 16'd0;
+    end
+    else begin
+        s = acc_fm + (is_multi32 ? 16'd10849 : 16'd10923);
+        ce_fm <= s[16];
+        acc_fm <= s[15:0];
     end
 end
 

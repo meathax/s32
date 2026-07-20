@@ -207,6 +207,29 @@ function Run-SoundZ80Test {
     Assert-Marker $output "SOUNDSYS Z80 PASS" $name
 }
 
+function Run-JT12ResetTest {
+    $name = "t30_jt12_reset"
+    $library = New-WorkLibrary $name
+    $jt12Directory = Join-Path $Root "rtl/audio/jt12"
+    $jt12Sources = [Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content -LiteralPath (Join-Path $jt12Directory "jt12.qip")) {
+        if ($line -match '"([^"]+)"') {
+            $jt12Sources.Add((Join-Path $jt12Directory $Matches[1]))
+        }
+    }
+    $sources = @($jt12Sources) + (Resolve-Sources @("verif/common/tb_jt12_reset.sv"))
+    [void](Invoke-NativeCapture $script:Vlog (@("-sv", "-work", $library) + $sources) "vlog ($name)")
+
+    $testDirectory = Split-Path -Parent $library
+    $output = @(Invoke-NativeCapture $script:Vsim @(
+        "-c", "-lib", $library,
+        "-l", (Join-Path $testDirectory "vsim.log"),
+        "-wlf", (Join-Path $testDirectory "vsim.wlf"),
+        "tb_jt12_reset", "-do", "run -all; quit -f"
+    ) "vsim ($name)")
+    Assert-Marker $output "JT12 RESET PASS" $name
+}
+
 function Write-Tier {    param([int]$Number, [string]$Description)
     Write-RunLine ("`n[{0}/35] {1}" -f $Number, $Description)
 }
@@ -417,6 +440,7 @@ try {
         "rtl/audio/s32_audio_mix.sv", "rtl/audio/s32_soundsys.sv",
         "verif/common/jt12_stub.v", "verif/common/tb_soundsys_bus.sv"
     ) "SOUNDSYS BUS PASS" @("SIMULATION")
+    Run-JT12ResetTest
     Run-SoundZ80Test
 
     Write-Tier 31 "MAME-backed MultiPCM descriptor / pitch / pan / loop / ACK semantics"

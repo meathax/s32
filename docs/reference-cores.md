@@ -43,6 +43,14 @@ source of truth for the 315-5386A.
   FPGA block RAM represents the chip's logical `0xff` start state.
 - A real mixed-language T80 simulation mode and sound-ROM boot test now execute
   Z80 code through the production bus decode into RF5C68 wave RAM/registers.
+- The pinned System 32 MAME map and a current official JT12 snapshot
+  (`eaab7e1`, 2026-01-30) were rechecked during the Holo audio closure. The
+  full-core gate proves CNT2 releases the production T80; a separate gate
+  keeps the FM fractional clock running during the board's long reset so
+  JT12's 24-stage operator/envelope rings are completely flushed before the
+  Z80 is released. The operator-slot counter now uses its real reset input
+  instead of a simulation-only initializer. Both are required for
+  deterministic production-JT12 output.
 - The sound-ROM cache now has separate pending-request and valid-data tags.
   Previously the request address was treated as valid before SDRAM returned,
   allowing the T80 to consume stale opcode bytes.

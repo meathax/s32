@@ -249,6 +249,7 @@ def capture(
     frames: list[int],
     model_sim_bin: Path | None,
     keep_work: bool,
+    real_z80: bool = False,
 ) -> list[Path]:
     if not frames or frames != list(range(frames[0], frames[-1] + 1)):
         raise ValueError("frames must be a non-empty contiguous ascending range")
@@ -269,6 +270,20 @@ def capture(
     vlog = _tool("vlog", model_sim_bin)
     vsim = _tool("vsim", model_sim_bin)
     _run([vlib, str(library)], work, "vlib Holo capture")
+    if real_z80:
+        vcom = _tool("vcom", model_sim_bin)
+        t80_sources = [
+            REPO_ROOT / "rtl/audio/T80/T80_ALU.vhd",
+            REPO_ROOT / "rtl/audio/T80/T80_MCode.vhd",
+            REPO_ROOT / "rtl/audio/T80/T80_Reg.vhd",
+            REPO_ROOT / "rtl/audio/T80/T80.vhd",
+            REPO_ROOT / "rtl/audio/T80/T80s.vhd",
+        ]
+        _run(
+            [vcom, "-2008", "-work", str(library), *map(str, t80_sources)],
+            work,
+            "vcom production T80",
+        )
     video_sources = sorted((REPO_ROOT / "rtl/video").glob("*.sv"))
     sources = [
         REPO_ROOT / "rtl/s32_pkg.sv",
@@ -287,7 +302,15 @@ def capture(
         REPO_ROOT / "verif/sprite_replay/tb_holo_sprite_capture.sv",
     ]
     _run(
-        [vlog, "-sv", "+define+SIMULATION", "-work", str(library), *map(str, sources)],
+        [
+            vlog,
+            "-sv",
+            "+define+SIMULATION",
+            *(["+define+S32_REAL_Z80_SIM"] if real_z80 else []),
+            "-work",
+            str(library),
+            *map(str, sources),
+        ],
         work,
         "vlog Holo capture",
     )
@@ -319,6 +342,10 @@ def capture(
     if "HOLO SPRITE CAPTURE PASS" not in transcript:
         raise RuntimeError("Holo capture did not emit its completion marker")
     (output / "capture.log").write_text(transcript, encoding="utf-8")
+    (output / "sound_cpu_mode.txt").write_text(
+        ("production T80\n" if real_z80 else "simulation stub\n"),
+        encoding="utf-8",
+    )
     manifests = _postprocess(output, frames, rom_info)
     if keep_work:
         retained = output / "modelsim_work_path.txt"
@@ -337,6 +364,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--last-frame", type=int, default=3)
     parser.add_argument("--modelsim-bin", type=Path)
     parser.add_argument("--keep-work", action="store_true")
+    parser.add_argument(
+        "--real-z80",
+        action="store_true",
+        help="compile the production mixed-language T80 for full-core audio traffic",
+    )
     args = parser.parse_args(argv)
     frames = list(range(args.first_frame, args.last_frame + 1))
     try:
@@ -346,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             frames=frames,
             model_sim_bin=args.modelsim_bin,
             keep_work=args.keep_work,
+            real_z80=args.real_z80,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"HOLO SPRITE CAPTURE: FAIL: {exc}", file=sys.stderr)

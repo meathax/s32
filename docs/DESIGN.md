@@ -287,6 +287,13 @@ the loader's `rom_loaded` gate. `rom_loaded` rises only after a real index-0
 transaction has ended and its last SDRAM write acknowledgement has drained,
 so no subsystem executes partial ROM contents. Loader state itself resets on
 PLL loss rather than a game soft-reset, preserving the completed-ROM gate.
+The FM fractional NCO runs whenever the PLL is locked, including throughout
+this board/ROM-load reset. JT12's resettable operator/envelope rings advance
+only with its enabled clock; stopping that CE during reset leaves unknown
+state in the production YM outputs. Its 24-slot operator sequencer is also
+synchronously reset in production RTL rather than relying on JT12's former
+simulation-only initializer. The Z80 and other board CEs remain halted
+normally during reset.
 The Z80 is additionally reset by 315-5296 CNT2 (game-controlled, inverted),
 and sprite control register writes are unaffected by Z80 reset.
 

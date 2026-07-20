@@ -225,10 +225,12 @@ jt12 fm2 (
 // ---------------------------------------------------------------------------
 reg [7:0] snd_irq_ctl [0:2];
 reg [2:0] snd_irq_input;
+reg [2:0] snd_irq_next;
 reg [7:0] snd_irq_mask;   // slot 3 = mask reg (MAME: m_sound_irq_control[3])
+reg [7:0] sound_dummy_value;
 
 wire ym_irq = ~fm1_irq_n;   // only YM #1 wired (MAME)
-reg  ym_irq_d, doorbell_d;
+reg  ym_irq_d;
 
 // vector on intack: lowest pending slot * 2
 reg [7:0] int_vector;
@@ -242,6 +244,28 @@ always @(*) begin
         end
 end
 
+// Merge an acknowledge with source changes before committing the pending
+// bits.  An event arriving on the acknowledge cycle must remain pending; the
+// previous sequence of nonblocking assignments allowed the ACK to overwrite
+// a simultaneous YM/V60 event.
+always @(*) begin
+    snd_irq_next = snd_irq_input;
+    if (z_io_wr && z_addr[7:4] == 4'hc && z_addr[0])
+        snd_irq_next = snd_irq_next & z_dout[2:0];
+    if (ym_irq & ~ym_irq_d)
+        for (int i = 0; i < 3; i++)
+            if (snd_irq_ctl[i] == SOUND_IRQ_YM3438[7:0])
+                snd_irq_next[i] = 1'b1;
+    if (~ym_irq & ym_irq_d)
+        for (int i = 0; i < 3; i++)
+            if (snd_irq_ctl[i] == SOUND_IRQ_YM3438[7:0])
+                snd_irq_next[i] = 1'b0;
+    if (v60_doorbell)
+        for (int i = 0; i < 3; i++)
+            if (snd_irq_ctl[i] == SOUND_IRQ_V60[7:0])
+                snd_irq_next[i] = 1'b1;
+end
+
 always @(posedge clk) begin
     if (rst) begin
         snd_irq_input <= 0;
@@ -249,28 +273,17 @@ always @(posedge clk) begin
         snd_irq_ctl[1] <= 8'h00;
         snd_irq_ctl[2] <= 8'h00;
         snd_irq_mask  <= 8'h00;
+        sound_dummy_value <= 8'h00;
         sound_bank    <= 0;
         mpcm_bank_lo  <= 3'd0;
         mpcm_bank_hi  <= 3'd0;
         irq_to_v60    <= 0;
         ym_irq_d      <= 0;
-        doorbell_d    <= 0;
     end
     else begin
         irq_to_v60 <= 1'b0;
         ym_irq_d   <= ym_irq;
-        doorbell_d <= v60_doorbell;
-
-        // edge: signal_sound_irq(source)
-        if (ym_irq & ~ym_irq_d)
-            for (int i = 0; i < 3; i++)
-                if (snd_irq_ctl[i] == SOUND_IRQ_YM3438[7:0]) snd_irq_input[i] <= 1'b1;
-        if (~ym_irq & ym_irq_d)
-            for (int i = 0; i < 3; i++)
-                if (snd_irq_ctl[i] == SOUND_IRQ_YM3438[7:0]) snd_irq_input[i] <= 1'b0;
-        if (v60_doorbell & ~doorbell_d)
-            for (int i = 0; i < 3; i++)
-                if (snd_irq_ctl[i] == SOUND_IRQ_V60[7:0]) snd_irq_input[i] <= 1'b1;
+        snd_irq_input <= snd_irq_next;
 
         // Z80 IO writes
         if (z_io_wr) begin
@@ -284,15 +297,17 @@ always @(posedge clk) begin
                     else sound_bank[8:6] <= {z_dout[1:0], z_dout[2]};
                 end
                 8'hc?: begin
-                    if (z_addr[0]) begin
-                        snd_irq_input <= snd_irq_input & z_dout[2:0]; // ack-AND
-                    end
                     if (z_addr[2]) irq_to_v60 <= 1'b1;                // doorbell
                 end
                 8'hd?: begin
-                    if (z_addr[1:0] == 2'd3) snd_irq_mask <= z_dout;
-                    else                    snd_irq_ctl[z_addr[1:0]] <= z_dout;
+                    // MAME maps D0-D3 mirrored only at D4-D7.  D8-DF are
+                    // genuinely unmapped and must not alias these registers.
+                    if (!z_addr[3]) begin
+                        if (z_addr[1:0] == 2'd3) snd_irq_mask <= z_dout;
+                        else                    snd_irq_ctl[z_addr[1:0]] <= z_dout;
+                    end
                 end
+                8'hf1: sound_dummy_value <= z_dout;
                 default: ;
             endcase
         end
@@ -307,8 +322,8 @@ always @(*) begin
     else if (z_io_rd) begin
         casez (z_addr[7:0])
             8'h8?: z_din = fm1_dout;
-            8'h9?: z_din = is_multi32 ? fm1_dout : fm2_dout;
-            8'hf1: z_din = 8'h00;
+            8'h9?: z_din = is_multi32 ? 8'hff : fm2_dout;
+            8'hf1: z_din = sound_dummy_value;
             default: z_din = 8'hff;
         endcase
     end
