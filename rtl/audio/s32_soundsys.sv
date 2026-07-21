@@ -17,12 +17,13 @@ module s32_soundsys #(
     input             z80_reset,    // I/O-chip CNT2: sound-CPU reset only
     input             is_multi32,
 
-    // V60 side of shared RAM (byte-wide, low lanes of 0x700000 window)
+    // V60 side of shared RAM (16-bit byte-enabled port on the 0x700000 window)
     input             sh_cs,
     input             sh_we,
-    input      [12:0] sh_addr,
-    input       [7:0] sh_wdata,
-    output      [7:0] sh_rdata,
+    input      [11:0] sh_addr,      // word address within the 8 KB window
+    input       [1:0] sh_be,
+    input      [15:0] sh_wdata,
+    output     [15:0] sh_rdata,
 
     // main CPU doorbell (int_control offsets 12-15 write)
     input             v60_doorbell,
@@ -114,20 +115,27 @@ reg [8:0] sound_bank;
 wire [23:0] rom_byte_addr = (z_addr < 16'ha000) ? {8'b0, z_addr}
                           : {2'b0, sound_bank, z_addr[12:0]};
 
-// ROM fetch through SDRAM word port with byte select + 1-deep cache
+// ROM fetch through the SDRAM word port with byte select + a 2-entry cache.
+// A single cached word thrashed on copy loops (LDIR from banked ROM to wave
+// RAM alternates opcode-word and data-word fetches), stalling the Z80 on nearly
+// every access; two ways keep both streams resident (audit R20 AU-8).
 reg        rreq;
 reg [23:1] raddr;               // outstanding SDRAM request address
-reg [23:1] rtag;                // address associated with rdata_w
-reg [15:0] rdata_w;
-reg        rvalid;
+reg [23:1] rtag [0:1];          // per-way tag
+reg [15:0] rdata_w [0:1];       // per-way data word
+reg [1:0]  rvalid;              // per-way valid
+reg        rfill;               // way to fill on the next miss (round-robin)
 assign zrom_req  = rreq;
 assign zrom_addr = {raddr, 1'b0};
 wire rom_sel = (z_addr < 16'hc000);
-wire rom_hit = rvalid && (rtag == rom_byte_addr[23:1]);
+wire hit0 = rvalid[0] && (rtag[0] == rom_byte_addr[23:1]);
+wire hit1 = rvalid[1] && (rtag[1] == rom_byte_addr[23:1]);
+wire rom_hit = hit0 || hit1;
+wire [15:0] rom_word = hit0 ? rdata_w[0] : rdata_w[1];
 assign z_wait_n = ~(rom_sel && (z_mem_rd) && !rom_hit);
 
 always @(posedge clk) begin
-    if (rst) begin rreq <= 0; rvalid <= 0; rtag <= 0; end
+    if (rst) begin rreq <= 0; rvalid <= 2'b00; rfill <= 1'b0; end
     else begin
         if (rom_sel && z_mem_rd && !rom_hit && !rreq) begin
             rreq  <= 1'b1;
@@ -135,24 +143,38 @@ always @(posedge clk) begin
         end
         if (zrom_ack) begin
             rreq <= 0;
-            rdata_w <= zrom_data;
-            rtag <= raddr;
-            rvalid <= 1'b1;
+            rdata_w[rfill] <= zrom_data;
+            rtag[rfill]    <= raddr;
+            rvalid[rfill]  <= 1'b1;
+            rfill          <= ~rfill;   // alternate ways so LDIR keeps both live
         end
     end
 end
 
-// Shared RAM 8KB true dual port.  Both buses use clk_sys, and both registered
-// read outputs update every clock exactly as the original array did.  The
-// explicit wrapper prevents Quartus 17 from expanding this memory into logic.
-wire [7:0] shz_rd_r;
-s32_byte_dpram #(.ADDR_WIDTH(13), .NUM_WORDS(8192)) shared_ram (
-    .clock(clk),
-    .address_a(sh_addr), .data_a(sh_wdata), .rden_a(1'b1),
+// Byte-packed 8 KB shared RAM.  MAME installs the Z80's 0xE000-0xFFFF onto the
+// V60's 0x700000 window with 8-bit handlers on BOTH byte lanes and no umask16,
+// so V60 byte k maps to Z80 0xE000+k (byte granularity, 8 KB mirror).  Store it
+// as a 4Kx16 dual-port RAM: the V60 gets a real 16-bit byte-enabled port at word
+// address A[12:1]; the Z80's 8-bit port reads/writes a single lane selected by
+// its low address bit.  The previous 8-bit port addressed at A[13:1] reached
+// only even Z80 bytes at halved addresses and dropped every odd byte, corrupting
+// any multi-byte V60<->Z80 command block (audit R20 IO-1 / AU-1).
+wire [15:0] shz_rd16;
+s32_big_dpram #(.ADDR_WIDTH(12), .NUM_WORDS(4096), .MIXED_RDW_MODE("OLD_DATA")) shared_ram (
+    .clock_a(clk),
+    .address_a(sh_addr), .data_a(sh_wdata), .byteena_a(sh_be),
     .wren_a(sh_cs && sh_we), .q_a(sh_rdata),
-    .address_b(z_addr[12:0]), .data_b(z_dout), .rden_b(1'b1),
-    .wren_b(z_mem_wr && z_addr[15:13] == 3'b111), .q_b(shz_rd_r)
+    .clock_b(clk),
+    .address_b(z_addr[12:1]),
+    .data_b({z_dout, z_dout}),
+    .byteena_b(z_addr[0] ? 2'b10 : 2'b01),
+    .wren_b(z_mem_wr && z_addr[15:13] == 3'b111), .q_b(shz_rd16)
 );
+// Z80 8-bit read: pick the lane matching the byte address.  q_b carries a
+// one-clock registered read exactly as the previous byte RAM did, and the Z80
+// holds its address stable across the access, so the current low bit selects
+// the correct lane of the word that was fetched.
+wire [7:0] shz_rd_r = z_addr[0] ? shz_rd16[15:8] : shz_rd16[7:0];
 
 // ---------------------------------------------------------------------------
 // PCM chips
@@ -329,8 +351,12 @@ always @(*) begin
     end
     else if (z_mem_rd) begin
         if (z_addr[15:13] == 3'b111)      z_din = shz_rd_r;
-        else if (pcm_cs)                  z_din = is_multi32 ? 8'h00 : rf_rdata;
-        else                              z_din = rom_byte_addr[0] ? rdata_w[15:8] : rdata_w[7:0];
+        // RF5C68 registers (0xC000-0xCFFF) are write-only; the sound map has no
+        // unmap_value_high, so reads there return 0x00 in MAME, not 0xFF (audit
+        // R20 AU-7).  The wave-RAM window (0xD000-0xDFFF, A12=1) still reads RAM.
+        else if (pcm_cs)                  z_din = is_multi32 ? 8'h00 :
+                                                  (z_addr[12] ? rf_rdata : 8'h00);
+        else                              z_din = rom_byte_addr[0] ? rom_word[15:8] : rom_word[7:0];
     end
     else z_din = 8'hff;
 end

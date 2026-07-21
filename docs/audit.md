@@ -336,3 +336,566 @@ to the Holosseum MRA and refuses any RBF without successful current fitter,
 timing, and hash checks. Seed 6 now meets timing and produces a release RBF.
 Deployment confirms gameplay, audio, controls, and mirrored sprite output;
 correct Holosseum colors and structured extended-play acceptance remain open.
+
+# Round 20 — Full-core audit against pinned MAME with instrumented ground truth
+
+This round is an audit only: **no RTL was changed, no RBF was built, and no
+MiSTer run occurred.** Six parallel subsystem audits (tilemap/VRAM/CRT,
+sprites/DDR, audio, V60, platform/ROM path, I/O/interrupts/protection)
+compared every block line-by-line against the pinned MAME snapshot, alongside
+a core-glue/palette/mixer audit and — new this round — **instrumented MAME
+reference captures**: Holosseum, Spider-Man, and GA2 were run under
+MAME-in-WSL with Lua register/palette dumps and palette-write-window taps.
+Capture tools are committed (`verif/mame/holo_regdump.lua`,
+`verif/mame/holo_palwtrace2.lua` — note MAME write taps must be pinned in a
+Lua global or GC silently removes them); dump evidence is under ignored
+`roms/reference/holo/audit-r20/`.
+
+## R20 Holosseum palette investigation — RTL logic proven correct; defect is below RTL
+
+Ground truth captured from MAME at title/post-start/gameplay frames:
+
+- Holosseum runs `$4C=0xBE4D` (sprite groups from pix[13:12], **RMW shadow
+  bit 2 set** — the floor mirror), `$4E=0x0C00` (**blend enable bit 11 set,
+  factor 4** — so the palette **write-both mirror is active for every
+  palette write the game ever makes**), `$3E=0xC000`, `$2C=0x0000`,
+  sprite groups 0–3 = `0011/0014/0018/001F` (sprite palbase nibble 1 →
+  entries 0x400+). Mixer regs `$50+` are never written and stay `0xFFFF` —
+  the RTL `mreg` power-up default is exactly right, and the seed-6 fit
+  report proves the fitter honors it (discrete ALM registers, not MLAB).
+- VRAM `$1FF02=0x002F` disables NBG0-3 and bitmap (text stays on);
+  `$1FF5E=0x0200` → the backdrop reads **palette entry 0x0200, which MAME
+  holds at 0x0000 = black**. Color offsets `$40-$44` are 0 at gameplay
+  (`ff00`) and −16 during the post-start fade (`fff0`).
+- Write-window taps: Holosseum writes its palette **exclusively through the
+  converted-format alias window** (byte 0x8000-0xBFFF → lower half), in
+  back-to-back bursts up to 4,129 words per frame, with both 16K halves in
+  lockstep in MAME (write-both active). **Spider-Man and GA2 also write
+  exclusively through the alias window** — and both show correct colors on
+  MiSTer, which **exonerates the alias write-conversion path on hardware**.
+- Decisive replay: feeding the captured register state, layer enables,
+  backdrop control, and palette contents through
+  `verif/reference/s32_mixer_ref.py` (equivalent to the RTL mixer by the
+  permanent 512-case differential) yields **rgb=000000 black** for the
+  empty-screen pixel (winner=background, index 0x0200), correct sprite
+  colors, and correct halved shadows, in both the fade and gameplay states.
+
+Conclusion: the RTL palette+mixer algorithm is correct for Holosseum's real
+programming. The blue background on hardware is a **below-RTL divergence**.
+Verified-clean this round: layer-enable logic (bit-exact vs
+`update_tilemaps`), backdrop `$1FF5E` routing, palette format converters
+(both directions, byte-enable permutation), mixer index/blend/offset/shadow
+arithmetic, `mreg` power-up initials in the actual fit, SDC clock
+relationships (clk_sys/clk_ram are same-PLL related and timed;
+V60/sprite multicycle exceptions verified correctly scoped — the V60 is
+fully ce-gated and its bus adapter lies outside the exception), RGB output
+chain (no color-touching stage; spidman control case), and the sprite
+pixel encode/erase/DDR/line-fetch chain. Remaining ranked suspects, each
+with a concrete next test:
+
+1. **Palette bitplane primitive behavior in the real dual-clock config.**
+   The 32× `altsyncram` 8K×1 planes run port A on clk_sys and port B on
+   clk_ram with `read_during_write_mode_mixed_ports="DONT_CARE"`, and
+   Holosseum animates the palette continuously (collisions every frame).
+   The Quartus-level harness (`verif/quartus_palette/palette_infer_top.sv`)
+   ties `mix_clk = clk`, so the production dual-clock configuration has
+   never been validated at the primitive level. Next test: post-fit
+   (gate-level) simulation of the palette sub-project in its dual-clock
+   arrangement, replaying the captured Holosseum alias-window write
+   sequence (including the 4,129-word back-to-back burst and write-both
+   mirroring) against concurrent mixer-port reads of entries 0x0200/0x04xx,
+   diffed against the behavioral model.
+2. **Value/index-range-dependent addressing fault.** Follow-up captures
+   show spidman and ga2 ALSO run with blend enable set (`$4E=0x0B00` /
+   `0x0800` — write-both active) and burst comparable back-to-back palette
+   writes (spidman 3,584/frame), so the write-both mechanism and cadence
+   are **common to all three games** and cannot alone be the divergence.
+   What is holo-unique is only the value set: sprite group mode 0xD
+   (shift 12) vs 0xE, sprite palbase nibble 1 (entries 0x400-0x13FF), and
+   bg palbase 0 with entry 0x0200 — vs spidman/ga2 backgrounds at palbase
+   3 (0xC00+). A defective palette row/bank address bit or plane in the
+   synthesized primitive corrupts exactly some index ranges and not
+   others — matching "holo wrong, spidman right" — and the gate-level
+   replay in (1) detects any such fault directly. The pend-copy's "idle
+   clock after a write" bus assumption was verified to hold for the V60
+   adapter but remains an unasserted convention (see CG-1).
+3. **On-hardware readback diagnostic.** Add a debug path (OSD-selectable
+   video mode or HPS readback) that dumps palette entries 0x0000-0x000F /
+   0x0200 / 0x0410-0x041F and mixer regs 0x20-0x27 live on MiSTer. One
+   capture then splits the fault between palette content (write side),
+   palette read path, and mixer arithmetic with certainty.
+
+## R20 findings
+
+All findings are **open** (audit-only round). Prior-round fixes were spot
+verified and are not re-listed. Per-area IDs match the detailed subsystem
+reports produced during the audit.
+
+### Critical
+
+| # | Area | Finding | Proposed action |
+|---|---|---|---|
+| IO-1 / AU-1 | V60↔Z80 shared RAM | The V60 side of the 8 KB sound shared RAM is word-strided and low-lane-only (`s32_core.sv:668-670`: byte *k* at `0x700000+2k`, `m_be[0]` only, 16 KB footprint). MAME (no `umask16`) byte-packs: byte *k* at `0x700000+k`, both lanes, 8 KB mirror. **Proven from game code**: ga2's V60 absolutely addresses `0x701F00/02` while its Z80 addresses `0xFF00/02`; spidman's Z80 command area uses odd addresses (`E001/E061/E081/E083/E085`) the RTL makes unreachable from the V60. Odd command bytes are dropped; even ones land at halved Z80 addresses. Holosseum's minimal protocol survives by accident. Prime suspect for **spidman missing/incorrect SFX** and a credible mechanism for the **ga2 freeze** (V60 spinning on a Z80-owned status byte it can never see change). | Rebuild as a byte-packed 8 KB window serving both lanes (`{A[12:1], lane}`), mirror per MAME; add the directed V60↔Z80 addressing test (AU-9) that today does not exist; regression-check holo audio afterward. |
+| V60-1 | V60 XCH | `XCH` decodes operand 1 as a value, so the reg/reg form does a bus RMW at the address equal to the register's *content*, memory forms use loaded data as the address, and the reg,mem form swaps nothing (`s32_v60.sv:2541-2549, 2902-2932` vs `op12.hxx:2178-2224`). ga2 uses `XCH.W` as a lock idiom. | Add 0x41/43/45 to the address-decode set and implement the four operand-form cases; directed test for all forms. |
+| V60-2 | V60 HALT | HALT wakes with return PC = the HALT's own address, so RETI re-executes HALT forever: interrupt handlers keep running while the main thread is permanently parked (`s32_v60.sv:698, 2514-2520` vs `op5.hxx:58-63` where MAME treats 0x00 as a one-byte no-op). Exactly matches the ga2 hardware signature — frozen displayed frame, V60 PC still changing. | Match MAME (one-byte no-op) or push `pc+1` on wake; update benches that exploit halt-as-test-end. |
+
+### High
+
+| # | Area | Finding | Proposed action |
+|---|---|---|---|
+| V60-5 | V60 INC/DEC | INC/DEC never update OV (both register and memory RMW paths), and register-form `INC.W` computes CY from a constant-zero expression. Signed branches (BGT/BLT/DBcc…) after an INC/DEC evaluate stale OV — the classic AI counter/loop shape; **strongest CPU candidate for spidman's defective enemy attacks**. | Implement per-width add/sub OV in both paths; fix INC.W CY; add flag-consumer directed tests. |
+| V60-3 | V60 GETPSW | Operand decoded as value instead of write destination: register form writes PSW to wild RAM at the register's current value and never updates the register (`s32_v60.sv:845, 2959-2972`). Silent memory corruption wherever games use it. | Decode 0xF6/F7 with `ea_want_addr=1`; use flag1 reg/mem write paths. |
+| V60-4 | V60 TRAP/cc | Conditional TRAP ignores its condition nibble and always vectors (`s32_v60.sv:2975-2985` vs `op3.hxx:222-300`). Compiler overflow/bounds-check idioms would spuriously trap. | Evaluate the Bcc condition table; fall through when false. |
+| V60-14 | V60 string ops | `MOVCD` (down copy) walks physically descending addresses; MAME copies descending element order over the *ascending* range — the RTL reads/writes entirely wrong memory. `MOVCF` fill and `MOVCS` stop variants silently behave as plain copies. Final R27/R28 short by one element; zero-length forms skip register/flag updates. | Rebase the down walk at `base+(len-1)*step`; implement fill/stop; fix final registers. |
+| SP-1 | Sprite status | Framebuffer-select status bit read back at `$C00000` is inverted at every instant vs MAME (RTL resets displaying buffer 0/reads 0; MAME reads 1 at power-up, 0 after first swap — confirmed by the project's own sprite oracle defaults). A game polling the absolute value desyncs its double-buffering by one frame permanently. | Reset `disp_buf` to `2'b01` (or invert the readback); directed status-poll test. |
+| PF-5 | Timing signoff | `TIMEQUEST_MULTICORNER_ANALYSIS OFF` in the QSF: release RBFs (and the deploy gate) are signed off at a single corner with only +0.248 ns hold margin reported; fast-corner hold is unchecked. Also timing-driven synthesis silently skips because the SDC's hard `error` guards fail at map stage. | Enable multicorner for release qualification; make the SDC guards executable-aware. |
+| AU-2 | MultiPCM ROM port | No byte-lane select on SDRAM p4: every odd sample/descriptor byte returns the even byte (`s32_core.sv:676,682`). Fatal for all Multi 32 audio when that profile is built. | Latch `mpcm_ba[0]` and mux the SDRAM half-word. |
+
+### Medium
+
+| # | Area | Finding | Proposed action |
+|---|---|---|---|
+| V60-6/7/8/16/17 | V60 flags | MUL/MULU OV wrong for all widths (signed-product-high test missing); SHA-left OV hardwired 0 and SHL/SHA count-0 must clear CY; divide-by-zero updates no flags, DIV min/−1 overflow OV missing, REM/REMU leave OV stale; SUBC.B/H OV constant 0 and a SUBC.W CY wrap case; MOVT truncation OV missing. Any of these ahead of a signed/overflow branch misbranches. | Implement per the MAME macros; extend the differential harness to compare PSW (V60-20) so the whole class stays closed. |
+| V60-9/10/11/12/13/18 | V60 instructions | DIVX/DIVUX with memory operand skip the operation; MULX/MULUX never store to memory; MOVD moves 32 of 64 bits; PUSHM/POPM mask bit 31 pushes SP instead of PSW and discards the popped PSW; TASI flags diverge (CY inverted) and register form dereferences; CMPC S-flag inverted with wrong final R27/R28 and missing length-tail rules; CHLVL/UPDPSW/LDTASK memory-operand forms use the EA or stale data as the value. | Implement per MAME; add directed tests per op (none are covered today). |
+| V60-19 | V60 prefetch | Neither the 24-byte fetch window nor the retained previous window is invalidated by data writes: self-modifying code within ~24 bytes ahead of PC, or a two-instruction backward loop patching itself, executes stale bytes forever (beyond even real-V60 prefetch behavior). | Two range comparators clear the windows on overlapping data writes; self-modifying-code directed test. |
+| V60-20 | Verification | The "50/50 differential seeds" gate emits only 10 reg-reg word-form ALU ops, straight-line, and **never compares flags**; the Python reference's scope is defined circularly as "the RTL's tested subset". None of the V60 findings above is reachable by it. | Dump PSW into `.expected`, widen the op mix (widths, memory forms, flag-consumer branches), diversify generators. |
+| IO-2/IO-3 | ADC | MSM6253 shifter shifts on every clk_sys cycle while a read is held (one V60 read consumes 4-6 bits), and the serial data bit is returned on D0 where the chip drives D7. Breaks all analog games (radm/radr/f1en/alien3/jpark/dbzvrvs) once enabled. | Per-transaction read one-shot (`rd_stb` mirror of `wr_stb`); move the bit to D7. |
+| AU-8 | Z80 timing | Every Z80 ROM read missing the 1-deep word cache stalls on SDRAM (~65-85% effective speed on ROM-resident code; `LDIR` thrashes opcode/data in the same cache word). Real hardware is zero-wait. Secondary suspect for load-dependent spidman SFX dropouts; holo tolerates it. | Two-entry I/D-split cache or next-word prefetch. |
+| SP-3 | Sprite frame sync | The vblank event is consumed only in `R_IDLE`: if erase+render overruns one frame (reachable under contention per the spec's own worst-case numbers), that frame's command processing is silently skipped. | Latch vblank as pending while busy; consume on return to idle. |
+| PF-6 | SDRAM closure | Aggregate tile-fetch bandwidth under simultaneous V60 thrash + sprite saturation + max zoom-out is not formally closed, and the existing `tm_line_overrun` telemetry is not surfaced in any debug video mode — a mid-line underrun on hardware is invisible. | Surface the counter in a debug mode; add a saturating-traffic regression tier. |
+| PF-2 | Display aspect | "Original" aspect is hardwired 13:7 (416-wide assumption): Holosseum's 320-wide mode displays stretched ~1.86:1 instead of 4:3; the ARC1/ARC2 entries never emit the custom-aspect encoding. | Original → 4:3; fix the ARC status encoding. |
+| TM-6 | Tilemap tests | No directed vector covers NBG2/3 rowscroll+rowselect combined with global flip, flipped text, or 416-mode clip mirroring — exactly the paths holo/ga2 exercise least. | Add the scalar-model-checked directed TB. |
+| CG-2 | Palette Quartus harness | `verif/quartus_palette/palette_infer_top.sv` ties `mix_clk=clk`: the production dual-clock M10K configuration (the R19-11 area, and prime holo suspect) has never been validated at the Quartus-primitive level. | Extend the harness to true dual clocks and replay the captured holo write sequence post-fit (investigation step 1 above). |
+| CG-3 | Pixel-exact gate | No simulation tier compares RTL RGB output against MAME pixel-for-pixel — the strongest full-core gates count non-black pixels only, which is exactly why a palette-class defect could survive to hardware twice. | Add a frame-diff tier: replay a captured MAME state (tools now in `verif/mame/`) and diff a full frame against a MAME screenshot. |
+
+### Low / accuracy / hygiene
+
+| # | Area | Finding |
+|---|---|---|
+| TM-1 | Video | 416/320 width authority: RTL derives everything from sprite control reg 6; MAME uses VRAM `$1FF00` bit 15 for the tilemap/CRT side (games set both consistently today). |
+| TM-2 / SP-4 | Video | Backdrop line-color gradient (`$1FF5E` bit 15) is not mirrored under the cabinet FLIP_Y adapter (holo uses the constant mode — unaffected). |
+| TM-3 | Video | Multi 32 per-layer 2-bit external tilebank not implemented (System 32 formula used unconditionally). |
+| TM-4 | Video | Zoom shadows power up 0x200-neutral vs MAME's zeroed videoram (pre-first-write frames only, display blanked). |
+| TM-5 | Perf | Full 6-layer render pipeline runs during the 38 vblank lines each frame, wasting SDRAM p1 bandwidth (~15% of frame time) on undisplayed lines. |
+| SP-2 | Sprites | 30 Hz auto mode discards a CPU-written manual command on skip frames (MAME executes it). |
+| SP-5 | Sprites | Flip-bit changes take effect one frame later than MAME (write-side flip), and the swap lands ~50 µs into line 0 so the first scanline shows the previous frame's buffer. |
+| SP-6 | Sprites | Sprite ROM bank mirror uses an AND mask (correct for 1/2/4-bank sets; a hypothetical 3-bank set diverges). |
+| SP-7 | Sprites | No regression asserts the sprite line-fetch worst-case deadline (single, non-double-banked line buffer). |
+| PF-1 | Platform | `VGA_SL = status[5:4]` mis-slices the 3-bit scanline field: CRT 50% gives 25%, 75% unreachable; HQ2x entry is inert. |
+| PF-3 | Platform | ROM loader accept path doesn't qualify on `!busy`: an ioctl word arriving during an outstanding SDRAM write is silently dropped (only the V25 byte window is realistically exposed; saved today by HPS pacing). |
+| PF-4 | Platform | DDR reads launch with stale byte enables from the previous partial write (works on Cyclone V f2sdram; not Avalon-conformant). |
+| PF-7 | Platform | `GAME_ONLY` builds return V25 mailbox data at 0xA00000 even when `board.has_v25=0` (should be open-bus 0xFFFF). |
+| PF-8 | Platform | Z80/V60 shared RAM and V25 mailbox byte-DPRAMs synthesize `POWER_UP_UNINITIALIZED="TRUE"` — random at power-up on hardware vs zeros in sim. |
+| PF-9 | Platform | `forced_scandoubler` unconsumed (direct-VGA users always get 15 kHz); no pause option. |
+| AU-3/4/5/6 | Audio (Multi 32) | MultiPCM: no envelope/TL-interpolation/LFO, key-off cuts instantly, 12-bit samples decoded as 8-bit; register decode aliases mod 4 across 0xC000-0xDFFF; PCM stereo not cross-routed like MAME; scross's variant bank decoder missing. |
+| AU-7 | Audio | Z80 reads of the RF5C68 register page return 0xFF vs MAME's unmapped 0x00. |
+| AU-10 | Reference | `gew.cpp/.h` (MultiPCM base class) missing from the pinned snapshot — AU-3/AU-5 cannot be closed byte-exactly until vendored. Likewise `am1/am2/am3.hxx` are missing for the V60 EA bodies. |
+| AU-11 | Audio | Audio NCO rates are 14-58 ppm off exact (inaudible; recorded). |
+| IO-4 | I/O | 315-5296 SEGA-signature/CNT/DIR readbacks missing (read 0xFF). |
+| IO-5 | I/O | Multi 32 TIMER0 should count 16.000 MHz, not 16.108 MHz (0.67% fast). |
+| IO-6 | I/O | Interrupt `pending` resets to 0; MAME resets to all-pending-masked 0xFF. |
+| IO-7 | I/O | 0x800000 s32comm share RAM reads 0xFFFF instead of behaving as RAM (link games). |
+| IO-8/9/10 | Protection | dbzvrvs HLE trigger window too narrow (0xA00000-0xA0FFFF vs 0xA7FFFF); brival read trap fires on byte reads (MAME: word-wide only); dual-PCB id served across 32 KB instead of 4 bytes and f1en comm RAM powers up 0 vs 0xFF. |
+| IO-11/12 | Inputs | US sets (ga2u, spidmanu) take coins on PPI EXTRA3 bits 3/2 — the MiSTer Coin button drives what those sets read as COIN3/4; service-credit and PCB Push SW1/SW2 buttons unmapped. |
+| IO-13 | I/O | 0xD80000 RNG is a correlated 16-bit LFSR stepped per CPU clock vs MAME's full-width rand(); all three target games read it (weak spidman-AI suspect). |
+| IO-14 | I/O | Trackball read-back injects joystick buttons into the counter high nibbles (MAME: unconnected switches). |
+| IO-15 | I/O | `analog_bank` has no reset/initializer — X in sim for System 32 analog games (hardware powers up 0). |
+| IO-16 | I/O | i8255 control word not latched/readable; ports hardwired input (sufficient for current games). |
+| IO-17 | Loader | Index-2 factory EEPROM images likely byte-swapped vs MAME's big-endian region (affects jpark/radm/radr/scross/titlef/harddunk preloads; holo/spidman/ga2 unaffected). |
+| V60-15 | V60 | Down-direction SCHC/SKPC scan below the base address (up forms exact; already noted in R13). |
+| V60-21/22 | V60 | Reset PC upper byte 0x00FFFFF0 vs 0xFFFFFF0; soft reset clears privileged regs MAME preserves; BAM bit-offset divide signed vs MAME unsigned (both unreachable in practice). |
+| IO — misc | I/O | Prot-HLE write triggers can re-fire on held writes (idempotent today); EEPROM over-clocked READ holds last bit vs MAME shifting zeros (games clock exactly 16). |
+| CG-1 | Palette | The write-both pend-copy's "idle clock after write" bus assumption holds for the V60 adapter but is unasserted; a future second write master (or pipelined bus change) would silently drop mirror copies. Add an SVA assertion. |
+
+## R20 status and forward plan
+
+**Holosseum (release target):** the palette defect is isolated to below-RTL
+with the RTL algorithm proven against instrumented MAME ground truth. Next
+actions in order: (1) dual-clock gate-level palette replay of the captured
+write sequence (extends `verif/quartus_palette`); (2) the write-both
+pend-copy directed/assertion tests; (3) an on-hardware palette/mixer
+readback diagnostic in the next approved RBF, which splits
+content-vs-read-vs-mix with one capture. Independent of the palette:
+PF-2 (320-mode aspect) is user-visible and trivial.
+
+**Spider-Man (next target):** fix IO-1/AU-1 (shared RAM byte packing —
+also re-run holo audio after), then V60-5 and the V60 flag family
+(V60-6/7/8/16/17) with the upgraded differential harness (V60-20), then
+AU-8 (Z80 wait states) if SFX dropouts persist. SP-1 and IO-13 are
+second-line suspects for the enemy-attack defect.
+
+**GA2 (later):** V60-2 (HALT) + V60-1 (XCH) directly match the
+freeze-with-running-CPU signature; IO-1 provides the I/O-side deadlock
+mechanism. All three land as part of the above.
+
+**Process:** V60-20 (differential flags), CG-3 (pixel-exact MAME frame
+diff), AU-9 (shared-RAM seam test), PF-5 (multicorner signoff), and
+vendoring `gew.cpp`/`am1-3.hxx` into the reference snapshot keep these
+classes closed once fixed.
+
+# Round 21 — Implementing the R20 audit fixes
+
+This round implements the R20 findings in RTL. It is verified with the native
+ModelSim regression (all 35 tiers, now including two new directed tiers) plus
+per-module targeted runs. **No RBF was fitted and no MiSTer run occurred** —
+the changes are simulation- and lint-verified only, and a fresh
+timing-qualified hardware run is still required before any accuracy claim.
+
+## What was implemented (verified)
+
+### Critical
+- **IO-1 / AU-1 — V60↔Z80 shared RAM byte-packing.** Rebuilt the 0x700000
+  window as a 4K×16 dual-port RAM: the V60 gets a true 16-bit byte-enabled
+  port at word address `A[12:1]`, and the Z80's 8-bit port selects a lane by
+  its low address bit, so V60 byte *k* now maps to Z80 `0xE000+k` on both
+  lanes with an 8 KB mirror (`rtl/audio/s32_soundsys.sv`, `rtl/s32_core.sv`).
+  New directed test `verif/common/tb_soundsys_shared.sv` (AU-9) drives a real
+  T80 complement-copy of a V60-seeded block and checks the round trip through
+  both byte lanes — the seam every other sound bench left at `sh_cs=0`.
+- **V60-2 — HALT resume.** S_HALT now advances PC past the HALT only on wake,
+  so the interrupt frame returns to the instruction after the HALT instead of
+  re-executing it forever (the ga2 freeze-with-running-CPU signature). A
+  no-interrupt HALT still parks at its own PC, so end-marker benches are
+  unaffected.
+- **V60-5 — INC/DEC overflow.** Both the register and memory RMW paths now
+  produce full ADDB/SUBB flags (overflow and the previously constant-0 INC.W
+  carry). New directed tier `verif/v60/tb_v60_flags.sv` captures the PSW with
+  GETPSW after INC/DEC of `0x7FFFFFFF`/`0xFFFFFFFF`/`0x80000000`/`0`/`0x7F` and
+  confirms OV/CY/S/Z exactly — the flag class the differential harness never
+  observes.
+- **V60-1 — XCH.** Added 0x41/43/45 to `f12_op1_is_addr` so both XCH operands
+  resolve as addresses: the reg-reg and reg-mem forms (including ga2's lock
+  idiom) now use the correct swap address instead of a register's *value*.
+  (The rare mem-mem form remains a documented TODO.)
+
+### High / medium
+- **V60 flag family:** conditional TRAP/cc (V60-4, evaluate the Bcc condition;
+  0xB never traps), GETPSW decode as a write destination (V60-3), signed/
+  unsigned MUL overflow via a retained-operand product (V60-6), SHA left-shift
+  overflow + zero-count carry clear for SHL/SHA (V60-7), signed DIV min/-1
+  overflow and REM/REMU OV-clear (V60-8), PUSHM/POPM mask-bit-31 = PSW
+  (V60-11), TASI = SUBB(old,0xFF) flags (V60-12), SUBC 33-bit borrow + per-
+  width overflow (V60-16), MOVT truncation overflow (V60-17). All verified by
+  the 10 V60 tiers plus the new flag tier.
+- **AU-2 — MultiPCM ROM byte lane** selected from the 16-bit SDRAM word
+  (`rtl/s32_core.sv`).
+- **SP-1/2/3 — sprite** frame-select readback polarity (invert only the CPU-
+  visible bit, no internal/golden churn), 30 Hz skip-frame manual command,
+  and vblank-pending latch across a render overrun.
+- **IO-2/5/6/8/9/14/16 — I/O + protection:** MSM6253 one-shift-per-read, Multi
+  32 timer0 rate, all-pending-masked interrupt reset (`tb_intc` updated),
+  wider dbzvrvs window, word-only brival read trap (new `cpu_be` port),
+  unconnected trackball switch nibbles, and i8255 control-word latch/readback.
+- **IO-3/13/15 — core I/O:** ADC bit on D7, a 32-bit per-clock xorshift RNG
+  fold at 0xD80000, and a defined power-up for `analog_bank`.
+- **PF-1/2/3/4/5/7/8 — platform:** correct scanline-strength bits and 4:3/
+  custom-aspect encoding, ioctl accept gated on `!busy`, all-ones byte enables
+  on DDR reads, multicorner timing analysis with synthesis-tolerant SDC
+  guards, open-bus at 0xA00000 when no V25, and deterministic byte-DPRAM
+  power-up. IO-10b (dual-PCB comms power-up 0xFF) and PF-8 (V25 mailbox)
+  likewise.
+
+## Verification
+
+- Native ModelSim regression: **35/35 tiers** on the post-change tree
+  (`verif/modelsim-r20-batch1.log`, `-batch2.log`), including the 50-seed V60
+  differential, the mixer/sprite/palette/intc/soundsys tiers, and the two new
+  tiers (`t07_v60_flags`, `t30_soundsys_shared`).
+- Full-core lint compiles clean (0 errors, 0 warnings) in both the universal
+  and `S32_SYSTEM32_ONLY + S32_HOLO_ONLY` profiles.
+- MAME ground-truth captures for holo/spidman/ga2 (register/palette dumps,
+  write-window traces) are retained under ignored `roms/reference/holo/
+  audit-r20/`; the capture tooling is in `verif/mame/`.
+
+## Deliberately deferred (with rationale)
+
+These R20 findings are **not** implemented this round. Each is either low
+value for the current targets, high regression risk without the verification
+infrastructure to confirm it, or blocked on a paused build step.
+
+- **V60-9/10/13/14/18 (DIVX/MULX memory operand, MOVD 64-bit, CMPC flags,
+  MOVCD/fill/stop, CHLVL/UPDPSW/LDTASK memory operand):** intricate exec/
+  decode changes for instructions the directed suite does not cover and the
+  differential harness cannot flag-check. Making unverifiable CPU changes is
+  riskier than deferring; these should land together with **V60-20** (extend
+  the differential to dump/compare PSW and widen the op mix), which is the
+  prerequisite that makes them provable. **V60-15** (down-direction search) is
+  already tracked from R13; **V60-19** (prefetch self-modify invalidation) and
+  **V60-21/22** (reset-PC upper byte, BAM signedness) are latent/nano.
+- **AU-3/4/5/6 (MultiPCM envelope/TL/LFO, decode aliasing, PCM cross-route,
+  scross bank):** Multi 32 only (the current profile is System 32) and blocked
+  on **AU-10** — `gew.cpp/.h`, the MultiPCM base class, is absent from the
+  pinned MAME subset, so they cannot be closed byte-exactly yet. **AU-8**
+  (Z80 wait-state cache) is a performance item on a currently-working sound
+  path; deferred to avoid destabilizing it before the AU-1 fix is
+  hardware-confirmed. **AU-7** (RF5C68 register read value) is intentionally
+  left at the floating-bus `0xFF` (the audit's own "decide and document").
+- **TM-1/2/3/5 (416 width authority, backdrop line-color flip, Multi 32 per-
+  layer tilebank, vblank-line render suppression):** no current-target game
+  exercises them (holo runs 320-wide with a constant backdrop; the tilebank is
+  Multi 32), and TM-2 would add a port to the holo-critical mixer for zero
+  current benefit.
+- **IO-7/10a/11/12/17 (s32comm RAM, dual-PCB id-window restriction, US-set
+  coin routing, factory-EEPROM endianness):** link-game / dual-PCB / preload-
+  only, none affecting holo/spidman/ga2; IO-11/12 additionally needs a board-
+  descriptor flag and MRA change while credits still register today.
+- **CG-2/CG-3 (dual-clock palette gate-level replay, pixel-exact MAME frame
+  diff):** the highest-value follow-ups for the Holosseum palette, but they
+  require Quartus gate-level output (the suspected defect lives in the
+  `altsyncram` primitive, which behavioral simulation does not model) and a
+  fresh fit — the build step paused this session. They remain the recommended
+  next diagnostic step from R20.
+
+## Round 21 addendum — second implementation pass
+
+A follow-up pass implemented more of the R20 findings. All are verified by the
+native ModelSim regression (35/35 tiers, now including `t07_v60_movd`) plus
+targeted per-module runs. Still no RBF/MiSTer.
+
+Additionally implemented (moved out of the deferred list):
+
+- **V60-10 — MOVD 64-bit move.** Replaced the 32-bit-only exec with a full
+  register-pair / memory-qword transfer: op1/op2 now decode as lvalues
+  (`f12_op1_is_addr`), register ends use direct pair access, and memory ends
+  use the new `S_MOVD_RL/RH/WL/WH` qword phases. New directed tier
+  `verif/v60/tb_v60_movd.sv` checks pair→pair, pair→memory, and memory→pair.
+- **V60-18 — CHLVL/UPDPSW/LDTASK memory operand.** Added these to
+  `f12_reads_dest` so a memory operand is loaded into `op2val` before exec
+  instead of the exec falling back to the effective address / stale value.
+- **V60-19 — self-modifying-code fetch invalidation.** A completing data write
+  that overlaps the live or retained fetch window now clears it, so a
+  subsequent execution refetches. Verified by no-regression on all V60 tiers
+  including the fetch-performance tier (the guard is a conservative additive
+  overlap check that never fires on non-overlapping data writes).
+- **V60-21 — reset PC** set to `0xFFFFFFF0` (MAME `m_start_pc`; bus-identical
+  after 24-bit masking). The privileged-register soft-reset-preservation half
+  is intentionally left as-is to avoid undefined power-up state.
+- **AU-7 — RF5C68 register reads** return `0x00` (unmapped, no
+  `unmap_value_high`) instead of `0xFF`; the wave-RAM window still reads RAM.
+- **AU-8 — Z80 fetch cache** widened from one word to a 2-entry cache so copy
+  loops (LDIR opcode/data alternation) stop thrashing. Verified with the real
+  production T80 sound-ROM boot (`tb_soundsys_z80`).
+- **TM-2 — backdrop line-color flip.** The mixer takes a `flip_y` input and
+  indexes the CRAM line table in game coordinates (`223 - y`) under the cabinet
+  ORIENTATION_FLIP_Y adapter. The 512-case mixer differential passes with
+  `flip_y=0` (identical to before), confirming the constant-backdrop path is
+  unchanged.
+- **TM-5 — vblank render suppression.** The tile renderer is kicked only for
+  visible lines 0-223, freeing the ~15% of SDRAM p1 bandwidth previously spent
+  rendering never-displayed vblank lines. The backdrop snapshot keeps the
+  ungated boundary.
+- **IO-10a — dual-PCB id window** restricted to 0x818000-0x818003 with open-bus
+  elsewhere in the window.
+
+Running total: roughly **46 of 72** R20 findings implemented and verified.
+
+### Still deferred / blocked (accurate as of this addendum)
+
+- **Blocked on the paused Quartus build / a missing reference (7):** CG-2, CG-3
+  (dual-clock palette gate-level replay and pixel-exact frame diff need a fitted
+  netlist), and AU-3/AU-4/AU-5/AU-6/AU-10 (MultiPCM envelope/LFO/TL/cross-route
+  need `gew.cpp`, which is absent from the pinned MAME subset).
+- **V60-9 — MULX/DIVX memory operand (implemented).** MULX/MULUX with a memory
+  op2 store the 64-bit product as a qword; DIVX/DIVUX read the high dividend word
+  (`S_DIVXM_RH`), run the restoring divide, and write quotient/remainder back to
+  `[op2]`/`[op2]+4`. New tier `verif/v60/tb_v60_divxmem.sv`.
+- **V60-13 — CMPC flags/registers (implemented).** On the first difference
+  S = (source > dest) — was inverted; R28/R27 hold len1+i / len2+i, not the raw
+  addresses; the equal-common-prefix tail sets S/Z from the length compare; and
+  zero-length now sets flags/registers. New tier `verif/v60/tb_v60_cmpc.sv`.
+  (CMPCF fill / CMPCS stop still behave as plain CMPC — a smaller residual gap.)
+- **V60-14 — MOVCD down copy (implemented).** The down copy now transfers the
+  ascending range base..base+min-1 in descending element order (MAME
+  opMOVSTRD) instead of walking physically below the base and corrupting memory.
+  New tier `verif/v60/tb_v60_movcd.sv`.  (MOVCF fill / MOVCS stop and the exact
+  R27/R28 completion remain a smaller residual gap.)
+- **V60-20 — differential flags (implemented).** The Python reference now
+  computes MUL/DIV overflow (matching MAME) and models GETPSW; the generator
+  captures the final PSW into R7/M7 so the co-sim compares flags across all
+  seeds — the harness previously observed no flags at all.  Verified: 0/20 seeds
+  diverge with the PSW comparison enabled.
+- **Still deferred:** V60-15 (down-direction search): the shared search FSM plus
+  MAME's byte-vs-half start-index quirk make this high-risk for a form ga2 does
+  not use (tracked from R13); V60-13/14 fill/stop variants and the MOVCD R27/R28
+  completion are smaller residual gaps on top of the core fixes above.
+- **Verification infrastructure:** V60-20 (extend the differential to emit
+  flag-consuming ops and compare PSW; the current Python reference lacks
+  MUL/DIV/SHL overflow and does not model INC/DEC/SHA/SUBC/MOVT/TASI, so this is
+  a reference-model rebuild). The directed `tb_v60_flags` covers the key fixes
+  independently in the meantime.
+- **Low value for the current targets / needs descriptor+MRA plumbing:** IO-7
+  (link-game comm RAM), IO-11/IO-12 (US-set coin routing — credits still
+  register today), IO-17 (factory-EEPROM endianness), TM-1 (416 width
+  authority), TM-3 (Multi 32 per-layer tilebank), AU-11 (audio NCO ppm —
+  inaudible, the audit marks it optional).
+- **Documented decisions / accept / nano:** V60-22 (BAM offset signedness — the
+  RTL matches the NEC manual; the audit explicitly allows leaving it), TM-4
+  (pre-first-write zoom init), SP-5 (flip-timing, accepted), SP-6 (bank mirror
+  — nothing needed for shipping sets), SP-7 (line-fetch deadline regression),
+  PF-6 (surface the overrun telemetry in a debug mode), PF-9 (needs a
+  scandoubler module), CG-1 (future-master palette pend-copy SVA assertion).
+
+## Round 22 addendum — video width/tilebank pass and a TM-4 reversal
+
+A third implementation pass closed the two remaining video-side findings that
+are provable without a fitted netlist, and reverted one earlier change that
+turned out to cost more than it gave.
+
+Implemented and verified:
+
+- **TM-3 — Multi 32 per-layer external tilebank.** `s32_tilemap` now takes
+  `is_multi32` + an 8-bit `ext_tilebank`, and the tile code high bits come from
+  a per-layer selector `tilebank_of(lay)`: on Multi 32 it takes the 2-bit field
+  `ext_tilebank[2*lay +: 2]` (MAME `m_system32_tilebank_external` per-layer
+  slice); on System 32 it collapses to the original
+  `{ext_tilebank[0], r1ff00[10]}`, so the shipping-profile behaviour is
+  bit-identical. Verified: `tb_tilemap_vram` (pixel/address exactness) and
+  `tb_tile_backpressure` both PASS with `is_multi32=0`.
+- **TM-1 — screen-width authority.** The CRT/tilemap width select `mode_416`
+  now follows VRAM `$1FF00` bit 15 (MAME `screen_update_system32` /
+  `multi32_update` `set_visible_area`: `52*8` = 416 vs `40*8` = 320), instead of
+  the sprite-side control reg 6 bit 0. The sprite engine keeps its own width bit
+  (`ctl_latched[6][0]`) for sprite clipping — exactly MAME's split. Both sources
+  power up 416 (`$1FF00` = 0x8000, sprite default 1), so the reset default is
+  unchanged; games program both consistently, so no current-target behaviour
+  changes, but the CRT side is now driven by the register MAME treats as
+  authoritative.
+- **IO-7 — s32comm share RAM.** 0x800000-0x800fff now behaves as byte-wide RAM
+  (D[7:0] mapped; MAME `map(0x800000,0x800fff).rw(share_r,share_w).umask16(0x00ff)`)
+  instead of returning open-bus 0xFFFF. The regular-PCB machine config
+  instantiates `S32COMM` (`segas32_regular_state::device_add_mconfig`), so the
+  share window is real RAM even standalone — a game that writes then reads it
+  back must see its own data. The cn/fg link registers at 0x801000/2 and the
+  rest of the 0x80xxxx page still read link-not-connected (0xFFFF). Verified two
+  ways: `tb_core_map_decode` confirms the 0x800000-0x800fff share window vs the
+  0x801000 register boundary, and `tb_core_boot` now writes 0x5A to 0x800000
+  through the real V60 bus and reads `comm[0]=5a` back (`CORE BOOT PASS`).
+- **V60-15 — down-direction character search (SCHC*D / SKPC*D).** The down form
+  previously reused the up start (op1, count len1) and then *decremented*,
+  walking below the buffer — the same corruption class as the MOVCD bug fixed in
+  V60-14. It now scans descending from MAME's start index (byte: op1+len1 down to
+  op1, len1+1 reads with the first one-past-the-buffer, per `opSEARCHDB`; half:
+  op1+(len1-1)*2 down to op1, len1 reads, per `opSEARCHDH`), reports the element
+  index in R27 and its address in R28, and follows MAME's post-loop Z test
+  (i==len1): Z set only when a byte down-search matches its one-past-the-top
+  read, cleared when the scan falls off to i=-1. Every change is gated on
+  `subop[0]`, so the up-search / MOVC / CMPC / MOVCD paths (which ga2 exercises)
+  are byte-identical. New tier `verif/v60/tb_v60_schd.sv` checks byte/half,
+  SCHC/SKPC, mid-range hit, exhaustion, and the one-past-the-top Z=1 quirk;
+  `V60 SCHD PASS` and the full V60 differential/directed tiers still pass.
+
+Reverted:
+
+- **TM-4 — pre-first-write zoom init (backed out).** R20 set the power-up zoom
+  shadow to 0x0000 (to mirror MAME's zeroed videoram, where zoom 0 hits the
+  0x80 dstep clamp = 4x). In isolation that is defensible, but it is invisible
+  in practice (the display is blanked before the game programs the registers)
+  and it broke `tb_tilemap_vram`, which renders NBG0 relying on the neutral
+  0x0200 (1.0) power-up default. Given zero visible benefit against a real test
+  regression, both init sites (`s32_vram` and `s32_core`) are restored to the
+  neutral 0x0200 default. The audit had already rated TM-4 optional.
+
+Running total: roughly **51 of 72** R20 findings implemented; the video
+subsystem's provable-without-a-fit findings (TM-1/2/3/5), the s32comm share RAM
+(IO-7, sim-verified), US-set coin routing (IO-11/12, additive, hardware
+verification pending), and the V60 down-direction search (V60-15, sim-verified)
+are now closed.
+
+### Honest status of everything still open
+
+IO-7 was the last finding both implementable and *verifiable in simulation*
+this session; IO-11/12 is implemented but only hardware-verifiable. Everything
+remaining has a concrete blocker — a paused build, a reference file we do not
+have, or hardware we cannot run — not a lack of effort:
+
+- **Blocked on the paused Quartus build (4):** CG-2, CG-3 — the Holosseum
+  palette defect is proven to live below RTL in the dual-clock `altsyncram`
+  primitive, which behavioural simulation does not model; both need a fitted /
+  gate-level netlist. **PF-6** (surface the line-fetch overrun telemetry) needs
+  a MiSTer OSD/status surface that only exists post-fit, and **AU-11** (audio
+  NCO 14-58 ppm) is a PLL-synthesis limit — the MiSTer clock tree cannot hit the
+  exact arcade crystal, the error is ~100x below the audible pitch JND, and it
+  only changes with PLL coefficients applied at build time. CG-2/CG-3 remain the
+  single highest-value next step for the original palette complaint.
+- **Blocked on a missing MAME reference (5):** AU-3/4/5/6/10 — the MultiPCM
+  envelope/LFO/TL/cross-route work derives from `gew_pcm_device` in `gew.cpp`
+  (the MultiPCM base class), which is absent from the pinned MAME subset
+  (`multipcm.cpp` is only the 185-line derived shell). Guessing the envelope/LFO
+  math would be an unverifiable change; also Multi 32-only.
+- **IO-11/IO-12 — US-set coin routing (implemented additively, unverified on
+  hardware).** MAME wires the 4-player i8255 port C to EXTRA3
+  (`ppi.in_pc_callback().set_ioport("EXTRA3")`); the US sets (ga2u, spidmanu,
+  arabfgtu) `PORT_MODIFY` EXTRA3 so bit 3 (0x08) = COIN1 and bit 2 (0x04) =
+  COIN2, while base sets leave those bits `IPT_UNUSED`. Per an explicit user
+  decision, the top-level `ga2_ppi_pc` now additively drives EXTRA3 bits 3/2
+  from the same P1/P2 coin buttons that feed SERVICE12, leaving Start3/Start4
+  (bits 0/1) intact. Safe for every non-US set (they ignore those bits);
+  Verible parses the top-level clean. It stays **unverified** until a US ROM
+  runs on a build (the top-level wrapper is not in the ModelSim core
+  regression), and carries a documented double-count caveat on US sets (the
+  press also pulses SERVICE12 COIN3/4) that only a board-descriptor US flag
+  would remove. The service-credit / PCB Push SW1/SW2 mapping remains a smaller
+  separate gap.
+- **Needs non-target ROMs + a MAME comparison to verify (1):** IO-17 — the
+  index-2 factory EEPROM images are *likely* byte-swapped vs MAME's big-endian
+  region, affecting jpark/radm/radr/scross/titlef/harddunk preloads (never
+  holo/spidman/ga2). The direction is unconfirmed and cannot be verified without
+  those factory images and MAME's expected NVRAM, so changing the loader blind
+  would risk corrupting a currently-working preload path.
+- **Deferred by explicit user decision (feasible, not blocked):** the V60 string
+  fill/stop variants (CMPCF 0x01, CMPCS 0x02, MOVCFU 0x0a, MOVCFD 0x0b,
+  MOVCSU 0x0c) and the exact MOVCD R27/R28 completion. These are directed-testable
+  with the same methodology as V60-13/14/15, but implementing them means adding
+  memory-writing fill phases, CY-flag handling and R26 into the shared string FSM
+  that ga2 relies on (up-search/MOVC/CMPC) — real regression risk on a working
+  critical path for instructions no shipping target uses. Asked, and the decision
+  was to stop CPU-FSM work at V60-15 and leave these documented rather than churn
+  the FSM. MAME reference: `opCMPSTRB/opMOVSTRUB(bFill,bStop)` in `op7a.hxx`.
+- **Documented-accept / done (rest):** V60-22 (BAM signedness — matches the NEC
+  manual, audit allows leaving), SP-5 (flip timing, accepted), SP-6 (bank mirror,
+  nothing needed for shipping sets), SP-7 (line-fetch deadline telemetry present),
+  PF-9 (needs a scandoubler module), CG-1 (already implemented as the SVA
+  assertion).
+
+## Round 23 addendum — full-core audit pass (sim-only)
+
+A whole-core review (V60 / audio / video / core-integration / V25 reviewers)
+run under an explicit "fix/improve where possible, no RBF build" directive.
+Findings were few and low-severity because the shipping System-32 path was
+already MAME-accurate; all fixes below are verified in ModelSim only.
+
+Implemented:
+- **V60 SHA left-shift overflow (Finding 1 + count==width sub-fix).** `sha_left_ov`
+  now masks exactly `count` top bits per MAME `SHIFTLEFT_OV` (op12.hxx) instead of
+  `count+1`, and the guard is `c > w` (not `>= w`) so `count == width` folds into
+  the exact mask (matching MAME's `count==bitsize` case, e.g. `SHA.B #8,-1 ⇒ OV=0`);
+  only the genuinely-UB `count > width` stays in the simplified branch. The 50-seed
+  differential never modelled SHA's OV, so a new directed tier **`t07_v60_shaov`**
+  (18 MAME-exact vectors incl. the cited `SHA.B #1,0x40 ⇒ OV=0`) locks it down.
+- **V60 MULX/DIVX overflow.** Removed the spurious OV-clear on MULX/S_DIVX
+  completion — MAME sets only S/Z and leaves OV unchanged.
+- **Audio AU-N1 — Multi-32 MultiPCM cross-route.** On Multi 32 the MultiPCM now
+  cross-routes exactly like the YM (both `add_route(1,"sleft")/add_route(0,"sright")`
+  in segas32.cpp): system L takes each device's R channel and vice-versa. Fixed the
+  mixer *and* the stale `tb_audio_mix` expectation that had crossed only the YM.
+  (Multi-32-only; dead in the SYSTEM32_ONLY shipping build.)
+- **Multi-32 io1 wiring (F1a/F1b).** io1 EEPROM/NVRAM `in_pf` and screen-B
+  `display_en` now use io1's own signals (were reading constant 0xff / screen A).
+  Multi-32-only; zero effect on the shipping build.
+- **Dead-code / resource hygiene.** Removed the write-only 64 KiB `prg[]` array in
+  the s32_v25 mailbox HLE (never read); the never-instantiated
+  `s32_v25_program_rom` module; the dead `sx` reg and the vestigial `mode_416`
+  input port in `s32_sprite` (the sprite latches ctl6 internally — B5's design
+  evolved past the port; core + two sprite testbenches updated).
+- **PF-1 completion (audit "F2").** Dropped the inert **"HQ2x"** option from the
+  Scandoubler Fx menu (there is no hq2x scaler instance) and simplified the
+  `scanline_level` map to `None=0, CRT 25/50/75 = 1/2/3`. (Top-level parses clean;
+  its behavioural check is the Quartus build, deferred with the rest of the RBF.)
+- **New coverage:** `t07_v60_incdecmem` — halfword INC/DEC **memory** RMW (15
+  checks incl. the discriminating `dec.h 0x0701→0x0700 ⇒ Z=0`), added while ruling
+  out a spidman camera-timer hypothesis; proves the halfword memory-RMW Z flag is
+  width-correct (relevant to `dec.h 34[R25]`, spidman's page-advance timer).
+
+Left as documented notes (not implemented): none outstanding from this pass — the
+above closes the Round 23 findings. Pre-existing deferrals (V60 fill/stop string
+variants, IO-17, PF-9) are unchanged.

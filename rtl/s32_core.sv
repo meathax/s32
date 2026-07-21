@@ -128,7 +128,10 @@ module s32_core #(
     output     [31:0] debug_sprite_state,
     output     [63:0] debug_sprite_counts,
     output            debug_sprite_rendering,
-    output     [47:0] debug_sprram_cpu
+    output     [47:0] debug_sprram_cpu,
+    output     [47:0] debug_pal_rd,    // clk_sys palette shadow {0x410,0x200,0x000}
+    output     [23:0] debug_fb_underrun,// PF-6: {sticky?0xff:0, underrun_count[15:0]}
+    output     [15:0] debug_cam         // spidman world-camera {page, display_lo}
 );
 
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
@@ -160,7 +163,7 @@ wire [7:0]  irq_vector;
 wire [31:0] v60_debug_pc;
 wire        v60_debug_halted;
 
-s32_v60 #(.START_PC(32'h00FFFFF0)) v60 (
+s32_v60 #(.START_PC(32'hFFFFFFF0)) v60 (   // MAME reset PC (audit R20 V60-21)
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr), .bus_size(c_size),
     .bus_wdata(c_wdata), .bus_rdata(c_rdata), .bus_ack(c_ack),
@@ -249,11 +252,27 @@ s32_big_dpram #(
 always @(posedge clk_sys)
     pr_ack <= pr_req;
 
+// Venom/Scorpion trigger diagnostic (spidman): snoop the game's world-camera
+// variable at 0x208032 (work-RAM word 0x4019).  Low byte 0x208032 sources the
+// display scroll (correct on hardware); high byte 0x208033 is the page counter
+// that scripted events gate on.  Capturing the last-written bytes lets a debug
+// view show whether the core's page runs ahead of the display (the suspected
+// low->high carry divergence).  Snoop only; no effect on operation.
+reg [15:0] dbg_cam;
+initial dbg_cam = 16'h0000;
+always @(posedge clk_sys)
+    if (m_req && m_we && sel_wram && wram_a == 'h4019) begin
+        if (m_be[0]) dbg_cam[7:0]  <= m_wdata[7:0];   // 0x208032 (display low)
+        if (m_be[1]) dbg_cam[15:8] <= m_wdata[15:8];  // 0x208033 (page/high)
+    end
+assign debug_cam = dbg_cam;
+
 // ---------------------------------------------------------------------------
 // video subsystem
 // ---------------------------------------------------------------------------
 wire [15:0] vram_cpu_q, vram_vid_q;
 wire        io0_cnt1, io0_cnt2;
+wire        io1_cnt1;              // Multi 32 screen-B display enable (io1 CNT1)
 wire [15:0] vid_vaddr;
 wire [15:0] r1ff00, r1ff02, r1ff04, r1ff06, r1ff5c, r1ff5e;
 wire [15:0] r1ff88, r1ff8a, r1ff8c, r1ff8e;
@@ -349,7 +368,7 @@ wire [7:0]  io0_ph;
 // Snapshot of CPU-domain video controls used for one complete rendered line.
 // These registers are captured at the line-start boundary below.
 reg        tm_mode_416;
-reg  [1:0] tm_ext_tilebank;
+reg  [7:0] tm_ext_tilebank;
 reg [15:0] tm_r1ff00, tm_r1ff02, tm_r1ff04, tm_r1ff06;
 reg [15:0] tm_r1ff5c, tm_r1ff5e, tm_r1ff88, tm_r1ff8a, tm_r1ff8c, tm_r1ff8e;
 reg [15:0] tm_scrollfracx [0:1], tm_scrollfracy [0:1];
@@ -363,7 +382,7 @@ integer tm_init_i;
 integer tm_cap_i;
 initial begin
     tm_mode_416 = 1'b1;
-    tm_ext_tilebank = 2'b00;
+    tm_ext_tilebank = 8'b0;
     tm_r1ff00 = 16'h8000;
     tm_r1ff02 = 0; tm_r1ff04 = 0; tm_r1ff06 = 0;
     tm_r1ff5c = 0; tm_r1ff5e = 0;
@@ -376,7 +395,7 @@ initial begin
     for (tm_init_i = 0; tm_init_i < 8; tm_init_i = tm_init_i + 1) tm_pages[tm_init_i] = 0;
     for (tm_init_i = 0; tm_init_i < 2; tm_init_i = tm_init_i + 1) begin
         tm_scrollfracx[tm_init_i] = 0; tm_scrollfracy[tm_init_i] = 0;
-        tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200;
+        tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200; // neutral 1.0 zoom default
     end
     for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) tm_clips[tm_init_i] = 0;
 end
@@ -388,6 +407,12 @@ end
 // edges, so the scheduler performs the required event qualification.
 wire tm_line_boundary = ce_pix && (hcnt == 9'd0);
 wire [8:0] tm_next_line = (vcnt == 9'd261) ? 9'd0 : vcnt + 1'd1;
+// Only kick the renderer for the visible lines 0-223 (tm_next_line ranges over
+// 0..261; vcnt 261 pre-renders line 0).  Rendering the 38 vblank lines filled
+// never-displayed parity banks and burned ~15% of frame SDRAM p1 bandwidth the
+// V60/V25/sprite clients contend for (audit R20 TM-5).  The backdrop snapshot
+// below keeps the ungated boundary so per-line line-color still updates.
+wire tm_render_kick = tm_line_boundary && (tm_next_line <= 9'd223);
 // Holosseum is mounted with ORIENTATION_FLIP_Y.  Keep timing and line-buffer
 // parity in visible-screen order, but render the vertically mirrored source
 // scanline into that bank.
@@ -395,7 +420,7 @@ wire [8:0] tm_source_line = (board.flip_y && render_line <= 9'd223)
                           ? (9'd223 - render_line) : render_line;
 s32_tile_line_scheduler tile_line_scheduler (
     .clk(clk_ram), .rst(rst),
-    .line_kick(tm_line_boundary), .next_line(tm_next_line),
+    .line_kick(tm_render_kick), .next_line(tm_next_line),
     .line_done(tm_line_done), .line_start(line_start_r),
     .render_line(render_line), .lb_bank(tm_lb_bank), .busy(tm_line_busy),
     .overrun_sticky(tm_line_overrun_sticky),
@@ -417,7 +442,7 @@ always @(posedge clk_ram) begin
         // observes only this stable copy until line_done.  A missed boundary
         // cannot mutate the in-flight line, bank, or control state.
         tm_mode_416 <= mode_416_active;
-        tm_ext_tilebank <= io0_ph[1:0];
+        tm_ext_tilebank <= io0_ph;
         tm_r1ff00 <= r1ff00; tm_r1ff02 <= r1ff02;
         tm_r1ff04 <= r1ff04; tm_r1ff06 <= r1ff06;
         tm_r1ff5c <= r1ff5c; tm_r1ff5e <= r1ff5e;
@@ -447,7 +472,7 @@ wire [21:3] tile_rom_addr;
 s32_tilemap tilemap (
     .clk(clk_ram), .rst(rst),
     .line(tm_source_line), .line_start(line_start_r), .line_done(tm_line_done),
-    .mode_416(tm_mode_416), .ext_tilebank(tm_ext_tilebank), .layer_off_o(tm_layer_off),
+    .mode_416(tm_mode_416), .is_multi32(is_multi32), .ext_tilebank(tm_ext_tilebank), .layer_off_o(tm_layer_off),
     .r1ff00(tm_r1ff00), .r1ff02(tm_r1ff02), .r1ff04(tm_r1ff04), .r1ff06(tm_r1ff06),
     .r1ff5c(tm_r1ff5c), .r1ff5e(tm_r1ff5e),
     .r1ff88(tm_r1ff88), .r1ff8a(tm_r1ff8a), .r1ff8c(tm_r1ff8c), .r1ff8e(tm_r1ff8e),
@@ -496,16 +521,17 @@ s32_sprite sprite (
     .fb_wr_shadow(fb_wr_shadow), .fb_busy(fb_wr_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf), .fb_er_y(fb_er_y),
     .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf), .mode_416(mode_416)
+    .disp_buf(disp_buf)
 );
 assign sdr_p2_addr[24] = 1'b1;   // sprites region base 0x1000000
 
-// B5: 416/320 width follows sprite control reg 6 bit0 (CPU-written)
-reg mode_416_r = 1'b1;
-always @(posedge clk_sys)
-    if (m_req && m_we && sel_sprctl && m_be[0] && A[3:1] == 3'd6)
-        mode_416_r <= m_wdata[0];
-assign mode_416 = mode_416_r;
+// TM-1: CRT/tilemap screen-width authority is VRAM $1FF00 bit 15, matching
+// MAME screen_update_system32 / multi32_update, which set the visible area to
+// 52*8 (416) when that bit is set and 40*8 (320) otherwise.  The sprite engine
+// keeps its own width bit (ctl_latched[6][0]) for sprite-side clipping, exactly
+// MAME's split (games program both consistently).  $1FF00 powers up 0x8000
+// (bit 15 = 1 => 416), preserving the prior power-on default.
+assign mode_416 = r1ff00[15];
 
 // Sprite line prefetch for mixer. Hold the request and its address until the
 // DDR service acknowledges it; a one-cycle pulse was lost whenever an erase
@@ -519,6 +545,9 @@ reg [7:0] fb_rd_y_r;
 reg       fb_rd_underrun_sticky;
 reg [15:0] fb_rd_underrun_count;
 reg       fb_rd_deadline_seen;
+// PF-6: surface the sprite line-fetch overrun telemetry for an OSD debug view.
+// R = sticky "ever underran" flag, G:B = saturating underrun count.
+assign debug_fb_underrun = {fb_rd_underrun_sticky ? 8'hff : 8'h00, fb_rd_underrun_count};
 wire fb_rd_kick = ce_pix && hcnt == (mode_416_active ? 9'd420 : 9'd324);
 wire fb_rd_deadline = ce_pix && hcnt == 9'd0 && vcnt < 9'd224;
 always @(posedge clk_ram) begin
@@ -569,6 +598,7 @@ assign fb_rd_x   = hcnt;
 // nonetheless fully independent (the valuable part of B7).
 wire [15:0] fb_rd_pix_b = fb_rd_pix;
 wire [15:0] pal0_cpu_q, pal1_cpu_q;
+wire [47:0] dbg_pal0_entries;
 wire [13:0] mix0_pal_addr, mix1_pal_addr;
 wire [15:0] mix0_pal_q, mix1_pal_q;
 wire [15:0] mix0_q, mix1_q;
@@ -594,8 +624,10 @@ s32_palette pal0 (
     .cpu_we(m_req && m_we && is_pal0),
     .cpu_addr(A[15:1]), .cpu_wdata(m_wdata), .cpu_be(m_be),
     .cpu_rdata(pal0_cpu_q), .mixer_r4e(mix0_r4e),
-    .mix_addr(mix0_pal_addr), .mix_data(mix0_pal_q)
+    .mix_addr(mix0_pal_addr), .mix_data(mix0_pal_q),
+    .dbg_entries(dbg_pal0_entries)
 );
+assign debug_pal_rd = dbg_pal0_entries;
 
 s32_mixer mix0 (
     .clk(clk_ram), .rst(rst),
@@ -603,7 +635,7 @@ s32_mixer mix0 (
     .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
     .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-    .display_en(io0_cnt1), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
+    .display_en(io0_cnt1), .flip_y(board.flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
     .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -633,7 +665,8 @@ generate
             .cpu_we(m_req && m_we && is_pal1),
             .cpu_addr(A[15:1]), .cpu_wdata(m_wdata), .cpu_be(m_be),
             .cpu_rdata(pal1_cpu_q), .mixer_r4e(mix1_r4e),
-            .mix_addr(mix1_pal_addr), .mix_data(mix1_pal_q)
+            .mix_addr(mix1_pal_addr), .mix_data(mix1_pal_q),
+            .dbg_entries()   // Multi 32 screen B not used by the holo diagnostic
         );
         s32_mixer mix1 (
             .clk(clk_ram), .rst(rst),
@@ -641,7 +674,7 @@ generate
             .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
             .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-            .display_en(io0_cnt1), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
+            .display_en(io1_cnt1), .flip_y(board.flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
             .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
             .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
             .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -656,7 +689,7 @@ endgenerate
 // sound subsystem
 // ---------------------------------------------------------------------------
 wire        snd_doorbell, snd_to_v60;
-wire [7:0]  sh_rdata;
+wire [15:0] sh_rdata;
 wire [23:0] zrom_ba;
 wire [21:0] mpcm_ba;
 
@@ -665,21 +698,55 @@ s32_soundsys #(.SYSTEM32_ONLY(SYSTEM32_ONLY)) sound (
     .rst(rst),
     .z80_reset(~io0_cnt2),
     .is_multi32(is_multi32),
-    .sh_cs(m_req && sel_shared && m_be[0]),
-    .sh_we(m_we && sel_shared && m_be[0]),
-    .sh_addr(A[13:1]), .sh_wdata(m_wdata[7:0]), .sh_rdata(sh_rdata),
+    .sh_cs(m_req && sel_shared),
+    .sh_we(m_we && sel_shared),
+    .sh_addr(A[12:1]), .sh_be(m_be), .sh_wdata(m_wdata), .sh_rdata(sh_rdata),
     .v60_doorbell(snd_doorbell),
     .irq_to_v60(snd_to_v60),
     .zrom_req(sdr_p3_req), .zrom_addr(zrom_ba),
     .zrom_data(sdr_p3_dout), .zrom_ack(sdr_p3_ack),
     .mpcm_req(sdr_p4_req), .mpcm_addr(mpcm_ba),
-    .mpcm_data(sdr_p4_dout[7:0]), .mpcm_ack(sdr_p4_ack),
+    // Select the addressed byte from the 16-bit SDRAM word.  The MultiPCM ROM
+    // bus is byte-wide; the old code always took the even lane, corrupting
+    // every odd sample/descriptor byte (audit R20 AU-2).  mpcm_ba is held
+    // stable by the MultiPCM engine until its req/ack completes.
+    .mpcm_data(mpcm_ba[0] ? sdr_p4_dout[15:8] : sdr_p4_dout[7:0]),
+    .mpcm_ack(sdr_p4_ack),
     .audio_l(audio_l), .audio_r(audio_r)
 );
 // B1: SDRAM address hookup for sound ports — add region bases so fetches
 // land in the soundcpu / multipcm regions instead of address 0.
 assign sdr_p3_addr = SDR_SOUNDCPU_BASE[24:1] + {1'b0, zrom_ba[23:1]};
 assign sdr_p4_addr = SDR_MULTIPCM_BASE[24:1] + {3'b000, mpcm_ba[21:1]};
+
+// ---------------------------------------------------------------------------
+// IO-7: s32comm share RAM (0x800000-0x800fff).  The regular-PCB machine config
+// instantiates S32COMM (MAME segas32_regular_state::device_add_mconfig), so
+// this window behaves as byte-wide RAM even with no link partner: a game that
+// writes then reads the share area must read its own data back, not open bus.
+// Only D[7:0] is mapped (MAME maps 0x800000-0x800fff share_r/w with
+// umask16 0x00ff); the cn/fg link registers at 0x801000/2 and the rest of the
+// 0x80xxxx page read link-not-connected (0xFFFF, handled in the read mux).
+// ---------------------------------------------------------------------------
+wire       sel_comm_ram = sel_comm && (A[15:12] == 4'h0);
+reg [7:0]  comm_ram [0:2047];
+reg [7:0]  comm_q;
+integer    comm_init_i;
+initial begin
+    for (comm_init_i = 0; comm_init_i < 2048; comm_init_i = comm_init_i + 1)
+        comm_ram[comm_init_i] = 8'h00;
+    comm_q = 8'h00;
+end
+always @(posedge clk_sys) begin
+    comm_q <= comm_ram[A[11:1]];
+    if (m_req && m_we && sel_comm_ram && m_be[0])
+        comm_ram[A[11:1]] <= m_wdata[7:0];
+end
+`ifdef SIMULATION
+function automatic [7:0] comm_peek(input [10:0] addr);
+    comm_peek = comm_ram[addr];
+endfunction
+`endif
 
 // ---------------------------------------------------------------------------
 // I/O chips + EEPROM
@@ -695,7 +762,9 @@ s32_io5296 io0 (
     .in_pa(in_p1a), .in_pb(in_p2a),
     .in_pc(in_portc),                          // B2: portc no longer carries EEPROM
     .in_pe(in_svc12),
-    .in_pf({eep_do, in_svc34[6:0]}),           // B2/B3: EEPROM do_read on SERVICE34 bit7
+    // System 32 EEPROM DO on SERVICE34_A bit 7; Multi 32 reads it on io1 instead
+    // (see io1 below), so don't force eep_do onto io0 bit 7 in Multi 32.
+    .in_pf(is_multi32 ? in_svc34 : {eep_do, in_svc34[6:0]}),
     .out_pd(io0_pd), .out_pg(io0_pg), .out_ph(io0_ph),
     .cnt0(), .cnt1(io0_cnt1), .cnt2(io0_cnt2)
 );
@@ -706,9 +775,13 @@ s32_io5296 io1 (
     .cs(m_req && sel_io1 && m_be[0]), .we(m_we),
     .addr(A[5:1]), .wdata(m_wdata[7:0]), .rdata(io1_q),
     .in_pa(in_p1b), .in_pb(in_p2b), .in_pc(in_portc_b),
-    .in_pe(in_svc12_b), .in_pf(in_svc34_b),
+    // Multi 32 EEPROM DO is read on the SECOND I/O chip's SERVICE34_B bit 7
+    // (MAME io_chip_1.in_pf = SERVICE34_B, do_read on bit 7); previously io1 got
+    // constant 0xff there, so Multi 32 NVRAM boot never converged (audit R23-F1).
+    .in_pe(in_svc12_b), .in_pf(is_multi32 ? {eep_do, in_svc34_b[6:0]} : in_svc34_b),
     .out_pd(), .out_pg(), .out_ph(io1_ph),
-    .cnt0(), .cnt1(), .cnt2()
+    // cnt1 = screen-B display enable (MAME io_chip_1 out_cnt1 -> display_enable_w<1>).
+    .cnt0(), .cnt1(io1_cnt1), .cnt2()
 );
 
 // EEPROM wiring: S32 = io0 port D bits {7=DI,5=CS,6=CLK}; M32 = io1 port H
@@ -739,7 +812,10 @@ generate
         end
     end
     else begin : g_extended_analog
-        reg [2:0] analog_bank;
+        // Power up at bank 0 to match MAME device_start (m_analog_bank = 0);
+        // System 32 analog games never write 0xC00060 so it would otherwise
+        // stay X in simulation and undefined at cold boot (audit R20 IO-15).
+        reg [2:0] analog_bank = 3'd0;
         s32_msm6253 adc (
             .clk(clk_sys),
             .cs(m_req && sel_adc && m_be[0]), // 0xC00050-57
@@ -825,7 +901,7 @@ generate
             .clk(clk_sys), .rst(rst), .enable(board.prot_sel == PROT_BRIVAL),
             .cpu_wr(m_req && m_we && sel_prot_a),
             .cpu_addr(A), .cpu_wdata(m_wdata),
-            .cpu_rd(m_req && !m_we && sel_wram),
+            .cpu_rd(m_req && !m_we && sel_wram), .cpu_be(m_be),
             .trap_active(br_trap), .trap_data(br_trap_q),
             .pram_we(), .pram_addr(), .pram_wdata(),
             .rom_req(), .rom_addr(), .rom_data(sdr_p0_dout), .rom_ack(1'b0)
@@ -850,7 +926,10 @@ generate
         s32_dualpcb dual (
             .clk(clk_sys), .enable(board.dual_pcb),
             .cs_ram(m_req && sel_dual && !A[15]),
-            .cs_id(m_req && sel_dual && A[15]),
+            // MAME serves the dual-PCB identity only at 0x818000-0x818003; the
+            // rest of the 0x818000-0x81FFFF window reads open-bus (audit R20
+            // IO-10a).  A[14:2]==0 selects the low id words.
+            .cs_id(m_req && sel_dual && A[15] && A[14:2] == 13'd0),
             .we(m_we), .addr(A[11:1]), .wdata(m_wdata), .rdata(dual_q)
         );
     end
@@ -960,9 +1039,18 @@ reg        ack_r;
 assign m_rdata = rmux;
 assign m_ack   = ack_r;
 
-// 16-bit LFSR noise for 0xD80000
-reg [15:0] lfsr = 16'hACE1;
-always @(posedge clk_sys) if (ce_cpu) lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+// Random source for 0xD80000.  MAME returns machine().rand() (full-width,
+// uncorrelated).  A 32-bit xorshift advanced every clk_sys — not just on the
+// CPU clock-enable — plus a per-read fold decorrelates reads only a few CPU
+// cycles apart, which a 1-bit-per-CPU-clock LFSR did not (audit R20 IO-13).
+reg [31:0] rng = 32'h1357_9BDF;
+always @(posedge clk_sys) begin
+    logic [31:0] rx;
+    rx  = rng ^ (rng << 13);
+    rx  = rx  ^ (rx  >> 17);
+    rng <= rx ^ (rx << 5);
+end
+wire [15:0] rng_read = rng[31:16] ^ rng[15:0];
 
 reg ack_d;
 reg rd_wait;   // BRAM/register reads: one dead cycle so the registered q
@@ -992,11 +1080,21 @@ always @(posedge clk_sys) begin
                 is_mix0:     rmux <= mix0_q;
                 is_pal1:     rmux <= pal1_cpu_q;   // B7: Multi 32 screen B
                 is_mix1:     rmux <= mix1_q;
-                sel_shared:  rmux <= {8'hff, sh_rdata};
-                sel_comm:    rmux <= 16'hffff;      // s32comm absent: link not connected
-                sel_dual:    rmux <= board.dual_pcb ? dual_q : 16'hffff;
+                sel_shared:  rmux <= sh_rdata;
+                // IO-7: share RAM reads its own byte back (D[15:8] open bus);
+                // cn/fg link registers + rest of the page read not-connected.
+                sel_comm:    rmux <= sel_comm_ram ? {8'hff, comm_q} : 16'hffff;
+                // Open-bus outside the comm RAM (A[15]=0) and the 4-byte id
+                // window (A[15] && A[14:2]==0); the module holds stale rdata
+                // when neither chip-select fires (audit R20 IO-10a).
+                sel_dual:    rmux <= (board.dual_pcb &&
+                                      (!A[15] || A[14:2] == 13'd0)) ? dual_q
+                                                                    : 16'hffff;
                 sel_v25:     if (GAME_ONLY)
-                                 rmux <= {8'hff, v25_q};
+                                 // Open-bus when this board has no V25 (holo,
+                                 // spidman): MAME leaves 0xA00000 unmapped
+                                 // (audit R20 PF-7).
+                                 rmux <= board.has_v25 ? {8'hff, v25_q} : 16'hffff;
                              else
                                  rmux <= board.has_v25 ? {8'hff, v25_q} :
                                          board.has_dsp_hle ? dsp_q : 16'hffff;
@@ -1006,11 +1104,13 @@ always @(posedge clk_sys) begin
                 sel_ioex:    if (GAME_ONLY)
                                  rmux <= sel_ppi ? {8'hff, ppi_q} : 16'hffff;
                              else
-                                 rmux <= sel_adc   ? {8'hff, 7'h7f, adc_bit} :
+                                 // MSM6253 serial output is wired to D7, not
+                                 // D0 (MAME msm6253 d7_r); audit R20 IO-3.
+                                 rmux <= sel_adc   ? {8'hff, adc_bit, 7'h7f} :
                                          sel_track ? {8'hff, trk_q[A[4]?2:(A[3]?1:0)]} :
                                          sel_ppi   ? {8'hff, ppi_q} : 16'hffff;
                 sel_intc:    rmux <= {8'hff, intc_q};
-                sel_rand:    rmux <= lfsr;
+                sel_rand:    rmux <= rng_read;
                 default:     rmux <= 16'hffff;
             endcase
         end

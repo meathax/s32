@@ -86,6 +86,24 @@ module tb_core_map_decode;
         expect_decode(24'ha00ffe, 0,0,0,0,0,1);
         expect_decode(24'ha01000, 0,0,0,0,0,0);
 
+        // IO-7: s32comm share RAM occupies 0x800000-0x800fff only; the cn/fg
+        // link registers at 0x801000+ are in the comm page but not share RAM.
+        probe = 24'h800000; #1;
+        if (core.sel_comm !== 1'b1 || core.sel_comm_ram !== 1'b1) begin
+            $display("FAIL comm share @800000 comm=%b ram=%b", core.sel_comm, core.sel_comm_ram);
+            errors = errors + 1;
+        end
+        probe = 24'h800ffe; #1;
+        if (core.sel_comm_ram !== 1'b1) begin
+            $display("FAIL comm share @800ffe ram=%b", core.sel_comm_ram);
+            errors = errors + 1;
+        end
+        probe = 24'h801000; #1;   // cn register: comm page, not share RAM
+        if (core.sel_comm !== 1'b1 || core.sel_comm_ram !== 1'b0) begin
+            $display("FAIL comm reg @801000 comm=%b ram=%b", core.sel_comm, core.sel_comm_ram);
+            errors = errors + 1;
+        end
+
         if (errors == 0) $display("CORE MAP DECODE PASS");
         else $fatal(1, "CORE MAP DECODE FAIL (%0d errors)", errors);
         $finish;

@@ -25,7 +25,8 @@ module s32_tilemap (
     input             line_start,   // pulse: begin rendering `line`
     output reg        line_done,
     input             mode_416,
-    input       [1:0] ext_tilebank, // 315-5296 port H bit0 (bit1 unused)
+    input             is_multi32,    // Multi 32: per-layer external tilebank
+    input       [7:0] ext_tilebank, // 315-5296 port H (System 32 uses bit 0)
 
     // video registers (from s32_vram)
     input      [15:0] r1ff00, r1ff02, r1ff04, r1ff06, r1ff5c, r1ff5e,
@@ -69,7 +70,14 @@ wire [5:0] layer_off = { r1ff02[5] | r1ff8e[5],                // BITMAP
                          r1ff02[4] | r1ff8e[0] };              // TEXT
 assign layer_off_o = layer_off;
 
-wire [1:0] tilebank = {ext_tilebank[0], r1ff00[10]};
+// Multi 32 selects a 2-bit external tilebank per layer from the full port-H
+// byte ((external >> 2*bgnum) & 3), with no $1FF00 bit 10; System 32 keeps the
+// single-bit external + $1FF00[10] form (audit R20 TM-3).  Computed at the NBG
+// tile fetch (T_PIX) where `lay` (0..3) is valid — the only consumer.
+function automatic [1:0] tilebank_of(input [2:0] l);
+    tilebank_of = is_multi32 ? (2'b11 & (ext_tilebank >> {l[1:0], 1'b0}))
+                             : {ext_tilebank[0], r1ff00[10]};
+endfunction
 
 // rendering FSM: iterate layers, per layer iterate x
 typedef enum logic [4:0] {
@@ -343,7 +351,7 @@ always @(posedge clk) begin
             logic [14:0] code;
             logic [3:0]  trow;
             logic [8:0] eff_y;
-            code = {tilebank, name[12:0]};
+            code = {tilebank_of(lay), name[12:0]};
             eff_y = use_rowsel ? (scrolly[lay][8:0]+rowselect_y) : srcy;
             trow = eff_y[3:0] ^ {4{name[15]}};
             tile_addr <= {code, trow};   // 15+4 = 19 bits of 8-byte rows

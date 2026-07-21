@@ -64,12 +64,20 @@ initial begin
             errors = errors + 1;
         end
     end
-    if (dut.pending !== 5'd0 || irq_n !== 1'b1 ||
+    // audit R20 IO-6: reset now leaves all five sources pending (MAME memsets
+    // the control file to 0xff, so the pending byte = 0xff), but ctl[6]=0xff
+    // masks them all, so irq_n stays high and no IRQ is delivered.
+    if (dut.pending !== 5'h1f || irq_n !== 1'b1 ||
         rdata !== 8'hff || z80_doorbell !== 1'b0) begin
         $display("FAIL intc reset outputs pending=%02x irq_n=%b rdata=%02x doorbell=%b",
                  dut.pending, irq_n, rdata, z80_doorbell);
         errors = errors + 1;
     end
+
+    // Acknowledge the reset-pending sources (byte 7, AND-mask 0) so the
+    // directed source/timer cases below start from a clean pending state.
+    ctl_write(3'd3, 2'b10, 16'h0000);
+    @(posedge clk); #1;
 
     // Source 0 vector = 5; mask byte FE leaves only source 0 unmasked.
     ctl_write(3'd0, 2'b01, 16'h0005);

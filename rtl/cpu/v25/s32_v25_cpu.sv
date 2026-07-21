@@ -391,53 +391,10 @@ end
 
 endmodule
 
-// Mixed-width program memory: loader byte port + CPU word port.
-module s32_v25_program_rom (
-    input  wire        load_clock,
-    input  wire        load_wr,
-    input  wire [15:0] load_addr,
-    input  wire  [7:0] load_data,
-    input  wire        cpu_clock,
-    input  wire        cpu_rden,
-    input  wire [14:0] cpu_addr,
-    output wire [15:0] cpu_q
-);
-`ifdef ALTERA_RESERVED_QIS
-altsyncram rom (
-    .clock0(load_clock), .address_a(load_addr), .data_a(load_data),
-    .wren_a(load_wr), .rden_a(1'b0), .q_a(),
-    .clock1(cpu_clock), .address_b(cpu_addr), .data_b(16'h0000),
-    .wren_b(1'b0), .rden_b(cpu_rden), .q_b(cpu_q),
-    .aclr0(1'b0), .aclr1(1'b0), .addressstall_a(1'b0),
-    .addressstall_b(1'b0), .byteena_a(1'b1), .byteena_b(1'b1),
-    .clocken0(1'b1), .clocken1(1'b1), .clocken2(1'b1),
-    .clocken3(1'b1), .eccstatus()
-);
-defparam
-    rom.operation_mode = "DUAL_PORT",
-    rom.intended_device_family = "Cyclone V",
-    rom.lpm_type = "altsyncram",
-    rom.numwords_a = 65536,
-    rom.widthad_a = 16,
-    rom.width_a = 8,
-    rom.numwords_b = 32768,
-    rom.widthad_b = 15,
-    rom.width_b = 16,
-    rom.address_reg_b = "CLOCK1",
-    rom.outdata_reg_b = "UNREGISTERED",
-    rom.power_up_uninitialized = "TRUE",
-    rom.read_during_write_mode_mixed_ports = "DONT_CARE";
-`else
-reg [7:0] mem [0:65535];
-reg [15:0] cpu_q_r;
-assign cpu_q = cpu_q_r;
-always @(posedge load_clock)
-    if (load_wr) mem[load_addr] <= load_data;
-always @(posedge cpu_clock)
-    if (cpu_rden) cpu_q_r <= {mem[{cpu_addr, 1'b1}],
-                              mem[{cpu_addr, 1'b0}]};
-`endif
-endmodule
+// (audit hygiene) A mixed-width s32_v25_program_rom block-memory module used to
+// live here but was never instantiated: the real V25 core streams its program
+// from external SDRAM over rom_req/rom_addr/rom_data, and the mailbox HLE owns no
+// program store.  It was removed so it can no longer be mistaken for a live ROM.
 
 // Mixed-width true-dual-port mailbox memory.
 module s32_v25_mailbox_dpram (

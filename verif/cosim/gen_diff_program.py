@@ -61,7 +61,11 @@ def gen(seed, nops=40):
         if op in (0xa5, 0xb5):  # DIV: skip if src reg could be zero — reseed src reg
             a.imm_to_reg(rng.randint(1, M32), src)
         a.alu_rr(op, src, dst)
-    # store R0..R7 to scratch so mem path is exercised too
+    # Capture the final PSW into R7 (GETPSW, reg-direct) so the last op's flags
+    # are compared through the M7 scratch word — the harness previously observed
+    # no flags at all (audit R20 V60-20).
+    a.emit(0xF7, 0x60 | 7)
+    # store R0..R7 to scratch so mem path (and the captured PSW in R7) is checked
     for i in range(8):
         a.st_abs(i, 0x8000 + i * 4)
     a.halt()

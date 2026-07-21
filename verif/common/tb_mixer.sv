@@ -64,6 +64,7 @@ s32_mixer mix (
     .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_be(reg_be),
     .reg_rdata(), .reg_raddr(6'h0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1), .display_en(1'b1),
+    .flip_y(1'b0),
     .layer_off(6'b000000), .bg_ctrl(bg_ctrl),
     .px_text(px_text), .px_nbg0(px_nbg0), .px_nbg1(px_nbg1),
     .px_nbg2(px_nbg2), .px_nbg3(px_nbg3), .px_bmp(px_bmp),

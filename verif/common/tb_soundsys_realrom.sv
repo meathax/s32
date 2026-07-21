@@ -58,7 +58,7 @@ module tb_soundsys_realrom;
     s32_soundsys #(.SYSTEM32_ONLY(1'b1)) dut (
         .clk(clk), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm),
         .rst(rst), .z80_reset(z80_reset), .is_multi32(1'b0),
-        .sh_cs(1'b0), .sh_we(1'b0), .sh_addr(13'd0), .sh_wdata(8'd0),
+        .sh_cs(1'b0), .sh_we(1'b0), .sh_addr(12'd0), .sh_be(2'd0), .sh_wdata(16'd0),
         .sh_rdata(), .v60_doorbell(1'b0), .irq_to_v60(),
         .zrom_req(zrom_req), .zrom_addr(zrom_addr),
         .zrom_data(zrom_data), .zrom_ack(zrom_ack),

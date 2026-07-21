@@ -82,7 +82,8 @@ always @(posedge clk) begin
                     end
                 end
             PROT_DBZVRVS:
-                if (cpu_wr && cpu_addr[23:16] == 8'hA0) begin
+                // audit R20 IO-8: dbzvrvs prot window is 0xA00000-0xA7FFFF (MAME install range)
+                if (cpu_wr && cpu_addr[23:19] == 5'b10100) begin
                     wram_req <= 1'b1; wram_we <= 0;
                     wram_addr <= 16'h0044 >> 1;   // read 0x200044
                     ps <= DBZ_R0;
@@ -238,6 +239,7 @@ module s32_prot_brival (
 
     // read trap: asserted when CPU reads 0x20BA00-07 word-wide
     input             cpu_rd,
+    input       [1:0] cpu_be,           // audit R20 IO-9: MAME traps word reads only
     output reg        trap_active,
     output reg [15:0] trap_data,
 
@@ -271,7 +273,10 @@ always @(posedge clk) begin
     if (rst) begin bs <= B_IDLE; rom_req <= 0; pram_we <= 0; end
     else begin
         pram_we <= 0;
-        trap_active <= enable && cpu_rd &&
+        // MAME's brival read handler is installed word-wide (mem_mask 0xffff);
+        // byte reads fall through to work RAM, so only trap full-word accesses
+        // (audit R20 IO-9).
+        trap_active <= enable && cpu_rd && (cpu_be == 2'b11) &&
                        (cpu_addr[23:4] == (24'h20BA00 >> 4)) &&
                        (cpu_addr[3:1] == 3'd0 || cpu_addr[3:1] == 3'd2 || cpu_addr[3:1] == 3'd3);
         trap_data <= 16'h0000;
@@ -364,6 +369,13 @@ module s32_dualpcb (
 
 reg [15:0] comm [0:2047];
 
+// audit R20 IO-10(b): dual-PCB comms RAM powers up 0xFF (f1en install path memsets it)
+integer __comm_init;
+initial begin
+    for (__comm_init = 0; __comm_init < 2048; __comm_init = __comm_init + 1)
+        comm[__comm_init] = 16'hFFFF;
+end
+
 always @(posedge clk) begin
     if (cs_ram) begin
         if (we) comm[addr] <= wdata;
@@ -404,14 +416,17 @@ module s32_v25 (
     output      [7:0] rdata
 );
 
-reg [7:0] prg [0:65535];
-always @(posedge clk) if (prg_wr) prg[prg_waddr] <= prg_wdata;
+// The mailbox HLE does not model V25 program memory: prg_wr/prg_waddr/prg_wdata
+// are accepted for interface symmetry with the real s32_v25_cpu core (which uses
+// them to invalidate its decode cache) but carry no storage here.  A prior
+// write-only 64 KiB array was never read anywhere in the RTL and has been
+// removed so it can no longer be misread as a live program store (audit hygiene).
 
 // MB8421 mailbox RAM.  The HLE currently owns only the V60-side port, but an
 // explicit true-dual-port block preserves the physical interface for a future
 // MCU core without paying 16K flip-flops in the GA2 build.
 wire [7:0] dpram_q;
-s32_byte_dpram #(.ADDR_WIDTH(11), .NUM_WORDS(2048)) dpram_mem (
+s32_byte_dpram #(.ADDR_WIDTH(11), .NUM_WORDS(2048), .POWER_UP_UNINITIALIZED("FALSE")) dpram_mem ( // audit R20 PF-8: deterministic zero power-up
     .clock(clk),
     .address_a(addr), .data_a(wdata), .rden_a(enable && cs),
     .wren_a(enable && cs && we), .q_a(dpram_q),

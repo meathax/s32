@@ -30,12 +30,16 @@ wire signed [19:0] mp_r_w  = {{4{mp_r[15]}},  mp_r};
 // Exact MAME route gains expressed as small integers:
 // System 32: YM1 0.30 + YM2 0.30 + RF5C68 0.40 (divide by 10).
 // Multi 32: cross-routed YM 0.15 + MultiPCM 0.35 (divide by 20).
+// Multi 32 cross-routes BOTH the YM and the MultiPCM (MAME segas32.cpp:
+// multipcm add_route(1,"sleft") / add_route(0,"sright") — stream 1 -> left,
+// stream 0 -> right — the same cross as the YM).  mp channels were previously
+// routed straight, mirroring the MultiPCM stereo image on Multi 32.
 wire signed [19:0] mix_l = is_multi32
-    ? (fm1_r_w <<< 1) + fm1_r_w + (mp_l_w <<< 3) - mp_l_w
+    ? (fm1_r_w <<< 1) + fm1_r_w + (mp_r_w <<< 3) - mp_r_w
     : (fm1_l_w <<< 1) + fm1_l_w + (fm2_l_w <<< 1) + fm2_l_w
       + (rf_l_w <<< 2);
 wire signed [19:0] mix_r = is_multi32
-    ? (fm1_l_w <<< 1) + fm1_l_w + (mp_r_w <<< 3) - mp_r_w
+    ? (fm1_l_w <<< 1) + fm1_l_w + (mp_l_w <<< 3) - mp_l_w
     : (fm1_r_w <<< 1) + fm1_r_w + (fm2_r_w <<< 1) + fm2_r_w
       + (rf_r_w <<< 2);
 

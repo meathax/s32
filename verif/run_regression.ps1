@@ -226,6 +226,44 @@ function Run-SoundZ80Test {
     Assert-Marker $output "SOUNDSYS Z80 PASS" $name
 }
 
+function Run-SoundSharedTest {
+    $name = "t30_soundsys_shared"
+    $library = New-WorkLibrary $name
+    $vhdlSources = Resolve-Sources @(
+        "rtl/audio/T80/T80_ALU.vhd",
+        "rtl/audio/T80/T80_MCode.vhd",
+        "rtl/audio/T80/T80_Reg.vhd",
+        "rtl/audio/T80/T80.vhd",
+        "rtl/audio/T80/T80s.vhd"
+    )
+    [void](Invoke-NativeCapture $script:Vcom (@("-2008", "-work", $library) + $vhdlSources) "vcom ($name)")
+
+    $svSources = Resolve-Sources @(
+        "rtl/s32_pkg.sv",
+        "rtl/video/s32_big_dpram.sv",
+        "rtl/audio/s32_rf5c68.sv",
+        "rtl/audio/s32_multipcm.sv",
+        "rtl/audio/s32_audio_mix.sv",
+        "rtl/audio/s32_soundsys.sv",
+        "verif/common/jt12_stub.v",
+        "verif/common/tb_soundsys_shared.sv"
+    )
+    [void](Invoke-NativeCapture $script:Vlog (@(
+        "-sv", "-work", $library,
+        "+define+SIMULATION", "+define+S32_REAL_Z80_SIM"
+    ) + $svSources) "vlog ($name)")
+
+    $testDirectory = Split-Path -Parent $library
+    $output = @(Invoke-NativeCapture $script:Vsim @(
+        "-c", "-lib", $library,
+        "-l", (Join-Path $testDirectory "vsim.log"),
+        "-wlf", (Join-Path $testDirectory "vsim.wlf"),
+        "tb_soundsys_shared", "-do",
+        "set StdArithNoWarnings 1; set NumericStdNoWarnings 1; run -all; quit -f"
+    ) "vsim ($name)")
+    Assert-Marker $output "SOUNDSYS SHARED PASS" $name
+}
+
 function Run-JT12ResetTest {
     $name = "t30_jt12_reset"
     $library = New-WorkLibrary $name
@@ -370,6 +408,14 @@ try {
     Write-Tier 7 "V60 audit-fix directed tests (string/CALL/RET/RSR + SEARCH)"
     Run-HdlTest "t07_v60_audit" "tb_v60_audit" ($V60Sources + "verif/v60/tb_v60_audit.sv") "AUDIT PASS"
     Run-HdlTest "t07_v60_search" "tb_v60_search" ($V60Sources + "verif/v60/tb_v60_search.sv") "V60 SEARCH PASS"
+    Run-HdlTest "t07_v60_flags" "tb_v60_flags" ($V60Sources + "verif/v60/tb_v60_flags.sv") "V60 FLAGS PASS"
+    Run-HdlTest "t07_v60_shaov" "tb_v60_shaov" ($V60Sources + "verif/v60/tb_v60_shaov.sv") "V60 SHAOV PASS"
+    Run-HdlTest "t07_v60_incdecmem" "tb_v60_incdecmem" ($V60Sources + "verif/v60/tb_v60_incdecmem.sv") "V60 INCDECMEM PASS"
+    Run-HdlTest "t07_v60_movd" "tb_v60_movd" ($V60Sources + "verif/v60/tb_v60_movd.sv") "V60 MOVD PASS"
+    Run-HdlTest "t07_v60_divxmem" "tb_v60_divxmem" ($V60Sources + "verif/v60/tb_v60_divxmem.sv") "V60 DIVXMEM PASS"
+    Run-HdlTest "t07_v60_cmpc" "tb_v60_cmpc" ($V60Sources + "verif/v60/tb_v60_cmpc.sv") "V60 CMPC PASS"
+    Run-HdlTest "t07_v60_movcd" "tb_v60_movcd" ($V60Sources + "verif/v60/tb_v60_movcd.sv") "V60 MOVCD PASS"
+    Run-HdlTest "t07_v60_schd" "tb_v60_schd" ($V60Sources + "verif/v60/tb_v60_schd.sv") "V60 SCHD PASS"
 
     Write-Tier 8 "Holo release contract + GA2 compatibility boot path"
     $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_holo_release.py") "Holo release MRA check")
@@ -467,6 +513,7 @@ try {
     ) "SOUNDSYS BUS PASS" @("SIMULATION")
     Run-JT12ResetTest
     Run-SoundZ80Test
+    Run-SoundSharedTest
 
     Write-Tier 31 "MAME-backed MultiPCM descriptor / pitch / pan / loop / ACK semantics"
     Run-HdlTest "t31_multipcm" "tb_multipcm" @(

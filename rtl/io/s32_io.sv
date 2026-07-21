@@ -378,7 +378,9 @@ module s32_msm6253 (
 );
 
 reg [7:0] shifter;
+reg       rd_d;                  // read-strobe history: shift once per read (audit R20 IO-2)
 always @(posedge clk) begin
+    rd_d <= cs && !we;
     if (cs && we) begin
         case (addr)
             2'd0: shifter <= an0;
@@ -387,7 +389,7 @@ always @(posedge clk) begin
             2'd3: shifter <= an3;
         endcase
     end
-    else if (cs && !we) begin
+    else if (cs && !we && !rd_d) begin   // rising edge only: MAME d7_r = one bit per read
         dout_bit <= shifter[7];
         shifter  <= {shifter[6:0], 1'b0};
     end
@@ -426,9 +428,12 @@ always @(posedge clk) begin
         if (cs && !we) begin
             case (addr)
                 2'd0: begin lx <= cx; rdata <= cx[7:0]; end
-                2'd1: rdata <= {buttons[3:0], lx[11:8]};
+                // XH/YH high nibble = uPD4701 switch inputs; segas32 leaves them
+                // unconnected (MAME sets no switch callbacks) so they read idle,
+                // not the live joystick buttons. audit R20 IO-14
+                2'd1: rdata <= {4'h0, lx[11:8]};
                 2'd2: begin ly <= cy; rdata <= cy[7:0]; end
-                2'd3: rdata <= {buttons[7:4], ly[11:8]};
+                2'd3: rdata <= {4'h0, ly[11:8]};
             endcase
         end
     end
@@ -448,13 +453,18 @@ module s32_i8255 (
     output reg  [7:0] pc_out
 );
 
+// Control word powers up 0x9b (all ports input, mode 0) like MAME i8255
+// device_reset(); a mode-set write (port 3, bit7=1) latches it and a
+// control-port read returns it with bit7 set. audit R20 IO-16
+reg [7:0] ctrl = 8'h9b;
 always @(posedge clk) begin
     if (cs && we && addr == 2'd2) pc_out <= wdata;
+    if (cs && we && addr == 2'd3 && wdata[7]) ctrl <= wdata;
     case (addr)
         2'd0: rdata <= pa;
         2'd1: rdata <= pb;
         2'd2: rdata <= pc_in;
-        default: rdata <= 8'hff;
+        default: rdata <= ctrl;
     endcase
 end
 
@@ -526,7 +536,13 @@ end
 
 always @(posedge clk) begin
     if (rst) begin
-        pending <= 5'd0;
+        // MAME device_reset (memset(m_v60_irq_control,0xff)) leaves the pending
+        // byte (index 7) = 0xff -> all 5 sources pending, but ctl[6]=0xff below
+        // masks them so no IRQ is delivered until the game unmasks. audit R20 IO-6
+        // NOTE: verif/common/tb_intc.sv encodes the old pending==0 reset and must
+        // be updated to ack all sources after reset (else its reset/timer0/timer1
+        // checks now see the pre-set pending bits). Test not edited here.
+        pending <= 5'h1f;
         z80_doorbell <= 1'b0;
         t0_run <= 1'b0; t1_run <= 1'b0;
         t0_cnt <= 24'd0; t1_cnt <= 24'd0;
@@ -569,10 +585,14 @@ always @(posedge clk) begin
                     n = {(be[1] ? wdata[11:8] : ctl[9][3:0]),
                          (be[0] ? wdata[7:0]  : ctl[8])};
                     if (n != 0) begin
-                        // period in clk_sys ticks: 0x800*N / 16.1MHz * 48.3MHz = N*0x1800
-                        // Store period-1 because expiry is tested before the
-                        // decrement; this produces exactly N*0x1800 clocks.
-                        t0_cnt <= ({n, 11'b0} + {n, 12'b0}) - 1'b1;
+                        // period in clk_sys ticks = 0x800*N / (xtal/2) * 48.324MHz.
+                        // System 32 xtal=32.2159MHz -> ratio 3 exactly -> N*0x1800.
+                        // Multi 32 xtal=32MHz (16.0MHz source) -> N*0x1800*32.2159/32
+                        // = N*6185, i.e. +N*41 (0.67% longer). audit R20 IO-5
+                        // Store period-1: expiry is tested before the decrement.
+                        t0_cnt <= ({n, 11'b0} + {n, 12'b0}
+                                   + (is_multi32 ? ({n, 5'b0} + {n, 3'b0} + n) : 24'd0))
+                                  - 1'b1;
                         t0_run <= 1'b1;
                     end
                     else begin

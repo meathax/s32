@@ -95,7 +95,7 @@ wire [13:0] lb_pix;
 s32_tilemap tilemap (
     .clk(clk), .rst(rst), .line(render_line),
     .line_start(line_start), .line_done(line_done),
-    .mode_416(snap_mode), .ext_tilebank(2'b00),
+    .mode_416(snap_mode), .is_multi32(1'b0), .ext_tilebank(8'b0),
     .r1ff00(snap_r1ff00), .r1ff02(snap_r1ff02),
     .r1ff04(16'h0000), .r1ff06(16'h0000),
     .r1ff5c(16'h0000), .r1ff5e(16'h0000),

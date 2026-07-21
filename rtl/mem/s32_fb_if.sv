@@ -222,6 +222,7 @@ always @(posedge clk) begin
                 dburst <= 8'd128;
                 rbeat  <= 0;
                 drd    <= 1'b1;
+                dbe    <= 8'hFF;  // audit R20 PF-4: reads drive all byte lanes
                 dst    <= D_RD;
             end
             else if (flush_req) begin
@@ -235,6 +236,7 @@ always @(posedge clk) begin
                     // RMW span: read word, clear bit15 of valid lanes, write
                     dburst <= 8'd1;
                     drd    <= 1'b1;
+                    dbe    <= 8'hFF;  // audit R20 PF-4: reads drive all byte lanes
                     dst    <= D_SH_R;
                 end
                 else begin
@@ -286,6 +288,7 @@ always @(posedge clk) begin
                 daddr  <= daddr + 1'd1;
                 dburst <= 8'd1;
                 drd    <= 1'b1;
+                dbe    <= 8'hFF;  // audit R20 PF-4: reads drive all byte lanes
                 dst    <= D_SH_R;
             end
         end

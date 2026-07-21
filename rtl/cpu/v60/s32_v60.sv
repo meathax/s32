@@ -22,7 +22,7 @@
 //============================================================================
 
 module s32_v60 #(
-    parameter [31:0] START_PC = 32'h00FFFFF0,   // V60 reset PC (V70: FFFFFFF0)
+    parameter [31:0] START_PC = 32'hFFFFFFF0,   // V60/V70 reset PC (MAME m_start_pc; audit V60-21)
     parameter        IS_V70   = 1'b0
 )(
     input             clk,
@@ -156,8 +156,12 @@ reg [31:0] alu_r;
 reg [63:0] mdacc;           // mul/div accumulator
 reg [5:0]  mdcnt;
 reg [31:0] mdop;
+reg [31:0] movd_lo, movd_hi;     // MOVD 64-bit transfer buffer
+reg        divx_mem;             // DIVX/DIVUX: op2 dividend/result is in memory
+reg [31:0] md_savb;              // MUL: second operand, kept for overflow flag
 reg        md_sign;
 reg        md_qsign, md_rsign;   // divide result signs
+reg        md_divov;             // DIV: signed min/-1 overflow (dest unchanged)
 // DIVX/DIVUX use a 64-bit dividend.  Keeping this path separate from the
 // 32-bit MUL/DIV accumulator avoids a 96-bit combined remainder/quotient
 // register and, critically, avoids synthesizing a combinational 64/32 divide.
@@ -223,6 +227,8 @@ typedef enum logic [6:0] {
     S_IF2,                       // have instflags, plan F12 operands
     S_EA_MODE, S_EA_IND, S_EA_IND2, S_EA_VAL, S_EA_DONE,
     S_EXEC, S_OP2_LD, S_MULDIV, S_DIVX, S_WB_MEM, S_NEXT, S_RMW_RD, S_RMW_EX, S_XCH1, S_XCH2, S_ROTC,
+    S_MOVD_RL, S_MOVD_RH, S_MOVD_WL, S_MOVD_WH,   // MOVD qword read/write phases
+    S_DIVXM_RH,                                   // DIVX memory dividend high-word read
     S_BR_TAKE,
     S_PUSH, S_POP, S_PUSHM, S_POPM,
     S_JSR1, S_RET1, S_RET2, S_RETI1, S_RETI2, S_RETI3, S_CALL1, S_CALL1b, S_RSR,
@@ -842,7 +848,12 @@ else if (ce) begin
                 // jumped mid-table into a reserved-op trap)
                 8'hd6, 8'hd7, 8'he8, 8'he9: begin ea_want_addr <= 1'b1; ea_dim <= 2'd0; end // JMP/JSR
                 8'he0, 8'he1: begin ea_want_addr <= 1'b1; ea_dim <= 2'd0; end               // TASI (byte)
-                8'hee, 8'hef, 8'hf6, 8'hf7: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end // PUSH val / GETPSW dst? (GETPSW writes -> addr)
+                8'hee, 8'hef: begin ea_want_addr <= 1'b0; ea_dim <= 2'd2; end               // PUSH val
+                // GETPSW writes PSW to its operand — decode as a destination
+                // address so flag1 distinguishes reg vs memory.  Decoding it as
+                // a value left flag1=0, so a register destination wrote PSW to
+                // wild RAM and never updated the register (audit R20 V60-3).
+                8'hf6, 8'hf7: begin ea_want_addr <= 1'b1; ea_dim <= 2'd2; end               // GETPSW dst addr
                 8'he6, 8'he7: begin ea_want_addr <= 1'b1; ea_dim <= 2'd2; end               // POP dst addr
                 8'hd0, 8'hd1, 8'hd8, 8'hd9: begin ea_want_addr <= 1'b1; ea_dim <= 2'd0; end // DEC/INC B (RMW)
                 8'hd2, 8'hd3, 8'hda, 8'hdb: begin ea_want_addr <= 1'b1; ea_dim <= 2'd1; end
@@ -1386,13 +1397,21 @@ else if (ce) begin
         xdiv_shift <= xdiv_shift_next;
         xdiv_rem <= xdiv_rem_next;
         if (xdiv_cnt == 6'd63) begin
-            queue_reg_write(xdiv_dst, xdiv_qresult, 32'hffff_ffff);
-            queue_reg_write(xdiv_dst + 5'd1, xdiv_rresult, 32'hffff_ffff);
             f_z <= (xdiv_qresult == 0);
             f_s <= xdiv_qresult[31];
-            f_ov <= 1'b0;
+            // MAME opDIVX/opDIVUX set only S/Z and leave OV unchanged; do not clear it.
             xdiv_active <= 1'b0;
-            st <= S_NEXT;
+            if (divx_mem) begin
+                // write quotient -> [op2], remainder -> [op2]+4 (audit V60-9)
+                movd_lo <= xdiv_qresult;
+                movd_hi <= xdiv_rresult;
+                st <= S_MOVD_WL;
+            end
+            else begin
+                queue_reg_write(xdiv_dst, xdiv_qresult, 32'hffff_ffff);
+                queue_reg_write(xdiv_dst + 5'd1, xdiv_rresult, 32'hffff_ffff);
+                st <= S_NEXT;
+            end
         end
         else xdiv_cnt <= xdiv_cnt + 1'd1;
     end
@@ -1459,11 +1478,13 @@ else if (ce) begin
             3'd0: begin // INC
                 v = dimext(alu_r, rmw_dim) + 1;
                 f_cy <= zer(v, rmw_dim);        // carry when wrapped to 0
+                f_ov <= ~sgn(alu_r, rmw_dim) & sgn(v, rmw_dim); // +max -> negative
                 set_zs(v, rmw_dim);
             end
             3'd1: begin // DEC
                 f_cy <= zer(alu_r, rmw_dim);    // borrow when was 0
                 v = dimext(alu_r, rmw_dim) - 1;
+                f_ov <= sgn(alu_r, rmw_dim) & ~sgn(v, rmw_dim); // -min -> positive
                 set_zs(v, rmw_dim);
             end
             3'd2: begin f_z <= ~alu_r[bi]; f_cy <= alu_r[bi]; v[bi] = 1'b1; end // SET1
@@ -1502,6 +1523,66 @@ else if (ce) begin
             bus_req <= 0; bus_we <= 0;
             st <= S_NEXT;
         end
+    end
+
+    // DIVX/DIVUX memory dividend: read the high word at [op2]+4 (low word is in
+    // op2val), set up the restoring divide, and mark the result for memory
+    // writeback (audit V60-9).
+    S_DIVXM_RH: begin
+        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op2 + 32'd4; end
+        else if (bus_ack) begin
+            logic [63:0] num, mag_num;
+            logic [31:0] mag_den;
+            bus_req <= 0;
+            num = {bus_rdata, op2val};   // {high, low}
+            if (cur_op == 8'ha6) begin   // DIVX (signed)
+                mag_num = num[63] ? (~num + 1'b1) : num;
+                mag_den = op1[31] ? (~op1 + 1'b1) : op1;
+                xdiv_qneg <= num[63] ^ op1[31];
+                xdiv_rneg <= num[63];
+            end
+            else begin                   // DIVUX (unsigned)
+                mag_num = num;
+                mag_den = op1;
+                xdiv_qneg <= 1'b0;
+                xdiv_rneg <= 1'b0;
+            end
+            xdiv_shift  <= mag_num;
+            xdiv_rem    <= 0;
+            xdiv_den    <= mag_den;
+            xdiv_cnt    <= 0;
+            xdiv_active <= 1'b1;
+            divx_mem    <= 1'b1;
+            st <= S_DIVX;
+        end
+    end
+
+    // MOVD 64-bit transfer (audit V60-10): read the source qword low/high, then
+    // write the destination qword low/high.  Register ends are handled directly
+    // in the exec; only memory ends use these states.
+    S_MOVD_RL: begin
+        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op1; end
+        else if (bus_ack) begin bus_req <= 0; movd_lo <= bus_rdata; st <= S_MOVD_RH; end
+    end
+    S_MOVD_RH: begin
+        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op1 + 32'd4; end
+        else if (bus_ack) begin
+            bus_req <= 0; movd_hi <= bus_rdata;
+            if (flag2) begin
+                queue_reg_write(op2[4:0],        movd_lo,    32'hffffffff);
+                queue_reg_write(op2[4:0] + 5'd1, bus_rdata,  32'hffffffff);
+                st <= S_NEXT;
+            end
+            else st <= S_MOVD_WL;
+        end
+    end
+    S_MOVD_WL: begin
+        if (!bus_req) begin bus_req <= 1; bus_we <= 1; bus_size <= 2'd2; bus_addr <= op2; bus_wdata <= movd_lo; end
+        else if (bus_ack) begin bus_req <= 0; bus_we <= 0; st <= S_MOVD_WH; end
+    end
+    S_MOVD_WH: begin
+        if (!bus_req) begin bus_req <= 1; bus_we <= 1; bus_size <= 2'd2; bus_addr <= op2 + 32'd4; bus_wdata <= movd_hi; end
+        else if (bus_ack) begin bus_req <= 0; bus_we <= 0; st <= S_NEXT; end
     end
 
     // memory writeback of wb_val to op2 address (dim = f12_dim2)
@@ -1626,11 +1707,15 @@ else if (ce) begin
         else if (!bus_req) begin
             // push highest set register first (MAME pushes from r31 down? actual: PUSHM pushes ascending list to stack)
             // idx = lowest set bit; push in increasing register order
+            logic [4:0] idx;
+            idx = pushm_index(op1);
             bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
             bus_addr <= r[31] - 4;
-            bus_wdata <= rf_rdata_a;
+            // Mask bit 31 pushes PSW, not r31 (audit R20 V60-11): the old code
+            // pushed the SP value there and PSW save/restore was lost.
+            bus_wdata <= (idx == 5'd31) ? psw : rf_rdata_a;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
-            reg_ptr <= pushm_index(op1);
+            reg_ptr <= idx;
         end
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
@@ -1650,7 +1735,13 @@ else if (ce) begin
         end
         else if (bus_ack) begin
             bus_req <= 0;
-            queue_reg_write(reg_ptr, bus_rdata, 32'hffff_ffff);
+            // Mask bit 31 pops into the PSW low half, not r31 (audit R20 V60-11);
+            // the high half (incl. IS/EL) is preserved, so no stack switch and no
+            // conflict with the SP increment below.
+            if (reg_ptr == 5'd31)
+                write_psw((psw & 32'hffff_0000) | (bus_rdata & 32'h0000_ffff));
+            else
+                queue_reg_write(reg_ptr, bus_rdata, 32'hffff_ffff);
             queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
             op1[reg_ptr] <= 1'b0;
         end
@@ -1662,10 +1753,17 @@ else if (ce) begin
             bus_req <= 1; bus_we <= 0; bus_size <= 2'd0; bus_addr <= op1;
         end
         else if (bus_ack) begin
+            // TASI sets flags as SUBB(old, 0xFF, 0) before writing 0xFF (MAME
+            // opTASI).  The old code had Z=(old!=0), inverted CY, S from `old`
+            // instead of old+1, and never set OV (audit R20 V60-12).
+            logic [7:0] old, res8;
             bus_req <= 0;
-            f_z <= (bus_rdata[7:0] != 0);   // MAME opTASI: Z = (old != 0)? per notes
-            f_s <= bus_rdata[7];
-            f_ov <= 0; f_cy <= (bus_rdata[7:0] == 8'hff);
+            old  = bus_rdata[7:0];
+            res8 = old - 8'hff;               // == old + 1
+            f_z  <= (res8 == 8'h00);          // old == 0xFF
+            f_s  <= res8[7];                  // (old+1)[7]
+            f_cy <= (old != 8'hff);           // borrow when old < 0xFF
+            f_ov <= ~old[7] & (old[7] ^ res8[7]);
             st <= S_TASI2;
         end
     end
@@ -1716,8 +1814,21 @@ else if (ce) begin
         str_dst <= op2;                      // F7b: search value lives here
         if (subop[4:0] >= 5'h18) begin
             // F7b: single length; count = len1
-            str_cnt <= str_len1;
             total_len <= 5'd3 + len1 + len2;
+            // V60-15: down-direction search (subop[0]=1, MAME opSEARCHD*).
+            // The up form scans op1..op1+len1 ascending (start op1, count len1).
+            // The down form scans the range in descending order from MAME's
+            // start index: byte reads op1+len1 down to op1 (len1+1 reads; the
+            // first read is one past the buffer, exactly as opSEARCHDB does),
+            // half reads op1+(len1-1)*2 down to op1 (len1 reads).  str_src still
+            // holds op1 from S_STR_OP1; bias it to the top of the range here.
+            if (subop[0]) begin
+                str_cnt <= cur_op[1] ? str_len1 : (str_len1 + 32'd1);
+                str_src <= cur_op[1] ? (str_src + ((str_len1 - 32'd1) << 1))
+                                     : (str_src + str_len1);
+            end
+            else
+                str_cnt <= str_len1;
             // SEARCH also finalizes Z/R27/R28 for a zero-length range.
             st <= S_STR_RD;
         end
@@ -1727,7 +1838,21 @@ else if (ce) begin
             str_len2 <= l2;
             str_cnt <= (str_len1 < l2) ? str_len1 : l2;
             total_len <= 5'd4 + len1 + len2;
-            st <= ((str_len1 < l2 ? str_len1 : l2) == 0) ? S_NEXT : S_STR_RD;
+            // MOVCD (down copy) transfers the ascending range base..base+min-1 in
+            // descending element order (MAME opMOVSTRD): start at the TOP of that
+            // range and decrement, instead of walking physically below the base
+            // as the old code did, which corrupted memory (audit R20 V60-14).
+            if (subop[0] && subop[4:0] >= 5'h08 && subop[4:0] <= 5'h0c) begin
+                logic [31:0] mmin, off;
+                mmin = (str_len1 < l2) ? str_len1 : l2;
+                off  = (mmin - 32'd1) << (cur_op[1] ? 1 : 0);   // (min-1)*step
+                str_src <= op1 + off;
+                str_dst <= op2 + off;
+            end
+            // A zero-length CMPC still needs its tail flags/registers, so route
+            // it through S_STR_RD; a zero-length MOVC has nothing to copy.
+            st <= ((str_len1 < l2 ? str_len1 : l2) == 0 && subop[4:0] > 5'h02)
+                  ? S_NEXT : S_STR_RD;
         end
     end
     S_STR_RD: begin
@@ -1738,9 +1863,31 @@ else if (ce) begin
             // exercises the upward form; downward pointer semantics remain
             // separate from this completion/flag correction.
             if (subop[4:0] >= 5'h18) begin
-                f_z <= 1'b1;
-                queue_reg_write(5'd27, str_len1, 32'hffff_ffff);
+                // Up exhaustion: i=len1, Z=1, R27=len1.  Down exhaustion: the
+                // scan ran off the bottom to i=-1 (MAME opSEARCHD*), so Z=0,
+                // R27=0xFFFFFFFF, and str_src has already reached op1-step.
+                if (subop[0]) begin
+                    f_z <= 1'b0;
+                    queue_reg_write(5'd27, 32'hffff_ffff, 32'hffff_ffff);
+                end
+                else begin
+                    f_z <= 1'b1;
+                    queue_reg_write(5'd27, str_len1, 32'hffff_ffff);
+                end
                 queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+            end
+            else if (subop[4:0] <= 5'h02) begin
+                // CMPC exhausted the common prefix (all min elements equal):
+                // R28=len1+min, R27=len2+min, and S/Z from the length compare
+                // (MAME opCMPSTR tail; the old path set no tail flags/registers,
+                // and zero-length compares were skipped entirely) — audit V60-13.
+                logic [31:0] cmin;
+                cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
+                queue_reg_write(5'd28, str_len1 + cmin, 32'hffff_ffff);
+                queue_reg_write(5'd27, str_len2 + cmin, 32'hffff_ffff);
+                if (str_len1 > str_len2)      begin f_s <= 1'b1; f_z <= 1'b0; end
+                else if (str_len2 > str_len1) begin f_s <= 1'b0; f_z <= 1'b0; end
+                else                          begin f_s <= 1'b0; f_z <= 1'b1; end
             end
             st <= S_NEXT;
         end
@@ -1760,8 +1907,14 @@ else if (ce) begin
                 // compare element with the decoded search value (F7b op2)
                 eq = (cur_op[1] ? (bus_rdata[15:0]==str_dst[15:0]) : (bus_rdata[7:0]==str_dst[7:0]));
                 if (eq == (subop[1] ? 1'b0 : 1'b1)) begin
-                    f_z <= 1'b0;
-                    queue_reg_write(5'd27, str_len1 - str_cnt, 32'hffff_ffff);
+                    // Index i = len1-cnt (up) or cnt-1 (down); R28 is the
+                    // current element address.  Z follows MAME's post-loop test
+                    // i==len1: up never breaks at i==len1 (Z=0), down does so
+                    // only at its one-past-the-top byte read (str_cnt==len1+1).
+                    f_z <= subop[0] ? (str_cnt == (str_len1 + 32'd1)) : 1'b0;
+                    queue_reg_write(5'd27, subop[0] ? (str_cnt - 32'd1)
+                                                    : (str_len1 - str_cnt),
+                                    32'hffff_ffff);
                     queue_reg_write(5'd28, str_src, 32'hffff_ffff);
                     st <= S_NEXT;
                 end
@@ -1794,18 +1947,22 @@ else if (ce) begin
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
             if (subop[4:0] <= 5'h02) begin
-                // CMPC: compare source vs dest element
-                logic [31:0] a, b;
+                // CMPC (MAME opCMPSTR): compare source(op1) vs dest(op2).  On the
+                // first difference S = (source > dest) — the RTL had it inverted;
+                // and R28/R27 hold len+index, not the raw addresses (audit V60-13).
+                logic [31:0] a, b, cmin, ci;
                 a = cur_op[1] ? {16'b0,alu_r[15:0]} : {24'b0,alu_r[7:0]};
                 b = cur_op[1] ? {16'b0,bus_rdata[15:0]} : {24'b0,bus_rdata[7:0]};
+                cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
+                ci   = cmin - str_cnt;               // elements already matched
                 if (a != b) begin
-                    f_z <= 0;
-                    f_s <= (a < b);
-                    queue_reg_write(5'd28, str_src, 32'hffff_ffff);
-                    queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
+                    f_z <= 1'b0;
+                    f_s <= (a > b);
+                    queue_reg_write(5'd28, str_len1 + ci, 32'hffff_ffff);
+                    queue_reg_write(5'd27, str_len2 + ci, 32'hffff_ffff);
                     st <= S_NEXT;
                 end
-                else begin f_z <= 1; st <= S_STR_NEXT; end
+                else st <= S_STR_NEXT;               // equal: tail flags set at exhaustion
             end
             else st <= S_STR_NEXT;
         end
@@ -2322,9 +2479,16 @@ else if (ce) begin
         end
         str_cnt <= str_cnt - 1;
         if (str_cnt == 1) begin
-            queue_reg_write(5'd28, str_src, 32'hffff_ffff);
-            queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
-            st <= S_NEXT;
+            // CMPC finishes through S_STR_RD's exhaustion branch so the MAME
+            // length-tail flags/registers apply; MOVC keeps its address-based
+            // completion here (audit V60-13).
+            if (subop[4:0] <= 5'h02)
+                st <= S_STR_RD;
+            else begin
+                queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+                queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
+                st <= S_NEXT;
+            end
         end
         else st <= S_STR_RD;
     end
@@ -2512,15 +2676,41 @@ else if (ce) begin
     end
 
     S_HALT: begin
-        // wake on interrupt
+        // Wake on interrupt and resume at the instruction AFTER the HALT, the
+        // real-hardware resume point.  The old code left PC on the HALT, so the
+        // interrupt frame's return PC was the HALT itself and RETI re-executed
+        // it forever: interrupt handlers kept running while the main thread was
+        // permanently parked (audit R20 V60-2 — the ga2 freeze signature).
+        // Advancing only on wake keeps a no-interrupt HALT parked at its own PC,
+        // so benches that use HALT as an end marker are unaffected.
         if (nmi_seen || (!irq_n && psw_ie)) begin
             halted <= 0;
+            pc <= pc + 1;
             st <= S_DECODE;
         end
     end
 
     default: st <= S_RESET;
     endcase
+
+    // Self-modifying-code guard (audit R20 V60-19): a completing data write that
+    // overlaps the live or retained fetch window invalidates it, so a subsequent
+    // execution refetches instead of running stale bytes (e.g. a tight backward
+    // loop that patches its own body, which the retained window would otherwise
+    // serve forever).  Writes and fetches occupy mutually exclusive states, so
+    // this never collides with the fetch logic's own fb_valid updates.
+    if (bus_req && bus_we && bus_ack) begin
+        logic [31:0] wr_end, fb_end, pv_end;
+        logic [2:0]  wr_sz;
+        wr_sz  = (bus_size == 2'd0) ? 3'd1 : (bus_size == 2'd1) ? 3'd2 : 3'd4;
+        wr_end = bus_addr + {29'b0, wr_sz};
+        fb_end = fb_base + {27'b0, fb_valid};
+        pv_end = fb_prev_base + {27'b0, fb_prev_valid};
+        if (fb_valid != 0 && bus_addr < fb_end && wr_end > fb_base)
+            fb_valid <= 5'd0;
+        if (fb_prev_valid != 0 && bus_addr < pv_end && wr_end > fb_prev_base)
+            fb_prev_valid <= 5'd0;
+    end
 
     // Port 1 is applied second so the final queued write retains the original
     // nonblocking-assignment priority when both ports address the same bit.
@@ -2542,6 +2732,8 @@ function automatic f12_op1_is_addr(input [7:0] op);
     case (op)
         8'h40, 8'h42, 8'h44,            // MOVEA.B/H/W
         8'h20, 8'h22, 8'h24,            // IN.B/H/W
+        8'h41, 8'h43, 8'h45,            // XCH.B/H/W — both operands are lvalues
+        8'h3f,                         // MOVD — 64-bit move, both operands lvalues
         8'h49,                         // CALL target
         8'h01: f12_op1_is_addr = 1'b1; // LDTASK register-mask operand
         default: f12_op1_is_addr = 1'b0;
@@ -2588,6 +2780,12 @@ function automatic f12_reads_dest(input [7:0] op);
     casez (op)
         8'h8?, 8'h9?, 8'hA?, 8'hB?,          // ADD/MUL/OR/ROT/ADDC/SUBC/AND/DIV/SUB/SHL/XOR/CMP/SHA + bit ops
         8'h5?: f12_reads_dest = 1;           // REM group
+        // These read op2 as a VALUE (MAME ReadAM), so a memory operand must be
+        // loaded into op2val before exec; otherwise the exec fell back to the
+        // effective address / a stale op2val (audit R20 V60-18).
+        8'h01,                               // LDTASK task-block pointer
+        8'h13, 8'h4a,                        // UPDPSW.W / UPDPSW.H mask
+        8'h4b:  f12_reads_dest = 1;          // CHLVL level data
         default: f12_reads_dest = 0;
     endcase
 endfunction
@@ -2655,9 +2853,12 @@ task automatic exec_op;
     8'h0d: wb_op2({24'b0, a[7:0]}, 2'd2);                    // MOVZBW
     8'h1c: wb_op2({{16{a[15]}}, a[15:0]}, 2'd2);             // MOVSHW
     8'h1d: wb_op2({16'b0, a[15:0]}, 2'd2);                   // MOVZHW
-    8'h19: wb_op2(a[7:0], 2'd0);                             // MOVTHB (truncate H->B)
-    8'h29: wb_op2(a[7:0], 2'd0);                             // MOVTWB
-    8'h2b: wb_op2(a[15:0], 2'd1);                            // MOVTWH
+    // MOVT truncations set OV when the discarded high bits are not the sign
+    // extension of the result — the only flag they define, previously left
+    // unset so BV/BNV after a coordinate truncation misbranched (audit V60-17).
+    8'h19: begin f_ov <= (a[15:8]  != {8{a[7]}});   wb_op2(a[7:0], 2'd0); end  // MOVTHB
+    8'h29: begin f_ov <= (a[31:8]  != {24{a[7]}});  wb_op2(a[7:0], 2'd0); end  // MOVTWB
+    8'h2b: begin f_ov <= (a[31:16] != {16{a[15]}}); wb_op2(a[15:0], 2'd1); end // MOVTWH
     8'h40, 8'h42, 8'h44: wb_op2(op1, 2'd2);                  // MOVEA: op1 decoded as addr in IF2? see note
     8'h2c: begin                                             // RVBYT: reverse bytes
         wb_op2({a[7:0], a[15:8], a[23:16], a[31:24]}, 2'd2);
@@ -2667,7 +2868,23 @@ task automatic exec_op;
         for (int i=0;i<8;i++) rv[i] = a[7-i];
         wb_op2({24'b0, rv}, 2'd0);
     end
-    8'h3f: wb_op2(a, 2'd2);                                  // MOVD (simplified 32-bit)
+    8'h3f: begin  // MOVD: full 64-bit move (register pair or memory qword).
+        // The old exec moved only 32 bits, losing the upper word (audit V60-10).
+        // op1/op2 now decode as lvalues (f12_op1_is_addr): flagN=1 -> register
+        // number, flagN=0 -> memory address of the low word.
+        if (flag1) begin
+            // register-pair source: capture the pair, then dispatch the write
+            movd_lo <= r[op1[4:0]];
+            movd_hi <= r[op1[4:0] + 5'd1];
+            if (flag2) begin
+                queue_reg_write(op2[4:0],          r[op1[4:0]],          32'hffffffff);
+                queue_reg_write(op2[4:0] + 5'd1,   r[op1[4:0] + 5'd1],   32'hffffffff);
+                st <= S_NEXT;
+            end
+            else st <= S_MOVD_WL;   // register -> memory qword
+        end
+        else st <= S_MOVD_RL;       // memory qword source
+    end
 
     // ------------ arith ------------
     8'h80, 8'h82, 8'h84: begin      // ADD
@@ -2709,8 +2926,13 @@ task automatic exec_op;
     end
     8'h98, 8'h9a, 8'h9c: begin      // SUBC
         res = dimext(b,d2) - dimext(a,d2) - {31'b0, f_cy};
-        f_cy <= (dimext(b,d2) < (dimext(a,d2) + {31'b0,f_cy}));
-        f_ov <= ((b[31]^a[31]) & (b[31]^res[31]));
+        // 33-bit borrow: the old 32-bit compare wrapped when a+carry overflowed
+        // (SUBC.W with a=0xFFFFFFFF, carry=1 read borrow=0); and OV used bit 31
+        // for every width, so byte/half OV was constant 0 (audit R20 V60-16).
+        f_cy <= ({1'b0, dimext(b,d2)} < ({1'b0, dimext(a,d2)} + {32'b0, f_cy}));
+        f_ov <= (d2==2'd0) ? ((b[7]^a[7]) & (b[7]^res[7])) :
+                (d2==2'd1) ? ((b[15]^a[15]) & (b[15]^res[15])) :
+                             ((b[31]^a[31]) & (b[31]^res[31]));
         set_zs(res, d2);
         wb_op2(res, d2);
     end
@@ -2742,19 +2964,26 @@ task automatic exec_op;
         logic signed [7:0] cnt;
         cnt = a[7:0];
         res = shl_res(b, a[7:0], d2);
+        // A zero count must clear CY (MAME); the old code left it unchanged
+        // (audit R20 V60-7).
         if (cnt > 0)      f_cy <= shl_lastout(b, cnt, d2, 1'b1);
         else if (cnt < 0) f_cy <= shl_lastout(b, -cnt, d2, 1'b0);
+        else              f_cy <= 1'b0;
         f_ov <= 0;
         set_zs(res, d2);
         wb_op2(res, d2);
     end
-    8'hb9, 8'hbb, 8'hbd: begin      // SHA: CY last-out; OV=0 (arith)
+    8'hb9, 8'hbb, 8'hbd: begin      // SHA: CY last-out; OV = left-shift overflow
         logic signed [7:0] cnt;
         cnt = a[7:0];
         res = sha_res(b, a[7:0], d2);
+        // Zero count clears CY, and a left shift sets OV when a bit different
+        // from the sign is shifted through the top — previously hardwired 0
+        // (audit R20 V60-7).
         if (cnt > 0)      f_cy <= shl_lastout(b, cnt, d2, 1'b1);
         else if (cnt < 0) f_cy <= shl_lastout(b, -cnt, d2, 1'b0);
-        f_ov <= 0;
+        else              f_cy <= 1'b0;
+        f_ov <= sha_left_ov(b, a[7:0], d2);
         set_zs(res, d2);
         wb_op2(res, d2);
     end
@@ -2822,6 +3051,7 @@ task automatic exec_op;
     8'h81, 8'h83, 8'h85, 8'h91, 8'h93, 8'h95: begin // MUL/MULU
         mdop <= dimext(a, d2);
         mdacc <= {32'b0, dimext(b, d2)};
+        md_savb <= dimext(b, d2);   // retained for the width-correct overflow flag
         md_sign <= !cur_op[4] ? 1'b0 : 1'b0;
         mdcnt <= 6'd32;
         st <= S_MULDIV;
@@ -2829,7 +3059,11 @@ task automatic exec_op;
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5,       // DIV/DIVU
     8'h50, 8'h51, 8'h52, 8'h53, 8'h54, 8'h55: begin // REM/REMU
         if (dimext(a, d2) == 0) begin
-            // MAME: divide-by-zero leaves the destination unchanged, no trap
+            // MAME divide-by-zero: destination unchanged and no trap, but Z/S
+            // are still set from the (unchanged) destination = the dividend, and
+            // OV is cleared (audit R20 V60-8); the old code left flags stale.
+            set_zs(dimext(b, d2), d2);
+            f_ov <= 1'b0;
             st <= S_NEXT;
         end
         else begin
@@ -2848,6 +3082,13 @@ task automatic exec_op;
             mdacc  <= {32'b0, magb};
             md_qsign <= is_signed & (sa[31] ^ sb[31]);
             md_rsign <= is_signed & sb[31];
+            // Signed DIV overflow: dividend == min and divisor == -1 (quotient
+            // would be +2^(w-1), which does not fit).  MAME sets OV and leaves
+            // the destination unchanged (audit R20 V60-8); the old code always
+            // cleared OV and wrote the wrapped quotient.
+            md_divov <= is_signed & ~is_rem & sa[31] & (maga == 32'd1) &
+                        (magb == (d2==2'd0 ? 32'h0000_0080 :
+                                  d2==2'd1 ? 32'h0000_8000 : 32'h8000_0000));
             mdcnt  <= 6'd32;
             st <= S_MULDIV;
         end
@@ -2860,12 +3101,19 @@ task automatic exec_op;
         mul_signed = (cur_op == 8'h86);
         p = mul_signed ? $signed({{32{op1[31]}}, op1}) * $signed({{32{b[31]}}, b})
                        : {32'b0, op1} * {32'b0, b};
+        f_z <= (p == 0); f_s <= p[63];   // MAME opMULX/opMULUX leave OV unchanged
         if (flag2) begin
             queue_reg_write(op2[4:0], p[31:0], 32'hffff_ffff);
             queue_reg_write(op2[4:0] + 5'd1, p[63:32], 32'hffff_ffff);
+            st <= S_NEXT;
         end
-        f_z <= (p == 0); f_s <= p[63]; f_ov <= 0;
-        st <= S_NEXT;
+        else begin
+            // memory destination: store the 64-bit product as a qword.  The old
+            // code computed flags but never wrote the result (audit R20 V60-9).
+            movd_lo <= p[31:0];
+            movd_hi <= p[63:32];
+            st <= S_MOVD_WL;
+        end
     end
     8'ha6, 8'hb6: begin // DIVX/DIVUX: (reg-pair 64) / op1 -> q in reg, r in reg+1
         if (op1 == 0) begin
@@ -2893,9 +3141,14 @@ task automatic exec_op;
             xdiv_cnt <= 0;
             xdiv_dst <= op2[4:0];
             xdiv_active <= 1'b1;
+            divx_mem <= 1'b0;
             st <= S_DIVX;
         end
-        else st <= S_NEXT;
+        // Memory op2: the qword dividend lives at [op2]; the low word is already
+        // in op2val (f12_reads_dest), so read the high word then divide and write
+        // the quotient/remainder back to memory.  The old code skipped the whole
+        // operation for a memory operand (audit R20 V60-9).
+        else st <= S_DIVXM_RH;
     end
 
     // ------------ XCH ------------
@@ -2971,17 +3224,26 @@ task automatic exec_op;
         end
     end
 
-    // ------------ TRAP: 3-word frame, vector 48+(n&0xF) (A2) ------------
+    // ------------ TRAP/cc: 3-word frame, vector 48+(n&0xF) (A2) ------------
     8'hf8, 8'hf9: begin
-        // MAME opTRAP: vector = GETINTVECT(48 + (amout&0xF)); code+size word
-        // = 0x3000 + 0x100*(amout&0xF); return PC = PC + amlength + 1.
-        exc_vector   <= 8'd48 + {4'b0, op1[3:0]};
-        // code = 0x3000 + 0x100*(n&0xF); word = (code<<16)|size(=4)
-        exc_code     <= {4'h3, op1[3:0], 8'h00, 16'h0004};
-        exc_pushval  <= psw;
-        exc_retpc    <= pc + 5'd1 + len1;
-        exc_has_code <= 1'b1;
-        st <= S_EXC_PUSH1;
+        // MAME opTRAP: the operand's HIGH nibble is a Bcc-encoded condition
+        // (cond 0xB never traps); only trap when it evaluates true, else fall
+        // through.  The old code trapped unconditionally, so a compiler
+        // TRAP/cc overflow/bounds check faulted every time (audit R20 V60-4).
+        // vector = GETINTVECT(48 + (n&0xF)); code word = 0x3000 + 0x100*(n&0xF);
+        // return PC = PC + amlength + 1.
+        if (cond_true(op1[7:4])) begin
+            exc_vector   <= 8'd48 + {4'b0, op1[3:0]};
+            exc_code     <= {4'h3, op1[3:0], 8'h00, 16'h0004};
+            exc_pushval  <= psw;
+            exc_retpc    <= pc + 5'd1 + len1;
+            exc_has_code <= 1'b1;
+            st <= S_EXC_PUSH1;
+        end
+        else begin
+            total_len <= 5'd1 + len1;
+            st <= S_NEXT;
+        end
     end
 
     // ------------ short-format ops decoded via C_SHORT ------------
@@ -2992,9 +3254,19 @@ task automatic exec_op;
         d = cur_op[2:1];
         inc = cur_op[3];
         if (flag1) begin
+            // INC/DEC are ADDB/SUBB(dst,1,0): they produce the FULL add/sub
+            // flags.  The old code set no overflow (so a signed branch after a
+            // counter INC/DEC read a stale OV) and computed INC.W carry from a
+            // constant-0 shift (audit R20 V60-5, the spidman enemy-attack path).
             res = dimext(rf_rdata_a, d) + (inc ? 32'd1 : 32'hffffffff);
-            f_cy <= inc ? (dimext(rf_rdata_a,d)+1 >> (d==0?8:d==1?16:32)) != 0
-                        : (dimext(rf_rdata_a,d) == 0);
+            if (inc) begin
+                f_cy <= zer(res, d);                       // carry: value wrapped
+                f_ov <= ~sgn(rf_rdata_a, d) & sgn(res, d); // +max -> negative
+            end
+            else begin
+                f_cy <= zer(rf_rdata_a, d);                // borrow: dst was 0
+                f_ov <= sgn(rf_rdata_a, d) & ~sgn(res, d); // -min -> positive
+            end
             set_zs(res, d);
             setreg(op1[4:0], res, d);
             total_len <= 5'd1 + len1;
@@ -3204,6 +3476,26 @@ function automatic [31:0] sha_res(input [31:0] v, input [7:0] cnt, input [1:0] d
     else        x = x >>> (-c);
     sha_res = x;
 endfunction
+// SHA left-shift overflow (MAME SHIFTLEFT_OV op12.hxx): OV is set when the top
+// `count` bits of the width-sized value are not all equal to the sign bit —
+// i.e. a bit different from the sign is shifted out through the top.  MAME masks
+// exactly `count` bits (((1<<count)-1) << (bitsize-count)); using count+1 here
+// spuriously set OV (e.g. SHA.B #1,0x40 gave OV=1 vs MAME OV=0), misbranching a
+// following signed Bcc (S^OV).  audit V60-7 residual fixed.
+function automatic sha_left_ov(input [31:0] v, input [7:0] cnt, input [1:0] d);
+    logic signed [7:0] c;
+    integer w;
+    logic [31:0] field, ones;
+    c = cnt;
+    w = (d==2'd0) ? 8 : (d==2'd1) ? 16 : 32;
+    if (c <= 0)      sha_left_ov = 1'b0;              // right shift / zero: no OV
+    else if (c > w)  sha_left_ov = (dimext(v,d) != 0);// count > width: MAME's macro is UB here (bitsize-count<0); any nonzero value overflowed
+    else begin       // 1 <= count <= width: exact MAME SHIFTLEFT_OV mask (count==width uses the full-width mask, matching MAME's count==bitsize case, e.g. SHA.B #8,-1 -> OV=0)
+        field = (dimext(v,d) >> (w - c)) & ((32'd1 << c) - 1);  // top `count` bits
+        ones  = (32'd1 << c) - 1;
+        sha_left_ov = sgn(v,d) ? (field != ones) : (field != 32'd0);
+    end
+endfunction
 function automatic [31:0] rot_res(input [31:0] v, input [7:0] cnt, input [1:0] d);
     logic signed [7:0] c;
     logic [31:0] x;
@@ -3252,21 +3544,46 @@ task automatic md_finish;
     d2 = f12_dim2(cur_op);
     case (cur_op)
     8'h81, 8'h83, 8'h85, 8'h91, 8'h93, 8'h95: begin
+        // Overflow was a constant-0 upper-word test (always false for byte/half)
+        // and, for signed MUL, tested the unsigned product's high half (audit
+        // R20 V60-6).  Compute the exact width-correct signed/unsigned product
+        // overflow from the retained operands.
+        logic [63:0] uprod;
+        logic signed [63:0] sprod;
+        logic signed [31:0] sa32, sb32;
+        uprod = {32'b0, mdop} * {32'b0, md_savb};                 // unsigned product
+        sa32  = (d2==2'd0) ? {{24{mdop[7]}},   mdop[7:0]}   :
+                (d2==2'd1) ? {{16{mdop[15]}},  mdop[15:0]}  : mdop;
+        sb32  = (d2==2'd0) ? {{24{md_savb[7]}},md_savb[7:0]}:
+                (d2==2'd1) ? {{16{md_savb[15]}},md_savb[15:0]} : md_savb;
+        sprod = $signed({{32{sa32[31]}}, sa32}) * $signed({{32{sb32[31]}}, sb32});
         set_zs(mdacc[31:0], d2);
-        f_ov <= (mdacc[63:32] != 0);
+        // MAME opMUL/opMULU: OV = (product >> width) != 0 on the product's
+        // unsigned bit pattern (signed product for MUL, unsigned for MULU).
+        // For byte/half MAME shifts the 32-bit value; for word, the 64-bit one.
+        // A negative signed product therefore also sets OV (e.g. MUL.W -1*1).
+        if (!cur_op[4])  // MUL (signed)
+            f_ov <= (d2==2'd0) ? (sprod[31:8]  != 0) :
+                    (d2==2'd1) ? (sprod[31:16] != 0) :
+                                 (sprod[63:32] != 0);
+        else             // MULU (unsigned)
+            f_ov <= (d2==2'd0) ? (uprod[31:8]  != 0) :
+                    (d2==2'd1) ? (uprod[31:16] != 0) :
+                                 (uprod[63:32] != 0);
         wb_op2(mdacc[31:0], d2);
     end
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5: begin // DIV: quotient (signed applied)
         logic [31:0] q;
         q = md_qsign ? (~mdacc[31:0] + 1'b1) : mdacc[31:0];
         set_zs(q, d2);
-        f_ov <= 0;
+        f_ov <= md_divov;      // signed min/-1 overflow (audit R20 V60-8)
         wb_op2(q, d2);
     end
     8'h50, 8'h51, 8'h52, 8'h53, 8'h54, 8'h55: begin // REM: remainder (sign of dividend)
         logic [31:0] rem;
         rem = md_rsign ? (~mdacc[63:32] + 1'b1) : mdacc[63:32];
         set_zs(rem, d2);
+        f_ov <= 1'b0;          // MAME clears OV for REM/REMU (audit R20 V60-8)
         wb_op2(rem, d2);
     end
     default: ;

@@ -21,7 +21,7 @@ module tb_soundsys_z80;
     s32_soundsys #(.SYSTEM32_ONLY(1'b1)) dut (
         .clk(clk), .ce_z80(1'b1), .ce_fm(1'b0), .ce_pcm(1'b1),
         .rst(rst), .z80_reset(1'b0), .is_multi32(1'b0),
-        .sh_cs(1'b0), .sh_we(1'b0), .sh_addr(13'd0), .sh_wdata(8'd0),
+        .sh_cs(1'b0), .sh_we(1'b0), .sh_addr(12'd0), .sh_be(2'd0), .sh_wdata(16'd0),
         .sh_rdata(), .v60_doorbell(1'b0), .irq_to_v60(),
         .zrom_req(zrom_req), .zrom_addr(zrom_addr),
         .zrom_data(zrom_data), .zrom_ack(zrom_ack),

@@ -122,6 +122,10 @@ initial begin
     movw_reg_abs(5'd0, 32'h0060_0000);           // palette[0] = 0x7FFF
     movw_imm_reg(32'h0000_1234, 5'd1);
     movw_reg_abs(5'd1, 32'h0030_0000);           // VRAM[0] = 0x1234
+    // IO-7: write a byte to the s32comm share RAM (0x800000). The regular PCB
+    // has S32COMM, so this must store as RAM (only D[7:0] is mapped).
+    movw_imm_reg(32'h0000_005A, 5'd6);
+    movw_reg_abs(5'd6, 32'h0080_0000);           // comm share RAM[0] = 0x5A
     // intc: vector for source0 (vblank) = 0x05 -> reg0 @0xD00000
     movw_imm_reg(32'h0000_0005, 5'd2);
     movw_reg_abs(5'd2, 32'h00D0_0000);
@@ -165,13 +169,14 @@ initial begin
     // let a few frames elapse
     repeat (900000) @(posedge clk_sys);
 
-    $display("palette[0]=%04x vram[0]=%04x wram[0x80]=%04x halted=%0d vs_count=%0d",
+    $display("palette[0]=%04x vram[0]=%04x wram[0x80]=%04x comm[0]=%02x halted=%0d vs_count=%0d",
         core.pal0.sim_peek(14'h0000), core.vram.video_ram.sim_peek(16'h0000),
-        core.work_ram.sim_peek(16'h0080), core.v60.dbg_halted, vs_count);
+        core.work_ram.sim_peek(16'h0080), core.comm_peek(11'h000), core.v60.dbg_halted, vs_count);
 
     if (core.pal0.sim_peek(14'h0000) == 16'h7FFF &&
         core.vram.video_ram.sim_peek(16'h0000) == 16'h1234 &&
         core.work_ram.sim_peek(16'h0080) == 16'hCAFE &&
+        core.comm_peek(11'h000) == 8'h5A &&
         vs_count >= 1)
         $display("CORE BOOT PASS");
     else

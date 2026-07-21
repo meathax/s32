@@ -196,6 +196,11 @@ class V60:
             k = self.decode_am(1, d, False); v = self.load(k)
             self.setzs(v, d); self.ov=0; self.cy=0
             self.pc += 1 + k[2]; return
+        if op in (0xF6, 0xF7):  # GETPSW: write PSW to the operand
+            self._cur_modm = op & 1
+            k = self.decode_am(1, 2, True)
+            self.store(k, self.psw(), 2)
+            self.pc += 1 + k[2]; return
         raise NotImplementedError(f"opcode {op:#04x} @ {self.pc:#x}")
 
     def _exec_f12(self, op):
@@ -265,15 +270,27 @@ def _neg(cpu,a,b,o2,d):
     r=(0-a)&M32; cpu.cy=1 if dimext(a,d)!=0 else 0
     cpu.ov=dimsgn(a,d)&dimsgn(r,d); cpu.setzs(r,d); cpu.store(o2,r,d)
 def _mul(cpu,a,b,o2,d):
-    r=(sx(b,dimbits(d))*sx(a,dimbits(d)))&M32; cpu.setzs(r,d); cpu.store(o2,r,d)
+    # MAME opMUL: OV = (product >> width) != 0 on the SIGNED product's unsigned
+    # bit pattern (byte/half shift the 32-bit value, word the 64-bit one).
+    n=dimbits(d); prod=sx(b,n)*sx(a,n)
+    mask=0xFFFFFFFF if n<32 else 0xFFFFFFFFFFFFFFFF
+    cpu.ov=1 if ((prod & mask) >> n)!=0 else 0
+    r=prod&M32; cpu.setzs(r,d); cpu.store(o2,r,d)
 def _mulu(cpu,a,b,o2,d):
-    r=(dimext(b,d)*dimext(a,d))&M32; cpu.setzs(r,d); cpu.store(o2,r,d)
+    n=dimbits(d); prod=dimext(b,d)*dimext(a,d)
+    mask=0xFFFFFFFF if n<32 else 0xFFFFFFFFFFFFFFFF
+    cpu.ov=1 if ((prod & mask) >> n)!=0 else 0
+    r=prod&M32; cpu.setzs(r,d); cpu.store(o2,r,d)
 def _div(cpu,a,b,o2,d):
     if dimext(a,d)==0: return
-    r=int(sx(b,dimbits(d))/sx(a,dimbits(d))) if sx(a,dimbits(d)) else 0
+    n=dimbits(d)
+    # signed min / -1 overflow (dest keeps the wrapped quotient, which equals it)
+    cpu.ov=1 if (dimext(b,d)==(1<<(n-1)) and dimext(a,d)==((1<<n)-1)) else 0
+    r=int(sx(b,n)/sx(a,n)) if sx(a,n) else 0
     cpu.setzs(r&M32,d); cpu.store(o2,r&M32,d)
 def _divu(cpu,a,b,o2,d):
     if dimext(a,d)==0: return
+    cpu.ov=0
     r=(dimext(b,d)//dimext(a,d))&M32; cpu.setzs(r,d); cpu.store(o2,r,d)
 def _shl(cpu,a,b,o2,d):
     c=sx(a,8); v=dimext(b,d); r=(v<<c)&M32 if c>=0 else (v>>(-c)); cpu.setzs(r,d); cpu.store(o2,r,d)

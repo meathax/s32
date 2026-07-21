@@ -63,7 +63,7 @@ s32_sprite sprite (
     .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
-    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .mode_416(1'b0)
+    .fb_er_ack(fbe_ack), .disp_buf(disp_buf)
 );
 
 // MiSTer DDR interface.

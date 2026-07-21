@@ -67,8 +67,7 @@ module s32_sprite #(
     output reg  [7:0] fb_er_y,
     input             fb_er_ack,
 
-    output reg  [1:0] disp_buf,     // which buffer pair the mixer reads
-    input             mode_416
+    output reg  [1:0] disp_buf      // which buffer pair the mixer reads
 );
 
 // control registers
@@ -80,12 +79,18 @@ reg       erase_after_swap;         // combined command: swap before destructive
 reg       erase_buf_sel;            // buffer selected before a combined swap
 reg       erase_mon;                // Multi32 erase visits both monitors
 reg [15:0] post_vblank_count;
+reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
 
 always @(*) begin
     case (ctl_raddr)
         // MAME exposes only selected-buffer bit 0. Erase-busy appears only
         // in an old source-code comment, not in the implementation.
-        3'd0: ctl_rdata = {6'h3f, 1'b0, disp_buf[0]};
+        // MAME reg 0 bit0 = (SPRITES.num < SPRITES_2.num): reads 1 at power-up
+        // (6<8) and toggles to 0 after the first swap — the exact complement of
+        // the internal displaying-buffer selector, which resets to 0 and reads
+        // 1 after the first swap.  Invert only the CPU-visible bit; the internal
+        // render/erase/display targeting is unchanged (audit R20 SP-1).
+        3'd0: ctl_rdata = {6'h3f, 1'b0, ~disp_buf[0]};
         3'd1: ctl_rdata = {6'h3f, 2'd1};              // status: normal
         3'd2: ctl_rdata = {6'h3f, ctl_latched[2][1:0]};
         3'd3: ctl_rdata = {6'h3f, ctl_latched[3][1:0]};
@@ -158,7 +163,6 @@ wire [15:0] d_color  = 16'h8000 | (sw[7] & (d_bpp8 ? 16'h7f00 : 16'h7ff0));
 reg [24:0] yacc, ystep;   // MAME controller model uses 16.16 zoom
 reg [24:0] xacc, xstep;
 reg [9:0]  dy, dx;        // dest iterators
-reg [12:0] sx;
 reg signed [13:0] x0, y0; // wide MAME int-domain origin; no 12-bit wrap
 reg [15:0] indtab [0:15];
 reg [3:0]  indi;
@@ -253,7 +257,8 @@ endfunction
 
 always @(posedge clk) begin
     if (rst) begin
-        rs <= R_IDLE; rendering <= 0; disp_buf <= 0;
+        rs <= R_IDLE; rendering <= 0;
+        disp_buf <= 2'b00;
         debug_first_rom_desc <= 128'd0;
         debug_first_rom_valid <= 1'b0;
         debug_last_desc <= 128'd0;
@@ -274,6 +279,7 @@ always @(posedge clk) begin
         render_count <= 0; render_after_erase <= 0;
         erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
+        vblank_pending <= 1'b0;         // audit R20 SP-3
         jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
         // uninitialized stalls the walker in R_IDLE until the game writes them
@@ -294,8 +300,15 @@ always @(posedge clk) begin
         if (vblank) debug_activity[0] <= 1'b1;
         if (fb_busy) debug_activity[21] <= 1'b1;
 
+        // audit R20 SP-3: a vblank pulse arriving while the FSM is still
+        // erasing/rendering (not R_IDLE) is otherwise dropped, delaying that
+        // frame's swap. Latch it and consume it on the next return to R_IDLE.
+        // MAME never misses because its render is instantaneous.
+        if (vblank && rs != R_IDLE) vblank_pending <= 1'b1;
+
         case (rs)
-        R_IDLE: if (vblank) begin
+        R_IDLE: if (vblank || vblank_pending) begin
+            vblank_pending <= 1'b0;     // audit R20 SP-3: consume latched vblank
             post_vblank_count <= POST_VBLANK_CYCLES;
             rs <= R_DELAY;
         end
@@ -317,7 +330,10 @@ always @(posedge clk) begin
                     render_count <= ctl[3][0];
                 end
                 else begin
-                    command = 2'b00;
+                    // audit R20 SP-2: on the 30Hz skip frame MAME leaves
+                    // m_sprite_control[0] untouched (m_sprite_render_count--
+                    // != 0), so a CPU-written manual command still executes.
+                    command = ctl[0][1:0];
                     render_count <= render_count - 1'd1;
                 end
             end

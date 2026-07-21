@@ -35,6 +35,7 @@ module s32_mixer (
     input       [8:0] disp_y,
     input             disp_active,
     input             display_en,    // 315-5296 CNT1
+    input             flip_y,        // cabinet ORIENTATION_FLIP_Y (backdrop line)
     input       [5:0] layer_off,     // per-layer disable (TEXT,NBG0-3,BITMAP)
     input      [15:0] bg_ctrl,       // VRAM $1FF5E backdrop/line-color select
 
@@ -201,8 +202,13 @@ reg [3:0] best2sel_hold;
 //   bit15 ? (bg_ctrl & 0x1e00) + ((bg_ctrl + y) & 0x1ff)
 //         : (bg_ctrl & 0x1e00)
 // ---------------------------------------------------------------------------
+// Under the cabinet ORIENTATION_FLIP_Y adapter the backdrop line-color gradient
+// must index the CRAM table in game coordinates (223 - y), like the tile and
+// sprite source lines; the constant-backdrop mode (bit15=0) is unaffected
+// (audit R20 TM-2 / SP-4).
+wire [8:0] bg_line = (flip_y && disp_y < 9'd224) ? (9'd223 - disp_y) : disp_y;
 wire [13:0] bg_pen = {1'b0, bg_ctrl[12:9], 9'b0}
-                   + (bg_ctrl[15] ? {5'b0, (bg_ctrl[8:0] + disp_y) & 9'h1ff} : 14'd0);
+                   + (bg_ctrl[15] ? {5'b0, (bg_ctrl[8:0] + bg_line) & 9'h1ff} : 14'd0);
 
 // ---------------------------------------------------------------------------
 // per-layer palette info: palbase nibble, mixshift, 14-bit pen

@@ -127,11 +127,11 @@ localparam CONF_STR = {
     "S32;;",
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
-    "O[5:3],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
+    "O[5:3],Scandoubler Fx,None,CRT 25%,CRT 50%,CRT 75%;",
     "-;",
     "O[6],Screen (Multi32),A,B;",
     "O[7],Service Mode,Off,On;",
-    "O[10:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR;",
+    "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var;",
     "-;",
     "R[0],Reset;",
     "J1,B1,B2,B3,B4,B5,B6,Start,Coin;",
@@ -316,8 +316,8 @@ wire[127:0] p2_dout;
 // Each returned 16-bit lane is displayed as a 64-pixel colour band by the
 // debug video mux below.  This distinguishes SDRAM burst corruption from the
 // tile/sprite unpackers without changing the normal game path.
-wire debug_tile_probe   = status[10:8] == 3'd4;
-wire debug_sprite_probe = status[10:8] == 3'd5;
+wire debug_tile_probe   = status[11:8] == 4'd4;
+wire debug_sprite_probe = status[11:8] == 4'd5;
 localparam [24:3] DEBUG_TILE_ADDR = SDR_TILES_BASE[24:3] + 22'd92;
 localparam [24:4] DEBUG_SPR_ADDR  = SDR_SPRITES_BASE[24:4];
 reg         debug_p1_req;
@@ -477,8 +477,18 @@ assign trk_dy_a[0] = m_dy[0]; assign trk_dy_a[1] = m_dy[1]; assign trk_dy_a[2] =
 wire [7:0] portc = 8'hff;
 wire [7:0] svc12 = ~{2'b00, joystick_1[10], joystick_0[10],
                      joystick_1[11], joystick_0[11], status[7], 1'b0};
-// GA2's 4-player i8255 port C carries Start3/Start4 on bits 0/1.
-wire [7:0] ga2_ppi_pc = ~{6'b0, joystick_3[10], joystick_2[10]};
+// GA2's 4-player i8255 port C is MAME EXTRA3 (ppi.in_pc_callback -> "EXTRA3").
+// Base sets: bit0=Start3, bit1=Start4, bits[7:2] unused. The US sets (ga2u,
+// spidmanu, arabfgtu) instead read COIN1 on bit3 (0x08) and COIN2 on bit2
+// (0x04) here (PORT_MODIFY EXTRA3). IO-11/12: additively drive those two bits
+// from the same P1/P2 coin buttons that feed SERVICE12 coin1/coin2, so US sets
+// register their primary coins. Safe for every non-US set because they mark
+// EXTRA3 bits 2/3 IPT_UNUSED. NOTE (unverified on hardware): on a US set the
+// coin button now also pulses SERVICE12 (read there as COIN3/COIN4), so if that
+// game credits COIN3/4 as well as COIN1/2 a single press could double-count;
+// eliminating that needs a board-descriptor US flag, deferred by choice.
+wire [7:0] ga2_ppi_pc = ~{4'b0, joystick_0[11], joystick_1[11],
+                          joystick_3[10], joystick_2[10]};
 
 //////////////////////////////   CORE   ///////////////////////////////////////
 wire [23:0] rgb_a, rgb_b;
@@ -499,6 +509,9 @@ wire  [31:0] core_debug_sprite_state;
 wire  [63:0] core_debug_sprite_counts;
 wire         core_debug_sprite_rendering;
 wire  [47:0] core_debug_sprram_cpu;
+wire  [47:0] core_debug_pal_rd;      // clk_sys palette shadow {0x410,0x200,0x000}
+wire  [23:0] core_debug_fb_underrun; // PF-6: sprite line-fetch overrun telemetry
+wire  [15:0] core_debug_cam;         // spidman world-camera {page, display_lo}
 
 s32_core core (
     .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(reset), .video_rst(video_reset),
@@ -545,7 +558,10 @@ s32_core core (
     .debug_sprite_state(core_debug_sprite_state),
     .debug_sprite_counts(core_debug_sprite_counts),
     .debug_sprite_rendering(core_debug_sprite_rendering),
-    .debug_sprram_cpu(core_debug_sprram_cpu)
+    .debug_sprram_cpu(core_debug_sprram_cpu),
+    .debug_pal_rd(core_debug_pal_rd),
+    .debug_fb_underrun(core_debug_fb_underrun),
+    .debug_cam(core_debug_cam)
 );
 
 assign AUDIO_L = aud_l;
@@ -658,15 +674,41 @@ wire [23:0] debug_fb_rgb = core_debug_hcnt < 9'd32 ?
                               {ddrdata_count, fbe_y, fbr_y} :
                               {8'h00, fbr_pix};
 
-wire [23:0] debug_rgb = status[10:8] == 3'd1 ? core_debug_pc[23:0] :
-                        status[10:8] == 3'd2 ? core_debug_status :
-                        status[10:8] == 3'd3 ? {8'h00, core_debug_first_rom} :
-                        status[10:8] == 3'd4 ? (debug_p1_valid ? {8'h00, debug_p1_word} : 24'hC00000) :
-                        status[10:8] == 3'd5 ? debug_p2_rgb :
-                        status[10:8] == 3'd6 ? {input_coin_seen ? 8'hff : 8'h00,
+// Palette-readback diagnostic (audit R20 palette suspects).  Three horizontal
+// bands show the clk_sys native content of palette entries 0x000 (top),
+// 0x200 (middle — the Holosseum backdrop) and 0x410 (bottom — sprite base),
+// converted xBBBBBGGGGGRRRRR -> RGB888.  Comparing the middle band (clk_sys
+// shadow of 0x200) against the normal game backdrop (clk_ram read of 0x200)
+// splits the fault: middle-band black + game background blue => a below-RTL
+// read/storage divergence; both blue => a write-side value fault.
+wire [15:0] dbg_pal_sel = (core_debug_vcnt < 9'd74)  ? core_debug_pal_rd[15:0]  :
+                          (core_debug_vcnt < 9'd149) ? core_debug_pal_rd[31:16] :
+                                                       core_debug_pal_rd[47:32];
+wire [4:0] dbg_pr = dbg_pal_sel[4:0], dbg_pg = dbg_pal_sel[9:5], dbg_pb = dbg_pal_sel[14:10];
+wire [23:0] debug_pal_rgb = {dbg_pr, dbg_pr[4:2], dbg_pg, dbg_pg[4:2], dbg_pb, dbg_pb[4:2]};
+
+// Camera-var view: GREEN = display low byte 0x208032 (should ramp smoothly as
+// you walk right); MAGENTA = page byte 0x208033 scaled (should step up only at
+// page boundaries).  If magenta jumps up almost immediately while green is
+// still low, the core's page is running ahead of the display -> the carry
+// divergence behind the early Venom/Scorpion triggers.
+wire [7:0] cam_page = core_debug_cam[15:8];
+wire [7:0] cam_lo   = core_debug_cam[7:0];
+wire [7:0] cam_mag  = {cam_page[2:0], 5'h00};
+wire [23:0] debug_cam_rgb = {cam_mag, cam_lo, cam_mag};
+
+wire [23:0] debug_rgb = status[11:8] == 4'd1 ? core_debug_pc[23:0] :
+                        status[11:8] == 4'd2 ? core_debug_status :
+                        status[11:8] == 4'd3 ? {8'h00, core_debug_first_rom} :
+                        status[11:8] == 4'd4 ? (debug_p1_valid ? {8'h00, debug_p1_word} : 24'hC00000) :
+                        status[11:8] == 4'd5 ? debug_p2_rgb :
+                        status[11:8] == 4'd6 ? {input_coin_seen ? 8'hff : 8'h00,
                                                input_start_seen ? 8'hff : 8'h00,
                                                ~svc12} :
-                        status[10:8] == 3'd7 ? debug_fb_rgb :
+                        status[11:8] == 4'd7 ? debug_fb_rgb :
+                        status[11:8] == 4'd8 ? debug_pal_rgb :
+                        status[11:8] == 4'd9 ? core_debug_fb_underrun :
+                        status[11:8] == 4'd10 ? debug_cam_rgb :
                                                    game_rgb;
 // Valid sync continues throughout startup. The solid colour identifies the
 // exact gate holding game logic: blue=download, red=ROM completion,
@@ -682,8 +724,20 @@ assign VGA_B  = rgb_out[7:0];
 assign VGA_HS = core_hs;
 assign VGA_VS = core_vs;
 assign VGA_DE = ~(core_hb | core_vb);
-assign VGA_SL = status[5:4];
-assign VIDEO_ARX = status[2:1] == 0 ? 13'd13 : 13'd16;
-assign VIDEO_ARY = status[2:1] == 0 ? 13'd7  : 13'd9;
+// Scandoubler Fx is a 3-bit field (None/CRT 25/50/75).  VGA_SL takes the two low
+// bits directly so None=0 and CRT 25/50/75 map to 1/2/3 (audit R20 PF-1 — the old
+// status[5:4] slice made CRT 75% unreachable; audit F2 — dropped the
+// non-functional "HQ2x" option, this core has no hq2x scaler instance).
+wire [2:0] scandoubler_fx = status[5:3];
+wire [2:0] scanline_level = scandoubler_fx;   // None=0, CRT 25/50/75 = 1/2/3
+assign VGA_SL = scanline_level[1:0];
+
+// Original = the 4:3 arcade monitor (MAME's default for both 320- and 416-wide
+// System 32 modes); the old 13:7 square-pixel ratio stretched holo's 320 mode.
+// Full Screen fills; [ARC1]/[ARC2] emit the framework custom-aspect encoding
+// (ARY=0, ARX = menu index) instead of acting as 16:9 (audit R20 PF-2).
+wire [1:0] aspect = status[2:1];
+assign VIDEO_ARX = (aspect == 0) ? 13'd4 : {11'd0, (aspect - 1'd1)};
+assign VIDEO_ARY = (aspect == 0) ? 13'd3 : 13'd0;
 
 endmodule

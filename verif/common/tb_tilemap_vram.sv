@@ -59,7 +59,7 @@ wire [13:0] lb_pix;
 
 s32_tilemap dut (
     .clk(clk_ram), .rst(rst), .line(render_line), .line_start(line_start),
-    .line_done(line_done), .mode_416(1'b0), .ext_tilebank(2'b00),
+    .line_done(line_done), .mode_416(1'b0), .is_multi32(1'b0), .ext_tilebank(8'b0),
     .r1ff00(r1ff00), .r1ff02(r1ff02), .r1ff04(r1ff04),
     .r1ff06(r1ff06), .r1ff5c(r1ff5c), .r1ff5e(r1ff5e),
     .r1ff88(r1ff88), .r1ff8a(r1ff8a), .r1ff8c(r1ff8c),

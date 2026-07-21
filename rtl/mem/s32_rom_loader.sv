@@ -116,7 +116,10 @@ always @(posedge clk) begin
             busy       <= 1'b0;
         end
 
-        if (mem_ready && ioctl_download && ioctl_wr) begin
+        // audit R20 PF-3: accept a new ioctl word only when the SDRAM write
+        // mailbox is free (!busy); ioctl_wait (=busy) backpressures the HPS to
+        // hold and re-present the word after sdr_wr_ack, so none is dropped.
+        if (mem_ready && ioctl_download && ioctl_wr && !busy) begin
             if (ioctl_index == 8'd0) begin
                 if (ioctl_addr < OFF_MAINCPU) begin
                     // descriptor

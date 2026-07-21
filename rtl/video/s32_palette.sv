@@ -20,7 +20,13 @@ module s32_palette (
 
     // mixer read port
     input      [13:0] mix_addr,
-    output     [15:0] mix_data
+    output     [15:0] mix_data,
+
+    // On-hardware diagnostic: clk_sys native content of bank0 rows
+    // 0x000/0x200/0x410 (Holosseum backdrop = 0x200, sprite base = 0x410).
+    // {0x410, 0x200, 0x000}.  Read on the CPU clock, independent of the
+    // clk_ram mixer read path under investigation (audit R20 palette suspects).
+    output     [47:0] dbg_entries
 );
 
 wire conv = cpu_addr[14];
@@ -100,6 +106,46 @@ always @(posedge clk) begin
         pend_native <= wr_native;
     end
 end
+
+// On-hardware palette readback diagnostic (synthesizable, always present).
+// A clk_sys native-format shadow of the three bank0 entries the Holosseum
+// investigation inspects, updated with the *identical* masked CPU write and
+// write-both pend-copy logic the bitplanes use — so it reflects the clk_sys-
+// committed content of each entry regardless of the clk_ram mixer read path.
+// Comparing this against the on-screen backdrop (clk_ram read of 0x200) splits
+// a below-RTL read/storage fault (shadow black, backdrop blue) from a write-
+// side fault (both blue).  Three entries only, so the cost is trivial.
+reg [15:0] dbg_e000, dbg_e200, dbg_e410;
+initial begin dbg_e000 = 16'h0000; dbg_e200 = 16'h0000; dbg_e410 = 16'h0000; end
+always @(posedge clk) begin
+    if (cpu_we) begin
+        // A new CPU write wins over any outstanding pend copy (matches the
+        // plane's copy_cycle = pend_we && !cpu_we).  Only bank0 (!a[13])
+        // direct writes touch these shadow entries.
+        if (!a[13]) begin
+            if (cpu_row == 13'h000) dbg_e000 <= (dbg_e000 & ~wr_mask) | (wr_native & wr_mask);
+            if (cpu_row == 13'h200) dbg_e200 <= (dbg_e200 & ~wr_mask) | (wr_native & wr_mask);
+            if (cpu_row == 13'h410) dbg_e410 <= (dbg_e410 & ~wr_mask) | (wr_native & wr_mask);
+        end
+    end
+    else if (pend_we && !pend_bank) begin
+        if (pend_row == 13'h000) dbg_e000 <= (dbg_e000 & ~pend_mask) | (pend_native & pend_mask);
+        if (pend_row == 13'h200) dbg_e200 <= (dbg_e200 & ~pend_mask) | (pend_native & pend_mask);
+        if (pend_row == 13'h410) dbg_e410 <= (dbg_e410 & ~pend_mask) | (pend_native & pend_mask);
+    end
+end
+assign dbg_entries = {dbg_e410, dbg_e200, dbg_e000};
+
+`ifdef SIMULATION
+// The write-both mirror copy commits on the cycle after each CPU write, which
+// the core bus guarantees by leaving an idle clock.  If a second write-both
+// arrived before the copy committed, the mirror write would be silently lost.
+// Flag it so a future second bus master (or a pipelined bus change) is caught
+// rather than corrupting the palette (audit R20 CG-1).
+always @(posedge clk)
+    if (pend_we && cpu_we && write_both)
+        $display("WARNING s32_palette: write-both pend copy dropped by a back-to-back write @ %0t", $time);
+`endif
 
 `ifdef SIMULATION
 // Stable simulation-only observation API for full-core benches.  Keeping a

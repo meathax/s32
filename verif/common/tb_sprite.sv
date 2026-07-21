@@ -133,7 +133,7 @@ s32_sprite #(.POST_VBLANK_CYCLES(4)) dut (
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(1'b0),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
-    .disp_buf(), .mode_416(1'b0)
+    .disp_buf()
 );
 
 // write one list entry (8 words at entry*8)
@@ -541,8 +541,8 @@ initial begin
         $display("  FAIL four-bank address=%05x", srom_addr);
     end
 
-    // ---- 20: ctl6 is latched at swap and drives sprite outer width. The
-    // live mode_416 test input remains low, so x=400 proves latched ctl6 use. ----
+    // ---- 20: ctl6 is latched at swap and drives sprite outer width; x=400
+    // proves the sprite uses the latched ctl6 value. ----
     wctl(3'd6, 8'h01);
     entry(0, W0_PLAIN, W1_1x1, 16'h0001, 16'h0008,
           16'd10,16'd400,16'h0000,COLOR);
