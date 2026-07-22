@@ -480,6 +480,52 @@ always @(posedge clk_sys) begin
             $fwrite(sprdump_fd, "%04x\n", core.sprite_ram.mem[sprdump_i]);
         $fclose(sprdump_fd);
         $display("[sprdump] wrote sim_spriteram.hex at frame %0d", sprdump_cur);
+        // Also dump the full V60 work RAM (0x200000-0x20FFFF = 0x8000 words) so
+        // the game/object state can be diffed vs MAME's ga2_wram_select520.hex.
+        sprdump_fd = $fopen("sim_wram.hex", "w");
+        for (sprdump_i = 0; sprdump_i < 16'h8000; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[wramdump] wrote sim_wram.hex at frame %0d", sprdump_cur);
+    end
+    // Multi-frame work-RAM snapshots to locate the FIRST frame of divergence vs
+    // MAME (attract pre-coin @250, mid-sequence @400, just-entered-select @500).
+    if (core.vcnt == 9'd150) begin
+        if (sprdump_cur == 250 && !wdone250) begin
+            wdone250 = 1'b1; wdump_fd = $fopen("sim_wram_250.hex","w");
+            for (sprdump_i=0; sprdump_i<16'h8000; sprdump_i=sprdump_i+1)
+                $fwrite(wdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
+            $fclose(wdump_fd); $display("[wramdump] sim_wram_250.hex");
+        end
+        if (sprdump_cur == 400 && !wdone400) begin
+            wdone400 = 1'b1; wdump_fd = $fopen("sim_wram_400.hex","w");
+            for (sprdump_i=0; sprdump_i<16'h8000; sprdump_i=sprdump_i+1)
+                $fwrite(wdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
+            $fclose(wdump_fd); $display("[wramdump] sim_wram_400.hex");
+        end
+        if (sprdump_cur == 500 && !wdone500) begin
+            wdone500 = 1'b1; wdump_fd = $fopen("sim_wram_500.hex","w");
+            for (sprdump_i=0; sprdump_i<16'h8000; sprdump_i=sprdump_i+1)
+                $fwrite(wdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
+            $fclose(wdump_fd); $display("[wramdump] sim_wram_500.hex");
+        end
+    end
+end
+integer wdump_fd;
+reg wdone250 = 0, wdone400 = 0, wdone500 = 0;
+
+// Monitor every V60 write to char-select object[8] (0x2005a0, wram_a 0x2d0-0x2d7)
+// with the V60 PC + data. MAME spawns it at frame 436 via 0x063DB5 (word0=0x8000)
+// and 0x063DBB (handler=0x64200, PC-relative). This shows whether our V60 reaches
+// those spawn stores or diverges — and with what data (sim reads back 0x56e0/0x20).
+integer obj8_fd = 0;
+initial obj8_fd = $fopen("sim_obj8_writes.txt", "w");
+always @(posedge clk_sys) begin
+    if (core.m_req && core.m_we && core.sel_wram &&
+        core.wram_a >= 16'h02d0 && core.wram_a <= 16'h02d7) begin
+        $fwrite(obj8_fd, "frame=%0d pc=%08x wa=%04x data=%04x be=%b\n",
+            sprdump_cur, core.v60.dbg_pc, core.wram_a, core.m_wdata, core.m_be);
+        $fflush(obj8_fd);
     end
 end
 reg vb_d2 = 0, sprdump_done = 0;

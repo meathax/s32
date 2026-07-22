@@ -1126,8 +1126,24 @@ else if (ce) begin
             end
             else begin
                 // F2 D=0: op1 = reg value, op2 = AM(write)
-                op1   <= dimext(rf_rdata_a, f12_dim1(cur_op));
-                flag1 <= 1'b0;
+                // XCH.B/H/W exception: op1 is an LVALUE (the swap needs the
+                // register NUMBER, not its value). The generic value path left
+                // flag1=0, so XCH's exec (flag1&&flag2 fails) took the
+                // register<->memory branch and wrote R[op1] to a bogus address
+                // instead of swapping the two registers. This corrupted ga2's
+                // char-select object spawn (xch.w R19,R20 at 0x063BEB/0x063BF1),
+                // so the character objects never got their active flag/handler
+                // and the on-scale character never rendered. f12_op1_is_addr
+                // already classifies XCH op1 as an address for the F1/F2-D=1
+                // paths; this closes the F2-D=0 gap. (encoding 45 53 74)
+                if (cur_op == 8'h41 || cur_op == 8'h43 || cur_op == 8'h45) begin
+                    op1   <= {27'b0, instflags[4:0]};
+                    flag1 <= 1'b1;
+                end
+                else begin
+                    op1   <= dimext(rf_rdata_a, f12_dim1(cur_op));
+                    flag1 <= 1'b0;
+                end
                 len1  <= 0;
                 ea_modm <= instflags[6];
                 ea_ofs  <= 5'd2;
