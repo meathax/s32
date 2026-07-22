@@ -134,10 +134,6 @@ module s32_core #(
     output     [15:0] debug_cam         // spidman world-camera {page, display_lo}
 );
 
-// A System32-only bitstream must not enter a Multi 32 runtime configuration if
-// it is accidentally paired with a Multi 32 MRA.  The universal source build
-// retains the descriptor-selected path when SYSTEM32_ONLY is false.
-wire is_multi32 = SYSTEM32_ONLY ? 1'b0 : board.multi32;
 `ifdef S32_GA2_ONLY
 localparam GAME_ONLY = 1'b1;
 `elsif S32_HOLO_ONLY
@@ -145,6 +141,14 @@ localparam GAME_ONLY = 1'b1;
 `else
 localparam GAME_ONLY = 1'b0;
 `endif
+// A System32-only bitstream must not enter a Multi 32 runtime configuration if
+// it is accidentally paired with a Multi 32 MRA.  The universal source build
+// retains the descriptor-selected path when SYSTEM32_ONLY is false.  GAME_ONLY
+// profiles are dedicated single-screen System 32 builds by definition, so they
+// force the System 32 configuration even if a QSF sets a game macro without
+// S32_SYSTEM32_ONLY (previously that mismatch left is_multi32 following the
+// descriptor while the analog/trackball hardware it implies was compiled out).
+wire is_multi32 = (SYSTEM32_ONLY || GAME_ONLY) ? 1'b0 : board.multi32;
 
 // ---------------------------------------------------------------------------
 // CPU + bus adapter
@@ -548,7 +552,13 @@ reg       fb_rd_deadline_seen;
 // PF-6: surface the sprite line-fetch overrun telemetry for an OSD debug view.
 // R = sticky "ever underran" flag, G:B = saturating underrun count.
 assign debug_fb_underrun = {fb_rd_underrun_sticky ? 8'hff : 8'h00, fb_rd_underrun_count};
-wire fb_rd_kick = ce_pix && hcnt == (mode_416_active ? 9'd420 : 9'd324);
+// Prefetch only lines that will actually display: kicks during vcnt 0-222
+// fetch lines 1-223 and vcnt 261 fetches next frame's line 0.  The former
+// ungated kick also ran through the 37 vblank lines, fetching nonexistent
+// buffer rows 224-255 and wasting ~14% of the DDR line-read bandwidth (same
+// rationale as the TM-5 tilemap vblank suppression).
+wire fb_rd_kick = ce_pix && hcnt == (mode_416_active ? 9'd420 : 9'd324) &&
+                  (vcnt < 9'd223 || vcnt == 9'd261);
 wire fb_rd_deadline = ce_pix && hcnt == 9'd0 && vcnt < 9'd224;
 always @(posedge clk_ram) begin
     if (rst) begin
@@ -967,6 +977,10 @@ assign sdr_p5_addr = '0;
 // ---------------------------------------------------------------------------
 reg        rom_req_r;
 reg [23:1] rom_addr_r;
+// Transaction-acked flag (the read-mux ack register below).  Forward-declared
+// here so the icache lookup can suppress re-arming a completed ROM read while
+// the V60 bus still holds m_req; the driving logic lives in the read-mux block.
+reg        ack_r;
 assign sdr_p0_req  = rom_req_r;
 assign sdr_p0_addr = {2'b00, rom_addr_r[21:1]};   // maincpu base = 0
 
@@ -999,7 +1013,13 @@ always @(posedge clk_sys) begin
     else begin
         rom_req_r <= 0;
         rom_ready <= 0;
-        if (m_req && !m_we && (sel_rom || sel_romhi) && !rom_filling && !rom_ready) begin
+        // !ack_r: once the transaction is acked the V60 bus can hold m_req up
+        // to one ce_cpu period; without the qualifier the lookup re-armed and
+        // pulsed rom_ready against the already-served address every other
+        // clock.  Harmless today only because ce_cpu spacing guarantees the
+        // stale pulse dies before the next request — gate it explicitly.
+        if (m_req && !m_we && (sel_rom || sel_romhi) && !rom_filling &&
+            !rom_ready && !ack_r) begin
             if (ic_hit) begin
                 rom_word_r <= ic_word;
                 rom_ready  <= 1'b1;
@@ -1035,9 +1055,8 @@ end
 // CPU read mux + ack
 // ---------------------------------------------------------------------------
 reg [15:0] rmux;
-reg        ack_r;
 assign m_rdata = rmux;
-assign m_ack   = ack_r;
+assign m_ack   = ack_r;   // ack_r declared with the ROM fetch regs above
 
 // Random source for 0xD80000.  MAME returns machine().rand() (full-width,
 // uncorrelated).  A 32-bit xorshift advanced every clk_sys — not just on the
@@ -1194,7 +1213,11 @@ always @(posedge clk_sys) begin
         if (m_ack)       debug_status_r[4]  <= 1'b1;
         if (sdr_p0_req)  debug_status_r[5]  <= 1'b1;
         if (sdr_p0_ack)  debug_status_r[6]  <= 1'b1;
-        if (v60_debug_pc != 32'h00fffff0)
+        // Architectural reset PC is 32'hFFFFFFF0 (START_PC); the old 32-bit
+        // compare against 00FFFFF0 never matched, so bit 7 ("PC left the reset
+        // vector") was stuck on from the first cycle.  Compare the bus-visible
+        // 24 bits, which is what the mirror decode actually fetches from.
+        if (v60_debug_pc[23:0] != 24'hfffff0)
             debug_status_r[7] <= 1'b1;
         if (v60_debug_pc < 32'h00200000)
             debug_status_r[8] <= 1'b1;
@@ -1211,7 +1234,10 @@ always @(posedge clk_sys) begin
         if (sdr_p2_ack)                debug_status_r[19] <= 1'b1;
         if (vbl_start)                 debug_status_r[20] <= 1'b1;
         if (!irq_n)                    debug_status_r[21] <= 1'b1;
-        if (v60_debug_pc[31:24] != 8'h00)
+        // Runaway-PC detector.  Exclude the 16-byte architectural reset-vector
+        // window FFFFFFF0-FFFFFFFF (the only legitimate PC with a non-zero
+        // upper byte); the unqualified check fired at reset on every boot.
+        if (v60_debug_pc[31:24] != 8'h00 && v60_debug_pc[31:4] != 28'hFFFFFFF)
             debug_status_r[22] <= 1'b1;
 
         if (m_req && !m_ack) begin

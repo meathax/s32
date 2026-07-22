@@ -80,6 +80,14 @@ reg       erase_buf_sel;            // buffer selected before a combined swap
 reg       erase_mon;                // Multi32 erase visits both monitors
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
+// vblank arrives as a 1-clk_sys pulse from s32_video and is therefore high on
+// TWO consecutive clk_ram edges (phase-aligned 2:1 clocks).  Consumed as a
+// level, the second edge saw rs already in R_DELAY and latched a spurious
+// vblank_pending, arming a complete second erase+swap+render pass every frame
+// (2x sprite SDRAM traffic, double render_count decrement in 30 Hz mode, and
+// a mid-frame disp_buf swap).  Qualify to the rising edge in this domain.
+reg        vblank_d;
+wire       vblank_edge = vblank & ~vblank_d;
 
 always @(*) begin
     case (ctl_raddr)
@@ -280,6 +288,7 @@ always @(posedge clk) begin
         erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
         vblank_pending <= 1'b0;         // audit R20 SP-3
+        vblank_d <= 1'b0;
         jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
         // uninitialized stalls the walker in R_IDLE until the game writes them
@@ -297,17 +306,18 @@ always @(posedge clk) begin
             ctl[ctl_addr] <= ctl_wdata;
             debug_activity[23] <= 1'b1;
         end
-        if (vblank) debug_activity[0] <= 1'b1;
+        vblank_d <= vblank;
+        if (vblank_edge) debug_activity[0] <= 1'b1;
         if (fb_busy) debug_activity[21] <= 1'b1;
 
         // audit R20 SP-3: a vblank pulse arriving while the FSM is still
         // erasing/rendering (not R_IDLE) is otherwise dropped, delaying that
         // frame's swap. Latch it and consume it on the next return to R_IDLE.
         // MAME never misses because its render is instantaneous.
-        if (vblank && rs != R_IDLE) vblank_pending <= 1'b1;
+        if (vblank_edge && rs != R_IDLE) vblank_pending <= 1'b1;
 
         case (rs)
-        R_IDLE: if (vblank || vblank_pending) begin
+        R_IDLE: if (vblank_edge || vblank_pending) begin
             vblank_pending <= 1'b0;     // audit R20 SP-3: consume latched vblank
             post_vblank_count <= POST_VBLANK_CYCLES;
             rs <= R_DELAY;
