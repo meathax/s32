@@ -899,3 +899,139 @@ Implemented:
 Left as documented notes (not implemented): none outstanding from this pass — the
 above closes the Round 23 findings. Pre-existing deferrals (V60 fill/stop string
 variants, IO-17, PF-9) are unchanged.
+
+## Round 24 addendum — full video subsystem audit (sim-only)
+
+A one-module-per-reviewer audit of the entire video pipeline
+(`s32_tilemap` / `s32_vram` / `s32_sprite` / `s32_mixer` / `s32_palette` /
+`s32_linebuf` / `s32_big_dpram` / `s32_video`) against the pinned MAME
+`segas32_v.cpp` / `segas32.cpp`, plus the CDC design of the whole video read
+path. Every reported finding was re-verified against both the RTL and the MAME
+source before any change. The shipping System-32 path was already MAME-accurate;
+the one real bug below was a cross-clock pulse-width hazard that only appears on
+hardware (all prior benches drove `vblank` as a single simulation pulse).
+
+### Implemented and verified
+
+- **SP-8 — sprite `vblank` double-fire (BUG-HIGH; the most plausible cause of the
+  known mid-frame sprite tear).** The sprite engine runs on `clk_ram`
+  (96.648 MHz) but its `vblank` input is `vbl_end`, a **one-`clk_sys` pulse**
+  (`s32_video` `vb_end_r`), so it is sampled high on **two consecutive `clk_ram`
+  edges**. The R20 SP-3 "vblank seen mid-render" latch
+  (`if (vblank && rs != R_IDLE) vblank_pending <= 1`) re-caught the *same* pulse
+  on its second sample — by then the FSM had advanced R_IDLE→R_DELAY — and on
+  return to R_IDLE ran a **second full erase/swap/render pass mid-frame**. In
+  MAME automatic mode (`!BIT(m_sprite_control[3],1)`, segas32_v.cpp:318-340) the
+  command is forced to `2'b11`, so the spurious pass performs a second
+  `disp_buf` swap partway down scanout (tear line whose height tracks render
+  duration) and doubles sprite ROM/DDR bandwidth; in 30 Hz auto mode it rendered
+  every frame instead of every other. **Fix (`s32_sprite`):** edge-detect the
+  pulse — `vblank_rise = vblank & ~vblank_d` — and qualify both the pending
+  latch and the R_IDLE launch on the rising edge, preserving the SP-3 overrun
+  protection. **New directed tier `verif/common/tb_sprite_vblank.sv`** drives the
+  realistic **2-`clk_ram`-wide** pulse and asserts exactly one render pass and one
+  buffer swap per frame; it **PASSes on the fixed RTL and FAILs on the pre-fix
+  RTL** ("2 buffer swaps, want 1"), and also checks the 1-cycle pulse still
+  yields one pass (no single-sample regression). Wired into
+  `run_regression.ps1`/`.sh` under tier 27. This is the fix to try on hardware
+  **before** the planned triple-buffer rework — pass 1's swap sits at ~line 1
+  (invisible), so it may close the tear outright.
+
+- **Mixer dead pipeline logic removed (OPT/clarity).** `idx_first`,
+  `idx_second`, `best2sel_hold`, and `spr_group_s` in `s32_mixer` were assigned
+  every pixel but never read (the live paths are `idx_winner`→`pal_addr_r` and
+  `idx_runner`→`idx2_hold`); the names actively misled (`idx_first` reads as "the
+  first palette lookup"). Deleted. Zero hardware change (Quartus already pruned
+  them); the 512-case mixer differential and directed tier still pass. Diagnostic
+  `$display`s in `tb_mixer`, `tb_mixer_diff`, and `tb_core_soak` were repointed to
+  the live `idx_winner`/`best2sel`.
+
+- **CG-1 write-both warning refined (sim-only).** The `ifdef SIMULATION`
+  "pend copy dropped" warning fired on *every* alias/blend palette write because
+  the core bus holds `cpu_we` (the `m_req` level) high for several `clk_sys`
+  edges, so `pend_we && cpu_we && write_both` was true on the held edges after
+  `pend_we` set — masking any genuine drop. Now edge-qualified
+  (`cpu_we && !cpu_we_d`): it fires only when a *new* write-both transaction
+  lands while a prior pend copy is outstanding, which is the real second-master
+  hazard it was meant to catch. No hardware/synthesis effect.
+
+- **Comment rot.** Corrected the `s32_sprite` `vblank` port comment
+  ("start-of-vblank" → end-of-vblank, which is the correct MAME anchor) and a
+  stale `s32_mixer` pipeline comment describing a "2:1 palette-clock phase" that
+  no longer exists (both palette sides are `clk_ram` since the 82d3635 CDC fix).
+
+**Verification:** full native ModelSim regression **35/35 green** (all video
+tiers 9-12/21-24/27/34, the new `tb_sprite_vblank`, the 512-case mixer
+differential, and the WSL V25 firmware tier 35 after staging the git-ignored
+`roms/sim/ga2/mcu.bin`). Verible lint clean on all eight video modules.
+
+### Verified MAME-exact (no change needed)
+
+The entire shipping-profile pipeline was confirmed bit-exact against MAME and is
+recorded here so future rounds do not re-audit it:
+
+- **Mixer** — sprite-group `$4C` table (all 16), priority/rank encoding and the
+  balanced-max-tree ≡ MAME's bubble-sorted scan (unique keys), blend gating +
+  `(first*(7-f)+second*(f+1))>>3` with per-operand pre-multiply offsets,
+  `compute_sprite_blend` (4 modes), `compute_color_offsets` (mode map incl. the
+  grayscale placeholder), 6-bit signed offsets, shadow-pen `& 0x7ffe` compare and
+  RMW shadow, backdrop `(reg&0x1e00)+((reg+y)&0x1ff)`, and `<<3` RGB clamp/pack.
+  The Python oracle (`s32_mixer_ref.py`) was checked against MAME independently —
+  no shared misreading.
+- **Tilemap** — tile attribute/flip/page/bank decode, NBG0/1 zoom (12.20 step,
+  0x80 clamp, sext9/10 center rule, flip algebra), NBG2/3 rowscroll/rowselect
+  table addressing and wraps, text nibble order, bitmap 4/8bpp, clip windows
+  (inclusive edges, clip-out XOR, flip transform), and layer enables incl.
+  `$1FF00[13:12]` for NBG2/3.
+- **Palette** — `to_alt`/`from_alt` exhaustively equal over all 65536 values and
+  exact inverses; alias-window byte-write RMW bit-identical to MAME
+  read→convert→COMBINE_DATA→convert-back over 20000 random cases; write-both
+  mirror condition/target/merge; and the post-82d3635 read path is fully
+  `clk_ram`-coherent (single remaining `clk_sys` element is the RAM cell array
+  itself, DONT_CARE collision, which MAME also races).
+- **Sprite** — list walk (jump/clip/end, 0x20000 wrap, 8192 watchdog), full
+  `draw_one_sprite` decode, truncating-divider zoom ≡ MAME's xacc/yacc loop,
+  pen/end-code/transparency semantics, indirect tables, ROM/RAM fetch swizzle,
+  control-reg latch timing, and the 16-bit framebuffer pixel tag.
+- **Video timing** — 416/320×224 in 512/410×262, dot CE = MASTER/4 and /5,
+  `vblank_start`/`vblank_end` IRQ anchors, display-enable black-fill.
+
+### Documented, not implemented (edge cases no target game exercises)
+
+Each is real but out of reach of ga2/spidman/arabfgt/holo, and the fix would add
+logic/visible change to a hardware-validated path; recorded with the exact fix so
+a future round can decide:
+
+- **TM-6 — layer-enable / line-buffer content skew (BUG-LOW).** The mixer gates
+  displayed line N with `tm_layer_off` derived from the tilemap's *render*
+  snapshot (line N+1), but line N's pre-rendered pixels used the enables from the
+  render of line N-1. A mid-frame enable toggle (`$1FF02`/`$1FF8E`/`$1FF00[13:12]`)
+  therefore mis-gates exactly one scanline. No target game toggles enables
+  mid-frame. Correct fix: parity-bank `layer_off` alongside the pixel data
+  (write `layer_off_bank[render_line[0]]` at render, read by `vcnt[0]`), matching
+  how the line buffer itself is parity-banked. Not applied — it touches the
+  working display path for zero target-game benefit and an untestable win.
+- **TM-7 — `$1FF00` pre-first-write readback (ACCURACY).** A CPU read of
+  `$31FF00` before any write returns 0x0000 (BRAM power-up) vs MAME 0x8000; the
+  *render* path is unaffected (`mode_416` uses the shadow, which inits 0x8000).
+  Target games write `$1FF00` outright during init, so it is never observed. A
+  sim-only BRAM init would make sim disagree with hardware (altsyncram is
+  `power_up_uninitialized="FALSE"` → zeros); the honest fix is to mux
+  register-region CPU readback from the shadow, which risks the rowscroll-table
+  read path — deferred.
+- **CG-4 — 5→8-bit color expansion (ACCURACY-LOW).** The mixer emits
+  `{clamp5(v),3'b000}` (max 0xF8) where MAME `pal5bit` replicates `(v<<3)|(v>>2)`
+  (max 0xFF) — a uniform ~3% full-scale compression, below the pitch/brightness
+  JND and shared by the RTL and the Python oracle (so the differential does not
+  flag it). One-line fix (`{v, v[4:2]}` per channel) but it shifts global
+  brightness on a hardware-validated build and would require updating the oracle;
+  deferred pending a decision. Relevant if pixel-exact CG-3 frame diffing is ever
+  enabled.
+- **Throughput OPTs (not bugs).** Bitmap loop refetches each VRAM word per pixel
+  (3 cyc/px → ~1 with a held word); NBG zoom reciprocal divider reruns per line
+  for static register values (cacheable); sprite pixel loop is 2 clk/px
+  (overlappable to 1); sprite list-entry fetch is 10 cyc/entry (64-bit engine
+  port ~2.5×); erase is 128 single-beat DDR writes/line (burstable). Each frees
+  line/frame budget under SDRAM contention (reduces `tm_line_overrun` /
+  `fb_rd_underrun` exposure) but is a self-contained state-machine change needing
+  its own verification; left as recommended future work.

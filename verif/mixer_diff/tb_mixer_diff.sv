@@ -108,7 +108,7 @@ initial begin
                 if (errors <= 20)
                     $display("MIXER DIFF mismatch case=%0d got=%06x want=%06x first=%0d second=%0d idx1=%04x idx2=%04x blend=%0d shadow=%0d co=%0d/%0d pal=%04x/%04x factor=%0d r=%0d,%0d g=%0d,%0d b=%0d,%0d sum=%0d,%0d,%0d",
                              count, rgb, expected, dut.bestsel_hold,
-                             dut.best2sel_hold, dut.idx_first, dut.idx_second,
+                             dut.best2sel, dut.idx_winner, dut.idx2_hold,
                              dut.blend_hold, dut.shadow_hold,
                              dut.co1_hold, dut.co2_hold,
                              dut.first_pal, dut.pal_data_r, dut.blendfactor_s,

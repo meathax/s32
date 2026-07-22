@@ -497,6 +497,7 @@ try {
 
     Write-Tier 27 "integrated sprite renderer / backpressured DDR framebuffer stress"
     Run-HdlTest "t27_sprite_fb" "tb_sprite_fb" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_fb.sv") "SPRITE FB PASS"
+    Run-HdlTest "t27_sprite_vblank" "tb_sprite_vblank" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_vblank.sv") "SPRITE VBLANK PASS"
 
     Write-Tier 28 "interrupt controller reset / source+ack collision / timers / doorbell"
     Run-HdlTest "t28_intc" "tb_intc" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_intc.sv") "INTC PASS"

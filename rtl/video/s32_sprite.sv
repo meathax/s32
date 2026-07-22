@@ -19,7 +19,8 @@ module s32_sprite #(
     input       [1:0] srom_bank_mask,
 
     // frame control
-    input             vblank,       // start-of-vblank pulse
+    input             vblank,       // end-of-vblank pulse (1 clk_sys wide =
+                                    // 2 clk_ram samples; edge-detected below)
     output reg        rendering,
 
     // Observation-only descriptor captured for the first production sprite
@@ -80,6 +81,12 @@ reg       erase_buf_sel;            // buffer selected before a combined swap
 reg       erase_mon;                // Multi32 erase visits both monitors
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
+reg        vblank_d;                // edge-detect the end-of-vblank pulse
+// The end-of-vblank pulse is one clk_sys wide; on the 2x clk_ram domain it is
+// sampled high on two consecutive edges.  Treat only its rising edge as a new
+// frame event, or the SP-3 pending latch re-catches the same pulse and fires a
+// second full erase/swap/render pass mid-frame (the sprite-buffer tear).
+wire       vblank_rise = vblank & ~vblank_d;
 
 always @(*) begin
     case (ctl_raddr)
@@ -280,6 +287,7 @@ always @(posedge clk) begin
         erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
         vblank_pending <= 1'b0;         // audit R20 SP-3
+        vblank_d <= 1'b0;
         jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
         // uninitialized stalls the walker in R_IDLE until the game writes them
@@ -291,23 +299,26 @@ always @(posedge clk) begin
         fb_wr_start <= 0;
         fb_wr_valid <= 0;
         fb_wr_end   <= 0;
+        vblank_d    <= vblank;
 
         // CPU control writes
         if (ctl_we) begin
             ctl[ctl_addr] <= ctl_wdata;
             debug_activity[23] <= 1'b1;
         end
-        if (vblank) debug_activity[0] <= 1'b1;
+        if (vblank_rise) debug_activity[0] <= 1'b1;
         if (fb_busy) debug_activity[21] <= 1'b1;
 
         // audit R20 SP-3: a vblank pulse arriving while the FSM is still
         // erasing/rendering (not R_IDLE) is otherwise dropped, delaying that
         // frame's swap. Latch it and consume it on the next return to R_IDLE.
-        // MAME never misses because its render is instantaneous.
-        if (vblank && rs != R_IDLE) vblank_pending <= 1'b1;
+        // MAME never misses because its render is instantaneous.  Qualify on the
+        // rising edge so the same 2-clk_ram-wide pulse that already launched the
+        // current sequence in R_IDLE is not re-latched as a second event.
+        if (vblank_rise && rs != R_IDLE) vblank_pending <= 1'b1;
 
         case (rs)
-        R_IDLE: if (vblank || vblank_pending) begin
+        R_IDLE: if (vblank_rise || vblank_pending) begin
             vblank_pending <= 1'b0;     // audit R20 SP-3: consume latched vblank
             post_vblank_count <= POST_VBLANK_CYCLES;
             rs <= R_DELAY;

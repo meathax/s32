@@ -142,8 +142,17 @@ assign dbg_entries = {dbg_e410, dbg_e200, dbg_e000};
 // arrived before the copy committed, the mirror write would be silently lost.
 // Flag it so a future second bus master (or a pipelined bus change) is caught
 // rather than corrupting the palette (audit R20 CG-1).
+//
+// The core bus holds cpu_we (m_req level) high for several clk_sys edges per
+// write, so qualify on the RISING edge of cpu_we: a genuine dropped copy is a
+// NEW write-both transaction landing while a prior pend copy is outstanding,
+// not the same held write re-sampled (audit R24 — that self-triggered every
+// alias/blend write and masked any real drop).
+reg cpu_we_d;
+initial cpu_we_d = 1'b0;
+always @(posedge clk) cpu_we_d <= cpu_we;
 always @(posedge clk)
-    if (pend_we && cpu_we && write_both)
+    if (pend_we && cpu_we && !cpu_we_d && write_both)
         $display("WARNING s32_palette: write-both pend copy dropped by a back-to-back write @ %0t", $time);
 `endif
 

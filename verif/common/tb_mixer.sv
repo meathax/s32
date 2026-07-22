@@ -115,7 +115,7 @@ task check(input [23:0] got, input [23:0] want, input [8:0] x);
     if (got !== want) begin
         errors = errors + 1;
         $display("  FAIL x=%0d rgb=%06x want=%06x first=%0d idx=%04x pal=%04x co=%0d r=%0d g=%0d b=%0d sum=%0d/%0d/%0d blend=%0d",
-                 x, got, want, mix.bestsel_hold, mix.idx_first,
+                 x, got, want, mix.bestsel_hold, mix.idx_winner,
                  mix.first_pal, mix.co1_hold,
                  mix.r1_pipe, mix.g1_pipe, mix.b1_pipe,
                  mix.rr_pipe, mix.gg_pipe, mix.bb_pipe, mix.blend_hold);
