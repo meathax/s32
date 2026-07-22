@@ -11,6 +11,9 @@ into the ignored reference snapshot at
 | File | SHA-256 |
 | --- | --- |
 | `am.hxx` | `9D8487A6580C918209408D1F406BD9053E842CB722520F7F135934CC174BAA69` |
+| `am1.hxx` | `15C87B1F85A1A35165889F16B806A28945BF46DAEA2762384768339040F480C7` |
+| `am2.hxx` | `749B91A81862BB984B6D40B0B275C0D8CD6413D0C9DC99CE66A6B293E5B42718` |
+| `am3.hxx` | `DDD3E3CEC7AD4475A667C6EB404DC9191AF6951FDAA5DB199DF2839BAB2439DA` |
 | `op12.hxx` | `34858E79374AADAE5940409668CB9B448160018213D467F56CBB718816C3E76E` |
 | `op2.hxx` | `E5C5924526C2BC776C35B27D84008ED73CDA0C52AAB52F9130303099B4EC5E12` |
 | `op3.hxx` | `BEAAF4B62B79F819CAC577C23C6F6E2731B4483E7F3A2D0ED4961A29B64540CB` |
@@ -64,13 +67,25 @@ round trip.  The complete 35-tier regression, including 50/50 independent V60
 differential seeds, passed after the final exception/task tranche
 (`verif/modelsim-v60-complete-gate.log`).
 
-The remaining deliberate ISA exclusion is the single-precision floating-point
-subset in MAME groups `0x5c` and `0x5f`.  No System 32 game is known to execute
-it, but MAME does implement CMPF/MOVFS/NEGFS/ABSFS/SCLFS/ADDFS/SUBFS/MULFS/
-DIVFS and CVTWS/CVTSW.  The RTL currently raises the reserved-instruction
-exception for those groups and must not be described as a complete general-
-purpose V60 until that exclusion is resolved or formally bounded to the arcade
-software profile.
+The single-precision floating-point subset in MAME groups `0x5c` and `0x5f` is
+now implemented (audit round 2026-07-22).  A binary32 unit provides CMPF, MOVFS,
+NEGFS, ABSFS, SCLFS, ADDFS, SUBFS, MULFS, DIVFS, CVTWS and CVTSW with round-to-
+nearest-even and gradual underflow (subnormals), matching MAME's host-`float`
+contract; the FDIV mantissa divide is iterative (27 restoring steps), the rest
+combinational.  No System 32 game is known to execute these ops, so the change
+cannot regress the shipping path — it only replaces the former reserved-op trap.
+`tb_v60_fp.sv` verifies the arithmetic against `numpy.float32` over 1,800+
+directed + full-range random vectors (normals, subnormals, zero, infinity, NaN,
+and rounding ties) with zero mismatches; `tb_v60_fpdecode.sv` runs real ADDFS/
+MULFS instructions (register and memory operand forms) end to end.  The only
+un-dispatched `0x5c`/`0x5f` sub-opcodes now are those MAME itself marks
+UNHANDLED (fatalerror), which the RTL maps to the reserved-instruction vector.
+
+The remaining bounded item is the V70 (`IS_V70=1`) 32-bit external data bus:
+`s32_v60_bus` documents a 1..2 aligned 32-bit-cycle mode but still issues 16-bit
+cycles.  System 32 is V60-only (System Multi 32 with its V70 is out of scope and
+`is_multi32` is forced 0 in the shipping profile), so the parameter is presently
+unused; a Multi 32 build would need the 32-bit path added and re-timed.
 
 ## Regression evidence
 
