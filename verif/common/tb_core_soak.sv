@@ -161,7 +161,7 @@ initial begin
         active_samples, active_nonblack, x_on_rgb, x_on_aud);
     $display("backdrop: vram_1ff5e=%04x line_ctrl=%04x palette_0200=%04x mixer_idx=%04x mixer_pal=%04x",
         core.r1ff5e, core.mix_bg_ctrl, core.pal0.sim_peek(14'h0200),
-        core.mix0.idx_first, core.mix0.first_pal);
+        core.mix0.idx_winner, core.mix0.first_pal);
 
     // Acceptance gate (simulator tier): CPU boots + runs the full bus decode
     // to a clean HALT with no illegal-opcode trap; the vblank interrupt path

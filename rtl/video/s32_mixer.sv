@@ -194,8 +194,6 @@ wire [10:0] run_max = max_candidate(run_q0, run_q1);
 wire [6:0] best2 = run_max[10:4];
 wire [3:0] best2sel = run_max[3:0];
 
-reg [3:0] best2sel_hold;
-
 // ---------------------------------------------------------------------------
 // backdrop pixel (MAME update_background): per line.  This control belongs
 // to video RAM at $1FF5E, not to the mixer's unrelated $5E register.
@@ -240,25 +238,13 @@ endfunction
 // snapshot. The priority tree then drives only a shallow 8:1 index mux.
 reg [13:0] idx_text_s, idx_nbg0_s, idx_nbg1_s, idx_nbg2_s;
 reg [13:0] idx_nbg3_s, idx_bmp_s, idx_spr_s, idx_bg_s;
-reg [13:0] idx_first, idx_second, idx_winner, idx_runner;
+reg [13:0] idx_winner, idx_runner;
 always @(*) begin
     case (bestsel)
         4'd0: idx_winner = idx_text_s; 4'd1: idx_winner = idx_nbg0_s;
         4'd2: idx_winner = idx_nbg1_s; 4'd3: idx_winner = idx_nbg2_s;
         4'd4: idx_winner = idx_nbg3_s; 4'd5: idx_winner = idx_bmp_s;
         4'd6: idx_winner = idx_spr_s; default: idx_winner = idx_bg_s;
-    endcase
-    case (bestsel_hold)
-        4'd0: idx_first = idx_text_s; 4'd1: idx_first = idx_nbg0_s;
-        4'd2: idx_first = idx_nbg1_s; 4'd3: idx_first = idx_nbg2_s;
-        4'd4: idx_first = idx_nbg3_s; 4'd5: idx_first = idx_bmp_s;
-        4'd6: idx_first = idx_spr_s; default: idx_first = idx_bg_s;
-    endcase
-    case (best2sel_hold)
-        4'd0: idx_second = idx_text_s; 4'd1: idx_second = idx_nbg0_s;
-        4'd2: idx_second = idx_nbg1_s; 4'd3: idx_second = idx_nbg2_s;
-        4'd4: idx_second = idx_nbg3_s; 4'd5: idx_second = idx_bmp_s;
-        4'd6: idx_second = idx_spr_s; default: idx_second = idx_bg_s;
     endcase
     case (best2sel)
         4'd0: idx_runner = idx_text_s; 4'd1: idx_runner = idx_nbg0_s;
@@ -289,7 +275,6 @@ always @(*) begin
     endcase
 end
 
-reg [3:0] spr_group_s;
 reg [3:0] spr_group_raw_s;
 // MAME uses the raw pixel-derived group for the per-layer sprite blend
 // mask. sprgroup_or selects the effective priority/palette register only.
@@ -381,8 +366,8 @@ endfunction
 //   T1: snapshot candidates from the RAM outputs
 //   T2: resolve/register winner
 //   T3: resolve/register blend partner and latch final context
-//   P0: present the second palette index after the first address has spanned
-//       at least one edge of either 2:1 palette-clock phase
+//   P0: present the second palette index; the first address has already been
+//       registered for a full clk_ram edge, so its data is in flight
 //   P2: capture the first pixel before the earliest second result can replace it
 //   P4: apply both color-offset banks
 //   P5: blend and apply shadow
@@ -473,7 +458,6 @@ always @(posedge clk) begin
         idx_bmp_s    <= mk_palidx(li_bmp);
         idx_spr_s    <= mk_palidx(li_spr);
         idx_bg_s     <= mk_palidx(li_bg);
-        spr_group_s  <= spr_group;
         spr_group_raw_s <= spr_group_raw;
         spr_shadow_src_s <= spr_shadow_src;
         blendenable_s <= r4e[11];
@@ -501,7 +485,6 @@ always @(posedge clk) begin
         second_pending <= 1'b1;
     end
     else if (second_pending) begin
-        best2sel_hold <= best2sel;
         idx2_hold   <= idx_runner;
         blend_hold  <= do_blend_resolved;
         shadow_hold <= shadow_resolved;

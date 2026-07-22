@@ -143,6 +143,10 @@ iverilog -g2012 -s tb_sprite_fb -o /tmp/s32_sprite_fb \
   rtl/video/s32_sprite.sv rtl/mem/s32_fb_if.sv \
   verif/common/tb_sprite_fb.sv
 vvp /tmp/s32_sprite_fb | grep -q "SPRITE FB PASS" && echo "SPRITE FB: PASS" || { echo "SPRITE FB: FAIL"; exit 1; }
+iverilog -g2012 -s tb_sprite_vblank -o /tmp/s32_sprite_vblank \
+  rtl/video/s32_sprite.sv rtl/mem/s32_fb_if.sv \
+  verif/common/tb_sprite_vblank.sv
+vvp /tmp/s32_sprite_vblank | grep -q "SPRITE VBLANK PASS" && echo "SPRITE VBLANK: PASS" || { echo "SPRITE VBLANK: FAIL"; exit 1; }
 echo "[28/35] interrupt controller reset / source+ack collision / timers / doorbell"
 iverilog -g2012 -s tb_intc -o /tmp/s32_intc \
   rtl/s32_pkg.sv rtl/io/s32_io.sv verif/common/tb_intc.sv
