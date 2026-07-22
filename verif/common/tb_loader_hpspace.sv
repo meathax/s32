@@ -19,10 +19,14 @@ module tb_loader_hpspace;
 import s32_pkg::*;
 
 // clk_ram ~100 MHz; clk_sys = clk_ram/2, edge-aligned (same-PLL model).
+// INDEPENDENT aligned oscillators (edges in the same timestep), matching
+// tb_core_v25sdram: a clk_sys derived from posedge clk_ram skews the domains
+// by a delta cycle, giving the loader one clk_ram of early wr_ack/ready
+// visibility silicon does not have and hiding races it does.
 reg clk_ram = 1'b0;
 always #5 clk_ram = ~clk_ram;
 reg clk_sys = 1'b0;
-always @(posedge clk_ram) clk_sys <= ~clk_sys;
+always #10 clk_sys = ~clk_sys;
 
 reg rst_n = 1'b0;   // models pll_locked
 

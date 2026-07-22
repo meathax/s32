@@ -329,11 +329,15 @@ wire debug_sprite_probe = status[11:8] == 4'd5;
 localparam [24:3] DEBUG_TILE_ADDR = SDR_TILES_BASE[24:3] + 22'd92;
 localparam [24:4] DEBUG_SPR_ADDR  = SDR_SPRITES_BASE[24:4];
 reg         debug_p1_req;
+reg         debug_p1_retry;
 reg         debug_p1_valid, debug_p2_valid;
 reg  [63:0] debug_p1_data;
 reg [127:0] debug_p2_data;
 reg  [24:4] debug_p2_addr;
 
+// On mode-4 exit the tilemap (parked in T_PIXW holding tile_req) recovers
+// because this mux presents a fresh rising edge with the live core address
+// to the controller's request-edge latch — keep that property if reworking.
 assign p1_req  = debug_tile_probe   ? debug_p1_req  : core_p1_req;
 assign p1_addr = debug_tile_probe   ? DEBUG_TILE_ADDR : core_p1_addr;
 // The live sprite probe observes the production port without stealing or
@@ -344,16 +348,27 @@ assign p2_addr = core_p2_addr;
 always @(posedge clk_ram) begin
     if (reset || !debug_tile_probe) begin
         debug_p1_req   <= 1'b0;
+        debug_p1_retry <= 1'b0;
         debug_p1_valid <= 1'b0;
         debug_p1_data  <= 64'd0;
     end
     else if (!debug_p1_valid) begin
-        debug_p1_req <= 1'b1;
-        if (p1_ack) begin
-            debug_p1_req   <= 1'b0;
-            debug_p1_valid <= 1'b1;
-            debug_p1_data  <= p1_dout;
+        // A tilemap burst latched just before the mux flipped can ack first,
+        // and the core is blind to that ack while the probe holds the port —
+        // so the FIRST result after mode entry is always discarded and the
+        // word re-fetched on a fresh request edge.  The second result is
+        // provably the probe's own (single-outstanding port).  Idempotent
+        // double fetch of a ROM word; costs one extra transaction, once.
+        if (p1_ack && debug_p1_req) begin
+            debug_p1_req <= 1'b0;
+            if (debug_p1_retry) begin
+                debug_p1_valid <= 1'b1;
+                debug_p1_data  <= p1_dout;
+            end
+            else debug_p1_retry <= 1'b1;
         end
+        else if (!debug_p1_req && !p1_ack)
+            debug_p1_req <= 1'b1;          // (re)issue on a fresh rising edge
     end
 
     if (reset || !debug_sprite_probe) begin
@@ -564,6 +579,7 @@ s32_core core (
     .rst(reset), .video_rst(video_reset),
     .board(board_desc),
     .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm),
+    .pause(pause),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(core_p1_req), .sdr_p1_addr(core_p1_addr), .sdr_p1_dout(p1_dout),
     .sdr_p1_ack(debug_tile_probe ? 1'b0 : p1_ack),
@@ -774,7 +790,11 @@ wire        v25_sweep_done = core_debug_v25_img[89];
 // mailbox-0x100 byte / V60 poll activity.
 wire  [2:0] v25_seg = core_debug_hcnt[7:5];
 wire  [7:0] v25_seg_byte = v25_first_line[{v25_seg, 3'b000} +: 8];
-wire [23:0] debug_v25_rgb =
+// Registered: the band/stripe muxes must not deepen the already-critical
+// clk_sys video cone.  One clk_sys of latency shifts band edges by a sixth
+// of a pixel — invisible.
+reg [23:0] debug_v25_rgb;
+always @(posedge clk_sys) debug_v25_rgb <=
     (core_debug_vcnt < 9'd40)  ? {{v25_ce_blink, 4'h0},
                                   v25_io  ? 8'hff : 8'h00,
                                   v25_unm ? 8'hff : 8'h00} :

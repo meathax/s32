@@ -13004,6 +13004,96 @@ initial begin
     check(cpu.f_s==1'b0, "CVTSW_-0.6_2 S");
     check(cpu.f_ov==1'b0, "CVTSW_-0.6_2 OV");
 
+    // =====================================================================
+    // Round 25 audit directed vectors (hand-computed, not generated).
+    // CVTSW: pinned MAME does (uint32_t)(int64_t)val on its x86 host —
+    // low-32 truncation for |val| in [2^31,2^63), INT64_MIN->0 beyond/NaN.
+    // =====================================================================
+    run_fp(8'h5f, 8'h01, 32'h4f32d05e, 32'h00000000, 3'd3);  // 3.0e9
+    check(cpu.r[5]===32'hb2d05e00, "CVTSW_3e9 res");
+    check(cpu.f_z==1'b0, "CVTSW_3e9 Z");
+    check(cpu.f_s==1'b1, "CVTSW_3e9 S");
+    check(cpu.f_ov==1'b1, "CVTSW_3e9 OV");
+
+    run_fp(8'h5f, 8'h01, 32'h53800000, 32'h00000000, 3'd3);  // 2^40
+    check(cpu.r[5]===32'h00000000, "CVTSW_2p40 res");
+    check(cpu.f_z==1'b1, "CVTSW_2p40 Z");
+    check(cpu.f_s==1'b0, "CVTSW_2p40 S");
+    check(cpu.f_ov==1'b0, "CVTSW_2p40 OV");
+
+    run_fp(8'h5f, 8'h01, 32'hcf000000, 32'h00000000, 3'd3);  // exactly -2^31
+    check(cpu.r[5]===32'h80000000, "CVTSW_m2p31 res");
+    check(cpu.f_z==1'b0, "CVTSW_m2p31 Z");
+    check(cpu.f_s==1'b1, "CVTSW_m2p31 S");
+    check(cpu.f_ov==1'b0, "CVTSW_m2p31 OV");   // representable: NOT overflow
+
+    run_fp(8'h5f, 8'h01, 32'hcf000001, 32'h00000000, 3'd3);  // -(2^31+256)
+    check(cpu.r[5]===32'h7fffff00, "CVTSW_m2p31m res");
+    check(cpu.f_z==1'b0, "CVTSW_m2p31m Z");
+    check(cpu.f_s==1'b0, "CVTSW_m2p31m S");
+    check(cpu.f_ov==1'b1, "CVTSW_m2p31m OV");
+
+    run_fp(8'h5f, 8'h01, 32'h7fc00000, 32'h00000000, 3'd3);  // NaN
+    check(cpu.r[5]===32'h00000000, "CVTSW_nan res");
+    check(cpu.f_z==1'b1, "CVTSW_nan Z");
+    check(cpu.f_s==1'b0, "CVTSW_nan S");
+    check(cpu.f_ov==1'b0, "CVTSW_nan OV");
+
+    run_fp(8'h5f, 8'h01, 32'h7f800000, 32'h00000000, 3'd3);  // +inf
+    check(cpu.r[5]===32'h00000000, "CVTSW_pinf res");
+    check(cpu.f_ov==1'b0, "CVTSW_pinf OV");
+
+    run_fp(8'h5f, 8'h01, 32'hff800000, 32'h00000000, 3'd3);  // -inf
+    check(cpu.r[5]===32'h00000000, "CVTSW_ninf res");
+    check(cpu.f_ov==1'b1, "CVTSW_ninf OV");
+
+    run_fp(8'h5f, 8'h01, 32'h62800000, 32'h00000000, 3'd3);  // 2^70
+    check(cpu.r[5]===32'h00000000, "CVTSW_2p70 res");
+    check(cpu.f_ov==1'b0, "CVTSW_2p70 OV");
+
+    run_fp(8'h5f, 8'h01, 32'he2800000, 32'h00000000, 3'd3);  // -2^70
+    check(cpu.r[5]===32'h00000000, "CVTSW_m2p70 res");
+    check(cpu.f_ov==1'b1, "CVTSW_m2p70 OV");
+
+    // CMPF: MAME materializes op2-op1, so same-signed infinities subtract to
+    // NaN and compare unordered (Z=0, S=0)
+    run_fp(8'h5c, 8'h00, 32'h7f800000, 32'h7f800000, 3'd3);
+    check(cpu.f_z==1'b0, "CMPF_pinf_pinf Z");
+    check(cpu.f_s==1'b0, "CMPF_pinf_pinf S");
+
+    run_fp(8'h5c, 8'h00, 32'hff800000, 32'hff800000, 3'd3);
+    check(cpu.f_z==1'b0, "CMPF_ninf_ninf Z");
+    check(cpu.f_s==1'b0, "CMPF_ninf_ninf S");
+
+    run_fp(8'h5c, 8'h00, 32'h7f800000, 32'hff800000, 3'd3);  // op2=-inf, op1=+inf
+    check(cpu.f_z==1'b0, "CMPF_mixinf Z");
+    check(cpu.f_s==1'b1, "CMPF_mixinf S");
+
+    run_fp(8'h5c, 8'h00, 32'h3f800000, 32'h7f800000, 3'd3);  // op2=+inf, op1=1.0
+    check(cpu.f_z==1'b0, "CMPF_inf_fin Z");
+    check(cpu.f_s==1'b0, "CMPF_inf_fin S");
+
+    run_fp(8'h5c, 8'h00, 32'h7f800000, 32'h3f800000, 3'd3);  // op2=1.0, op1=+inf
+    check(cpu.f_z==1'b0, "CMPF_fin_inf Z");
+    check(cpu.f_s==1'b1, "CMPF_fin_inf S");
+
+    // SCLFS widened exponent sum (RTL policy: pure 2^n adjust; deliberately
+    // NOT MAME's x86 shift-count masking for |n| > 30 — see fp_scale)
+    run_fp(8'h5c, 8'h10, 32'h00007fff, 32'h40000000, 3'd3);  // 2.0 * 2^32767
+    check(cpu.r[5]===32'h7f800000, "SCLFS_maxn res");        // (int16 wrap gave 0)
+    check(cpu.f_z==1'b0, "SCLFS_maxn Z");
+    check(cpu.f_s==1'b0, "SCLFS_maxn S");
+
+    run_fp(8'h5c, 8'h10, 32'h00008000, 32'h40000000, 3'd3);  // 2.0 * 2^-32768
+    check(cpu.r[5]===32'h00000000, "SCLFS_minn res");
+    check(cpu.f_z==1'b1, "SCLFS_minn Z");
+
+    run_fp(8'h5c, 8'h10, 32'h0000000a, 32'h3fc00000, 3'd3);  // 1.5 * 2^10
+    check(cpu.r[5]===32'h44c00000, "SCLFS_p10 res");
+
+    run_fp(8'h5c, 8'h10, 32'h0000fffd, 32'hc1800000, 3'd3);  // -16 * 2^-3
+    check(cpu.r[5]===32'hc0000000, "SCLFS_m3 res");
+
     if (errors == 0) $display("V60 FP PASS");
     else             $display("V60 FP FAIL (%0d errors)", errors);
     $finish;

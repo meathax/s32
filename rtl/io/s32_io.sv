@@ -595,10 +595,9 @@ always @(posedge clk) begin
                                   - 1'b1;
                         t0_run <= 1'b1;
                     end
-                    else begin
-                        t0_cnt <= 24'd0;
-                        t0_run <= 1'b0;
-                    end
+                    // n == 0: MAME only re-arms `if (duration)` — the write
+                    // stores the register byte and leaves an in-flight
+                    // one-shot running.  Do not cancel here.
                 end
                 3'd5: begin           // bytes 10/11: timer 1 count, one-shot arm
                     logic [11:0] n;
@@ -612,11 +611,8 @@ always @(posedge clk) begin
                         t1_acc <= 24'd0;
                         t1_run <= 1'b1;
                     end
-                    else begin
-                        t1_cnt <= 24'd0;
-                        t1_acc <= 24'd0;
-                        t1_run <= 1'b0;
-                    end
+                    // n == 0: register write only, armed one-shot keeps
+                    // running (MAME parity — see timer 0 above).
                 end
                 3'd6, 3'd7: z80_doorbell <= 1'b1;    // bytes 12-15: ring sound CPU
                 default: ;

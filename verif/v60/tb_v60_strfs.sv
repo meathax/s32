@@ -556,6 +556,98 @@ initial begin
     check(cpu.r[28]==4100, "MOVCSU_no R28");
     check(cpu.r[27]==8196, "MOVCSU_no R27");
 
+    // =====================================================================
+    // Round 25 audit: zero-length and length-1 edges (hand-derived from
+    // op7a.hxx; these exercise the movc_finish(0) path and the down-copy
+    // uint32 wrap to base-step that no generated case covered).
+    // =====================================================================
+    // ---- MOVCU l1=0,l2=4: no copy, R28=op1, R27=op2, dest untouched ----
+    clear_ram();
+    put_el(4096, 16'h0011);
+    put_el(8192, 16'h00aa);
+    run_case(8'h58, 8'h08, 4096, 8192, 0, 4, 16'h0000);
+    check(gb(8192)==8'haa, "MOVCU_len0 dest untouched");
+    check(cpu.r[28]==4096, "MOVCU_len0 R28");
+    check(cpu.r[27]==8192, "MOVCU_len0 R27");
+
+    // ---- MOVCU l1=1,l2=1: one byte, R28=op1+1, R27=op2+1 ----
+    clear_ram();
+    put_el(4096, 16'h0042);
+    put_el(8192, 16'h00aa);
+    run_case(8'h58, 8'h08, 4096, 8192, 1, 1, 16'h0000);
+    check(gb(8192)==8'h42, "MOVCU_len1 copied");
+    check(cpu.r[28]==4097, "MOVCU_len1 R28");
+    check(cpu.r[27]==8193, "MOVCU_len1 R27");
+
+    // ---- MOVCD l1=0,l2=0: no copy, R28=op1-1, R27=op2-1 (uint32 wrap) ----
+    clear_ram();
+    put_el(8192, 16'h00aa);
+    run_case(8'h58, 8'h09, 4096, 8192, 0, 0, 16'h0000);
+    check(gb(8192)==8'haa, "MOVCD_len0 dest untouched");
+    check(cpu.r[28]==4095, "MOVCD_len0 R28");
+    check(cpu.r[27]==8191, "MOVCD_len0 R27");
+
+    // ---- MOVCD l1=1,l2=1: one byte, R28=op1-1, R27=op2-1 ----
+    clear_ram();
+    put_el(4096, 16'h0077);
+    put_el(8192, 16'h00aa);
+    run_case(8'h58, 8'h09, 4096, 8192, 1, 1, 16'h0000);
+    check(gb(8192)==8'h77, "MOVCD_len1 copied");
+    check(cpu.r[28]==4095, "MOVCD_len1 R28");
+    check(cpu.r[27]==8191, "MOVCD_len1 R27");
+
+    // ---- CMPC l1=0,l2=0: Z=1 S=0, R28=len1+i=0, R27=0 ----
+    clear_ram();
+    run_case(8'h58, 8'h00, 4096, 8192, 0, 0, 16'h0000);
+    check(cpu.f_z==1'b1, "CMPC_len0 Z");
+    check(cpu.f_s==1'b0, "CMPC_len0 S");
+    check(cpu.r[28]==0, "CMPC_len0 R28");
+    check(cpu.r[27]==0, "CMPC_len0 R27");
+
+    // ---- CMPC l1=1,l2=1 equal: full run, R28=len1+i=2, R27=2, Z=1 ----
+    clear_ram();
+    put_el(4096, 16'h0033);
+    put_el(8192, 16'h0033);
+    run_case(8'h58, 8'h00, 4096, 8192, 1, 1, 16'h0000);
+    check(cpu.f_z==1'b1, "CMPC_len1eq Z");
+    check(cpu.f_s==1'b0, "CMPC_len1eq S");
+    check(cpu.r[28]==2, "CMPC_len1eq R28");
+    check(cpu.r[27]==2, "CMPC_len1eq R27");
+
+    // ---- CMPC l1=1,l2=1 c1>c2: break at i=0, R28=1, R27=1, S=1 ----
+    clear_ram();
+    put_el(4096, 16'h0060);
+    put_el(8192, 16'h0040);
+    run_case(8'h58, 8'h00, 4096, 8192, 1, 1, 16'h0000);
+    check(cpu.f_z==1'b0, "CMPC_len1gt Z");
+    check(cpu.f_s==1'b1, "CMPC_len1gt S");
+    check(cpu.r[28]==1, "CMPC_len1gt R28");
+    check(cpu.r[27]==1, "CMPC_len1gt R27");
+
+    // ---- MOVCFU l1=0,l2=3: pure fill, R28=op1, R27=op2+3 ----
+    clear_ram();
+    run_case(8'h58, 8'h0a, 4096, 8192, 0, 3, 16'h0055);
+    check(gb(8192)==8'h55, "MOVCFU_len0 fill0");
+    check(gb(8193)==8'h55, "MOVCFU_len0 fill1");
+    check(gb(8194)==8'h55, "MOVCFU_len0 fill2");
+    check(cpu.r[28]==4096, "MOVCFU_len0 R28");
+    check(cpu.r[27]==8195, "MOVCFU_len0 R27");
+
+    // ---- MOVCUh l1=0,l2=2: halfword no copy, R28=op1, R27=op2 ----
+    clear_ram();
+    put_el(8192, 16'haabb);
+    run_case(8'h5a, 8'h08, 4096, 8192, 0, 2, 16'h0000);
+    check(cpu.r[28]==4096, "MOVCUh_len0 R28");
+    check(cpu.r[27]==8192, "MOVCUh_len0 R27");
+
+    // ---- MOVCDh l1=1,l2=1: one half, R28=op1-2, R27=op2-2 ----
+    clear_ram();
+    put_el(4096, 16'h1234);
+    run_case(8'h5a, 8'h09, 4096, 8192, 1, 1, 16'h0000);
+    check(gb(8192)==8'h34 && gb(8193)==8'h12, "MOVCDh_len1 copied");
+    check(cpu.r[28]==4094, "MOVCDh_len1 R28");
+    check(cpu.r[27]==8190, "MOVCDh_len1 R27");
+
     if (errors == 0) $display("V60 STRFS PASS");
     else             $display("V60 STRFS FAIL (%0d errors)", errors);
     $finish;

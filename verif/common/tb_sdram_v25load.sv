@@ -1,9 +1,13 @@
-// Data-integrity test for sdram.sv's BYTE-MASKED writes + p5 read-back — the
-// path the real-V25 MCU load uses and that no other sim exercises.  The MCU
-// image is written one descrambled byte at a time via wr_be=01/10 (two bytes of
-// the same word land at different times), then fetched as 4-word p5 bursts.  If
-// the controller's DQM masking does not preserve the other byte, adjacent bytes
-// clobber and the V25 program is corrupt (the on-hardware black-screen symptom).
+// CONTROLLER byte-lane (DQM) test: byte-masked writes via wr_be=01/10 + p5
+// read-back, against an ideal-DQM behavioural chip model.
+//
+// HISTORY NOTE — this is NOT the production MCU load path any more.  The
+// loader was rewritten (2026-07-22) to pair stream bytes into ordinary
+// be=11 full-word writes after the per-byte DQM-masked pattern this bench
+// drives was observed corrupting scattered bytes of the MCU region on real
+// hardware (a below-RTL DQM/board-level effect this ideal chip model cannot
+// reproduce — this bench passed throughout).  Production-path coverage now
+// lives in tb_loader_hpspace.  Kept as a controller-level byte-lane test.
 `timescale 1ns/1ps
 `default_nettype none
 

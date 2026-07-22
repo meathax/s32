@@ -1,6 +1,7 @@
 //============================================================================
 //  Sega System 32 for MiSTer — SDRAM controller
-//  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, 4-bank interleaved.
+//  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, strictly serialized single
+//  transactions with auto-precharge (no bank interleave).
 //  Six request ports with bounded round-robin arbitration (DESIGN.md §4.2):
 //    p0: V60 fetch/data (latency critical, 16-bit single)
 //    p1: tile fetch      (64-bit burst = 4 words)
@@ -9,6 +10,14 @@
 //    p4: MultiPCM        (16-bit single)
 //    p5: V25 program ROM  (64-bit burst = 4 words)
 //  Write port (ROM download only): highest priority while ioctl_download.
+//
+//  REQUEST CONTRACT (all ports, including wr): one transaction per req
+//  RISING EDGE; the address (and write data/be) is sampled on that edge.
+//  A request held high is serviced exactly ONCE — a requester expecting
+//  re-service per ack from a held level will hang.  Requesters must be
+//  single-outstanding: drop req after (or pulse it before) each ack, and
+//  produce a fresh rising edge for the next transaction.  ack is stretched
+//  to 2 clk_ram cycles so clk_sys-domain requesters sample it exactly once.
 //============================================================================
 
 module sdram (
@@ -223,6 +232,32 @@ always @(posedge clk) begin
         wr_din_p <= '0; wr_be_p <= '0;
     end
 end
+
+`ifdef SIMULATION
+// Contract watchdog (sim only): a request held high long after its pend
+// cleared means the requester expects per-ack re-service from a level — the
+// pre-edge-latch semantics.  It would receive exactly one transaction and
+// hang silently in hardware; make that loud here.  Legitimate level holds
+// drop within a few clk_ram of the stretched ack (clk_sys requesters take 2).
+generate
+    genvar gi;
+    for (gi = 0; gi < 7; gi = gi + 1) begin : g_reqwatch
+        reg [7:0] held;
+        wire req_i  = gi==0 ? p0_req  : gi==1 ? p1_req  : gi==2 ? p2_req  :
+                      gi==3 ? p3_req  : gi==4 ? p4_req  : gi==5 ? p5_req  : wr_req;
+        wire pend_i = gi==0 ? p0_pend : gi==1 ? p1_pend : gi==2 ? p2_pend :
+                      gi==3 ? p3_pend : gi==4 ? p4_pend : gi==5 ? p5_pend : wr_pend;
+        always @(posedge clk) begin
+            if (init || !req_i || pend_i) held <= 8'd0;
+            else if (held != 8'hff) begin
+                held <= held + 8'd1;
+                if (held == 8'd200)
+                    $display("SDRAM CONTRACT WARNING: port %0d req held %0d cycles after service — held levels are serviced once, not per ack", gi, held);
+            end
+        end
+    end
+endgenerate
+`endif
 
 // Centre the SDRAM board interface with SDRAM_CLK forwarded at 180 degrees.
 // Commands and write data launched here have half a cycle of setup at the

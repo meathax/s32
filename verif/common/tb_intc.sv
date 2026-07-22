@@ -1,7 +1,8 @@
 //============================================================================
 // Directed System 32 interrupt-controller regression.
 // Covers reset state, vector/mask selection, simultaneous source+ack
-// accumulation, zero-count timer cancellation, exact timer-0 period, and
+// accumulation, zero-count write semantics (must NOT cancel — MAME parity,
+// audit R25-9), exact timer-0 period, and
 // the sound-CPU doorbell pulse.
 //============================================================================
 `timescale 1ns/1ps
@@ -114,7 +115,9 @@ initial begin
     end
     ctl_write(3'd3, 2'b10, 16'hfb00);
 
-    // Timer zero disables a previously armed one-shot.
+    // A zero duration write must NOT cancel a previously armed one-shot:
+    // MAME int_control_w only re-arms `if (duration)` — the register byte
+    // is stored and the in-flight timer keeps running (audit R25-9).
     ctl_write(3'd4, 2'b11, 16'h0001);
     #1;
     if (dut.t0_run !== 1'b1 || dut.t0_cnt !== 24'h0017ff) begin
@@ -123,8 +126,9 @@ initial begin
     end
     ctl_write(3'd4, 2'b11, 16'h0000);
     #1;
-    if (dut.t0_run !== 1'b0 || dut.t0_cnt !== 24'd0) begin
-        $display("FAIL timer0 zero cancel run=%b count=%06x", dut.t0_run, dut.t0_cnt);
+    if (dut.t0_run !== 1'b1 || dut.t0_cnt > 24'h0017ff || dut.t0_cnt == 24'd0) begin
+        $display("FAIL timer0 zero write must not cancel run=%b count=%06x",
+                 dut.t0_run, dut.t0_cnt);
         errors = errors + 1;
     end
 

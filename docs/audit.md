@@ -1150,3 +1150,110 @@ Left as documented notes (not implemented):
   build would need the 1..2 aligned 32-bit-cycle path added and re-timed.
 - **Genuinely-UNHANDLED FP sub-opcodes** stay on the reserved-instruction vector,
   exactly as MAME `fatalerror`s them.
+
+## Round 25 addendum — post-merge whole-core audit (2026-07-22, sim-only)
+
+Post-merge audit of main after the Round 24 branch merges, run as five parallel
+reviewers (V25/SDRAM/loader cluster, V60 FP/string additions, video merge
+coherence, top-level/SDC/CDC, audio/io/prot) against the pinned MAME snapshot,
+plus an independent lint/regression baseline.  Merge verified fully coherent:
+no dropped hunks from either branch, the sprite `vblank_rise` fix present with
+all three consumers edge-qualified, no orphaned mixer signals.  The uncommitted
+timing changes (registered `debug_v25_rgb` OSD mux, registered `sdr_p5_req/addr`,
+QSF seed 4) were **proven safe** — the p5 registration was traced against all
+three hazard modes (pulse merge across sweep→V25 handover, addr/req skew,
+ack overlap) and none is reachable.
+
+Implemented this round:
+
+- **R25-1 (MED, ga2/arabfgt)** — V60-side mailbox blackout: the MB8421 V60 port
+  was gated on `enable` (= `sweep_done`), silently dropping every V60 mailbox
+  write during the ~2-4 ms post-reset image sweep.  MAME's dpram has no such
+  window.  The RAM port is now always live (`cs` still carries `has_v25`);
+  only the V25 CPU itself is held (`s32_v25_cpu.sv`).
+- **R25-2 (MED, all)** — OSD Pause now freezes the real V25: new `pause` input
+  2FF-synced into clk_v25 gates the CE accumulator (phase-preserving), plumbed
+  emu top → `s32_core` → `s32_v25_cpu`.  Previously the MCU kept running
+  against a paused V60 and could rewrite a half-consumed mailbox response.
+- **R25-3 (HIGH, V60 CVTSW)** — out-of-int32-range conversion now matches the
+  pinned MAME's `(uint32_t)(int64_t)val` on its x86 host: low-32 truncation
+  for exponent 31..62, INT64_MIN→0 for ≥2^63/NaN/inf, and the MAME OV formula.
+  Fixes a definite flag bug: exactly −2^31 is representable and must give
+  OV=0 (was OV=1).  New directed vectors in `tb_v60_fp`.
+- **R25-4 (MED, V60 CMPF)** — same-signed infinities now compare unordered
+  (Z=0/S=0): MAME materializes `op2−op1`, and inf−inf is NaN.  Vectors added.
+- **R25-5 (MED, V60 string EA, pre-existing)** — the 0x58/0x5A string group
+  decoded operands with `ea_dim=2`; MAME F7a/F7b use dim 0 (byte) / 1 (half),
+  which scales autoincrement/indexed AMs and sizes F7b immediates.  Both
+  decode sites now pass `cur_op[1] ? 1 : 0`.
+- **R25-6 (LOW, V60 NEGFS/ABSFS)** — removed the spurious op2 dword load
+  (MAME does ReadAMAddress+store only); a read-sensitive destination is no
+  longer touched.  `tb_v60_fpdecode` now runs a memory-dest NEGFS with a
+  read counter proving the destination is never read.
+- **R25-7 (LOW, V60 SCLFS)** — widened the exponent sum to 18 bits (an int16
+  `e+n` wrapped for |n| near 32768).  |n| ≤ 30 remains MAME-exact; beyond
+  that the RTL keeps the architecturally-sensible pure 2^n adjust and the
+  divergence from MAME's x86 shift-count-masking UB is now documented at
+  `fp_scale`.  Directed vectors added.
+- **R25-8 (LOW, V25 diagnostics)** — data writes landing in 0xFFE00-0xFFFFF
+  (the V25 IRAM/SFR page this model does not back) now latch the unmapped
+  diagnostics (flag + address) instead of vanishing — both the V25-cluster
+  and audio/io/prot reviewers independently flagged the observability hole.
+  If this band ever lights on hardware, next step is a 512 B RAM overlay.
+- **R25-9 (LOW, INTC)** — writing duration 0 to a timer count register no
+  longer cancels an armed one-shot; MAME only re-arms `if (duration)`
+  (`s32_io.sv` timers 0/1; ga2 arms timer 1).
+- **R25-10 (LOW, debug mode 4)** — the tile-ROM probe discards its first
+  result and re-fetches on a fresh request edge: an in-flight tilemap burst
+  latched just before the mux flip could ack first and permanently latch
+  core-address data (the core is ack-blind while the probe holds the port).
+- **R25-11 (SDC)** — the clk_v25 async-clock-group guard now goes through
+  `s32_require` (hard-fail at fit/STA if the PLL clock is missing) instead of
+  silently no-opping and timing clk_v25 against clk_sys.
+- **R25-12 (contract/tests)** — sdram.sv: request contract documented at the
+  ports (one transaction per req rising edge; held levels serviced once) plus
+  a sim-only held-request watchdog; `tb_sdram`'s starvation stanza re-pulses
+  p0 per ack (a held level no longer models sustained demand, so the old
+  stanza tested nothing); `tb_sdram_v25load` retitled as a controller
+  byte-lane test (the per-byte DQM MCU load path it drives was retired);
+  `tb_loader_hpspace` switched to the independent-aligned-oscillator clock
+  model (the derived-clk_sys model gave the loader a delta-cycle of early
+  ack visibility); loader sim-only warning if an index-0 stream ends odd
+  (parked final byte would be dropped); comment fixes (sdram header no
+  longer claims bank interleave, loader header stream-slot size, clk_v25
+  pulse comment).
+- **R25-13 (strfs tests)** — zero-length and length-1 cases added for
+  MOVCU/MOVCD/CMPC/MOVCFU plus halfword MOVCUh/MOVCDh, covering the
+  `movc_finish(0)` path and the down-copy uint32 wrap to base−step.
+
+Documented, not fixed (out of shipping profile or accepted):
+
+- i8255 BSR (control bit7=0 port C bit set/reset) unimplemented — `pc_out`
+  is unconnected and all target games use port C as input; universal-build
+  hygiene only.
+- MultiPCM slot scheduler stalls on SDRAM ack latency (sample-rate droop
+  under load) — Multi 32 only, compiled out of the shipping build.
+- Sprite R_IDLE can absorb two frame events into one pass under sustained
+  whole-frame render overload (self-limiting; unreachable in MAME timing).
+- CVTSW/CMPF NaN payloads remain canonicalized (0x7fc00000, S=0); MAME's
+  host-float payload propagation is inherently host-dependent.  SCLFS |n|>30
+  divergence documented at `fp_scale`.
+- `verif/modelsim-tearfix.log` is a stale mid-development snapshot (its
+  SPRITE FB FAIL predates the Round 24 fix); superseded by the full-pass
+  regression logs.
+
+### R25-8 follow-up (discovered by the new diagnostic, same day)
+
+Enabling the internal-window observability immediately caught a real event the
+old model dropped invisibly: **the ga2 firmware writes SFR byte 0xFFFEB (PRC,
+processor control) during boot**.  On the real V25/MAME this is an internal
+peripheral write that never reaches the bus, and the boot provably succeeds
+with it dropped (wake/table/stack all bit-correct), so it is benign — but it
+proves the firmware does touch the unmodeled internal page.  The diagnostic
+was accordingly split: SFR page 0xFFFxx → the informational **io** band (like
+port I/O: "unmodeled on-chip peripheral touched"); IRAM/register-bank page
+0xFFExx → the **unmapped** fault band (dropping those would corrupt data).
+Internal-page *reads* (which return program bytes, not IRAM/SFR state) are
+flagged the same way without changing the data path.  `tb_v25_firmware` now
+asserts the PRC write IS flagged on the io band and still hard-fails on any
+other io/unmapped event — the discovery is a regression check.

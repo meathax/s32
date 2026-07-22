@@ -34,7 +34,7 @@ reg [63:0] rom_data = 64'hffffffffffffffff;
 reg rom_ack = 1'b0;
 
 s32_v25_cpu dut (
-    .clk(clk), .clk_v25(clk_v25), .rst(rst), .enable(enable), .table_sel(1'b0),
+    .clk(clk), .clk_v25(clk_v25), .rst(rst), .enable(enable), .pause(1'b0), .table_sel(1'b0),
     .prg_wr(prg_wr), .prg_waddr(prg_waddr), .prg_wdata(prg_wdata),
     .rom_req(rom_req), .rom_addr(rom_addr), .rom_data(rom_data), .rom_ack(rom_ack),
     .cs(cs), .we(we), .addr(addr), .wdata(wdata), .rdata(rdata),
@@ -283,13 +283,24 @@ initial begin
         $fatal(1);
     end
 
-    // MAME's GA2 firmware trace performs no I/O cycles and never leaves the
-    // two mapped memory windows.  Treat either event as a decode/control-flow
+    // MAME's GA2 firmware trace performs no port I/O cycles and never leaves
+    // the two mapped memory windows ON THE BUS — but it does program one
+    // on-chip SFR during boot (byte write 0xFFFEB = PRC, internal to the real
+    // V25 and to MAME's v25 device, surfaced on the io diagnostic band by
+    // this model since audit R25).  Accept exactly that access (either byte
+    // encoding of the 0xFFFEA/B pair); treat any other
+    // io event, or any unmapped/IRAM-page event, as a decode/control-flow
     // failure rather than merely printing it after an otherwise passing run.
-    if (debug_io_seen || debug_unmapped_seen) begin
+    if (debug_unmapped_seen ||
+        (debug_io_seen && debug_last_io_addr != 16'hffea
+                       && debug_last_io_addr != 16'hffeb)) begin
         $display("V25_FIRMWARE FAIL: unexpected bus access io_seen=%0d last_io=%04x unmapped=%0d last_mem=%05x",
                  debug_io_seen, debug_last_io_addr,
                  debug_unmapped_seen, debug_last_unmapped_addr);
+        $fatal(1);
+    end
+    if (!debug_io_seen) begin
+        $display("V25_FIRMWARE FAIL: the known ga2 SFR write (0xFFFEB/PRC) was not flagged on the io band");
         $fatal(1);
     end
 

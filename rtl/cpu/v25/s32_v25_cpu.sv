@@ -22,6 +22,7 @@ module s32_v25_cpu (
     input  wire        clk_v25,      // ~24.162 MHz (clk_sys/2): the s80x86 compute domain
     input  wire        rst,
     input  wire        enable,
+    input  wire        pause,        // OSD pause (clk_sys-domain level)
     input  wire        table_sel,    // 0 = ga2, 1 = arabfgt
 
     // Program load port.  prg_waddr is already address-descrambled by the
@@ -83,13 +84,16 @@ wire rst_v25 = rst_v25_sync[2];
 // the MRA descriptor during download, while reset is held).  Two-flop them so
 // the clk_v25 domain never samples a mid-transition level.
 reg enable_s1, enable_v25, table_sel_s1, table_sel_v25;
+reg pause_s1, pause_v25;
 always @(posedge clk_v25 or posedge rst_v25)
     if (rst_v25) begin
         enable_s1 <= 1'b0; enable_v25 <= 1'b0;
         table_sel_s1 <= 1'b0; table_sel_v25 <= 1'b0;
+        pause_s1 <= 1'b0; pause_v25 <= 1'b0;
     end else begin
         enable_s1 <= enable;       enable_v25 <= enable_s1;
         table_sel_s1 <= table_sel; table_sel_v25 <= table_sel_s1;
+        pause_s1 <= pause;         pause_v25 <= pause_s1;
     end
 
 reg [13:0] v25_ce_accum;
@@ -106,6 +110,12 @@ always @(posedge clk_v25 or posedge rst_v25) begin
         v25_ce       <= 1'b0;
     end else if (!enable_v25) begin
         v25_ce_accum <= 14'd0;
+        v25_ce       <= 1'b0;
+    end else if (pause_v25) begin
+        // OSD pause freezes the virtual 10 MHz cadence with the V60/Z80/PCM
+        // CEs; the accumulator phase is preserved so cadence resumes cleanly.
+        // Without this the MCU kept running against a paused V60 and could
+        // rewrite a half-consumed mailbox response (ga2/arabfgt).
         v25_ce       <= 1'b0;
     end else if (v25_ce_accum >= V25_CE_MODULUS - V25_CE_INCREMENT) begin
         v25_ce_accum <= v25_ce_accum + V25_CE_INCREMENT - V25_CE_MODULUS;
@@ -339,8 +349,12 @@ s32_v25_mailbox_dpram mb_ram (
     .v60_clock(clk),                 // clk_sys: V60 side (System 32 bus)
     .v60_addr(addr),
     .v60_wdata(wdata),
-    .v60_rden(enable && cs),
-    .v60_wren(enable && cs && we),
+    // Always live to the V60 (MAME parity: the MB8421 is a plain dual-port
+    // RAM).  Gating these on `enable` dropped every V60 mailbox write during
+    // the post-reset image sweep (~2-4 ms), a blackout MAME does not have.
+    // `cs` already carries board.has_v25 at the instantiation site.
+    .v60_rden(cs),
+    .v60_wren(cs && we),
     .v60_q(dpram_v60_q),
 
     .cpu_clock(clk_v25),             // clk_v25: s80x86 side
@@ -400,7 +414,7 @@ always @(posedge clk_v25 or posedge rst_v25) begin
         debug_unmapped_seen     <= 1'b0;
         debug_last_unmapped_addr <= 20'd0;
     end else begin
-        // Requests and BRAM enables are one clk_sys pulse. CPU acknowledgements
+        // Requests and BRAM enables are one clk_v25 pulse. CPU acknowledgements
         // change only on V25 CE edges and remain visible throughout CE gaps.
         cache_req       <= 1'b0;
         dpram_cpu_rden  <= 1'b0;
@@ -440,8 +454,27 @@ always @(posedge clk_v25 or posedge rst_v25) begin
                             dpram_cpu_wren    <= data_we;
                             bus_state         <= BUS_D_DP_WAIT;
                         end else if (data_is_rom) begin
+                            // The V25 internal data area (IDB=0xFF at reset)
+                            // overlays 0xFFE00-0xFFFFF inside this window and
+                            // is not backed by the model: writes are dropped,
+                            // reads return program bytes.  Surface both so a
+                            // hardware failure of this class is visible —
+                            // SFR page (0xFFFxx: on-chip peripheral regs; the
+                            // ga2 boot writes byte 0xFFFEB = PRC) goes to the
+                            // informational io band like port I/O; IRAM page
+                            // (0xFFExx: register banks/data) would be real
+                            // data loss and goes to the unmapped fault band.
+                            if (data_addr[19:8] == 12'hfff) begin
+                                debug_io_seen      <= 1'b1;
+                                debug_last_io_addr <= {
+                                    data_addr[15:1], data_bytesel == 2'b10
+                                };
+                            end else if (data_addr[19:8] == 12'hffe) begin
+                                debug_unmapped_seen      <= 1'b1;
+                                debug_last_unmapped_addr <= {data_addr, 1'b0};
+                            end
                             if (data_we) begin
-                                // ROM writes are ignored but acknowledged.
+                                // ROM/internal-area writes: acknowledged, dropped.
                                 data_ack <= 1'b1;
                             end else begin
                                 cache_addr <= data_addr[15:1];

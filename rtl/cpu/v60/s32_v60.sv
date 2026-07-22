@@ -918,7 +918,10 @@ else if (ce) begin
             5'h18, 5'h19, 5'h1a, 5'h1b: begin
                 cls <= C_STRING;
                 ea_want_addr <= 1'b1;
-                ea_dim   <= 2'd2;
+                // MAME F7a/F7b decode with dim 0 (0x58 byte) / 1 (0x5A half):
+                // autoincrement/indexed AMs step and scale by the element
+                // size, and F7b immediates size accordingly — not dword.
+                ea_dim   <= fb[0][1] ? 2'd1 : 2'd0;
                 ea_modm  <= fb[1][6];
                 ea_ofs   <= 5'd2;
                 ea_target2 <= 1'b0;
@@ -1841,8 +1844,9 @@ else if (ce) begin
         str_len1 <= lb[7] ? rf_rdata_a : {24'b0, lb};
         // decode op2 at ofs = 3 + len1. F7a (MOVC/CMPC): address. F7b
         // (SCHC/SKPC 0x18-0x1B): search VALUE, and no len2 byte follows.
+        // Element-size dim for both (MAME dim 0 byte / 1 half — see decode).
         ea_want_addr <= (subop[4:0] >= 5'h18) ? 1'b0 : 1'b1;
-        ea_dim   <= 2'd2;
+        ea_dim   <= cur_op[1] ? 2'd1 : 2'd0;
         ea_modm  <= subop[5];
         ea_ofs   <= 5'd3 + len1;
         ea_target2 <= 1'b1;
@@ -3836,12 +3840,15 @@ endfunction
 function automatic [1:0] fp_dim1(input [7:0] op, input [4:0] sub);
     fp_dim1 = (op == 8'h5c && sub == 5'h10) ? 2'd1 : 2'd2;
 endfunction
-// op2 role: CMPF reads a value; MOVFS/CVTWS/CVTSW write-only; rest are RMW.
+// op2 role: CMPF reads a value; MOVFS/CVTWS/CVTSW write-only; SCLFS/ADDFS/
+// SUBFS/MULFS/DIVFS are RMW.  NEGFS/ABSFS are NOT: MAME does ReadAMAddress +
+// store only (no load) — they operate on op1 and must not read a possibly
+// read-sensitive destination.
 function automatic fp_op2_value(input [7:0] op, input [4:0] sub);
     fp_op2_value = (op == 8'h5c) && (sub == 5'h00);                     // CMPF
 endfunction
 function automatic fp_op2_rmw(input [7:0] op, input [4:0] sub);
-    fp_op2_rmw = (op == 8'h5c) && ((sub == 5'h09) || (sub == 5'h0a) ||  // NEGFS/ABSFS
+    fp_op2_rmw = (op == 8'h5c) && (
                  (sub == 5'h10) || (sub == 5'h18) || (sub == 5'h19) ||  // SCLFS/ADDFS/SUBFS
                  (sub == 5'h1a) || (sub == 5'h1b));                     // MULFS/DIVFS
 endfunction
@@ -4008,14 +4015,25 @@ function automatic [31:0] fp_mul(input [31:0] x, input [31:0] y);
     fp_mul = out;
 endfunction
 
-// scale x by 2^n (SCLFS); exact power-of-two adjust of the exponent
+// scale x by 2^n (SCLFS); exact power-of-two adjust of the exponent.
+// Deliberate divergence from the pinned MAME for |n| > 30: MAME computes
+// `appf * / (1 << n)` with the host's shift-count masking (&31, and
+// 1 << 31 = INT_MIN there), so e.g. SCLFS(31) flips the sign and SCLFS(32)
+// is a no-op on x86.  That is emulator UB, not V60 architecture; this unit
+// keeps the architecturally-sensible pure exponent adjust.
 function automatic [31:0] fp_scale(input [31:0] x, input signed [15:0] n);
-    logic s; logic signed [15:0] e; logic [23:0] m; logic [31:0] out;
+    logic s; logic [23:0] m; logic [31:0] out;
+    logic signed [15:0] e; logic signed [17:0] esum;
     if (fp_isnan(x) || fp_isinf(x) || fp_iszero(x)) out = x;
     else begin
         {s, e, m} = fp_unpack(x);
-        // value = 1.m * 2^e; scaled exponent e+n; mantissa is 24-bit at bit23
-        out = fp_pack(s, e + n, {m, 3'b000});
+        // value = 1.m * 2^e; scaled exponent e+n; mantissa is 24-bit at
+        // bit23.  Widened sum: an int16 e+n wraps for |n| near 32768 and
+        // would turn a huge scale into the wrong extreme.
+        esum = 18'(e) + 18'(n);
+        if (esum > 18'sd254)       out = {s, 8'hff, 23'd0};   // overflow: inf
+        else if (esum < -18'sd180) out = {s, 31'd0};          // deep underflow: 0
+        else                       out = fp_pack(s, 16'(esum), {m, 3'b000});
     end
     fp_scale = out;
 endfunction
@@ -4054,7 +4072,12 @@ task automatic cvt_s_w(input [31:0] x, input [2:0] mode,
     logic [63:0] big; logic [31:0] intp; logic frac_nz; logic [31:0] fracbits;
     logic roundup; logic signed [15:0] sh;
     iv = 32'd0; ov = 1'b0;
-    if (fp_isnan(x) || fp_isinf(x)) begin iv = 32'h8000_0000; ov = 1'b1; end
+    if (fp_isnan(x) || fp_isinf(x)) begin
+        // Pinned MAME converts (uint32_t)(int64_t)val on its x86 host: NaN
+        // and out-of-int64-range saturate the hardware convert to INT64_MIN,
+        // whose low 32 bits are 0.  OV = (!S && val <= -1.0f) -> -inf only.
+        iv = 32'd0; ov = fp_isinf(x) & x[31];
+    end
     else if (fp_iszero(x)) iv = 32'd0;
     else begin
         {s, e, m} = fp_unpack(x);        // value = m * 2^(e-23), m in [2^23,2^24)
@@ -4073,7 +4096,20 @@ task automatic cvt_s_w(input [31:0] x, input [2:0] mode,
             iv = s ? (~intp + 32'd1) : intp;
         end
         else if (e >= 16'sd31) begin
-            iv = 32'h8000_0000; ov = 1'b1;                  // out of int32 range
+            // MAME stores the LOW 32 BITS of the int64 truncation, not a
+            // clamp: well-defined in C for e in [31,62]; e >= 63 saturates
+            // the x86 convert to INT64_MIN (low 32 = 0).  |val| >= 2^31 here
+            // and integral, so no rounding is involved.
+            if (e >= 16'sd63) intp = 32'd0;
+            else begin
+                big  = {40'd0, m} << (e - 16'sd23);
+                intp = big[31:0];
+            end
+            iv = s ? (~intp + 32'd1) : intp;
+            // OV = stored sign bit disagrees with the true value's sign
+            // (MAME: (_S && val>=0) || (!_S && val<=-1); |val| >= 1 here).
+            // Note exactly -2^31 stores 0x80000000 with OV=0.
+            ov = (iv[31] & ~s) | (~iv[31] & s);
         end
         else begin
             sh = 16'sd23 - e;                               // fraction bit count
@@ -4186,7 +4222,10 @@ task automatic fp_exec;
         case (subop[4:0])
         5'h00: begin                                 // CMPF: appf = f(op2)-f(op1)
             logic un;
-            un = fp_isnan(fp_a) | fp_isnan(fp_b);
+            // MAME materializes the subtraction: same-signed infinities give
+            // inf-inf = NaN, so they compare Z=0/S=0 like unordered operands.
+            un = fp_isnan(fp_a) | fp_isnan(fp_b) |
+                 (fp_isinf(fp_a) & fp_isinf(fp_b) & (fp_a[31] == fp_b[31]));
             f_z  <= un ? 1'b0 : fp_eq(fp_b, fp_a);
             f_s  <= un ? 1'b0 : fp_lt(fp_b, fp_a);
             f_ov <= 1'b0; f_cy <= 1'b0;

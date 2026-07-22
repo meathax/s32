@@ -2,8 +2,10 @@
 //  Sega System 32 — ioctl ROM loader  (DESIGN.md §9.3)
 //  Stream layout (ioctl index 0):
 //    [0x00..0x3f]  board descriptor (64 bytes)
-//    [maincpu 2MB][soundcpu 4MB][tiles 4MB][multipcm 4MB][mcu 64KB pad 2MB-]
+//    [maincpu 2MB][soundcpu 4MB][tiles 4MB][multipcm 4MB][mcu 64KB]
 //    [sprites up to 16MB]
+//  (The MCU stream slot is exactly 64 KB — OFF_SPRITES = OFF_MCU + 0x10000;
+//  only the SDRAM slot it lands in spans 2 MB.)
 //  The MRA pads every region to its fixed size so offsets are constant.
 //  MCU bytes are address-descrambled into the reserved external-SDRAM slot,
 //  avoiding a duplicate 64 KiB on-chip ROM that cannot fit alongside the real
@@ -63,6 +65,9 @@ localparam [26:0] OFF_END      = OFF_SPRITES  + 27'h100_0000;
 reg [7:0]  desc_bytes [0:15];
 reg [7:0]  byte_lo;
 reg        busy;
+`ifdef SIMULATION
+reg [26:0] dl_addr_last;   // last accepted index-0 stream address (see below)
+`endif
 reg        index0_seen;
 integer    desc_i;
 
@@ -121,6 +126,9 @@ always @(posedge clk) begin
         // hold and re-present the word after sdr_wr_ack, so none is dropped.
         if (mem_ready && ioctl_download && ioctl_wr && !busy) begin
             if (ioctl_index == 8'd0) begin
+`ifdef SIMULATION
+                dl_addr_last <= ioctl_addr;
+`endif
                 if (ioctl_addr < OFF_MAINCPU) begin
                     // descriptor
                     if (ioctl_addr[26:4] == 0) desc_bytes[ioctl_addr[3:0]] <= ioctl_dout;
@@ -208,6 +216,13 @@ always @(posedge clk) begin
         if (mem_ready && !ioctl_download && index0_seen && !busy && !sdr_wr_req) begin
             rom_loaded  <= 1'b1;
             index0_seen <= 1'b0;
+`ifdef SIMULATION
+            // The byte-pairing above assumes every region is even-length (the
+            // fixed MRA layout guarantees it).  An odd-length stream would
+            // silently drop its parked final byte — make that loud in sim.
+            if (dl_addr_last[0] == 1'b0)
+                $display("LOADER WARNING: index-0 stream ended on an even address (odd length) — final parked byte was dropped");
+`endif
         end
     end
 end

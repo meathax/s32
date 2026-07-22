@@ -89,6 +89,7 @@ if {[s32_require [expr {[get_collection_size $sprite_deferred_sources] > 0 && \
 # the rest false-paths them.  Present only in the S32_REAL_V25 build; guarded on
 # the derived clock existing so other profiles skip it.
 set v25_clk [get_clocks -nowarn {*|pll|pll_inst|altera_pll_i|*[3].*|divclk}]
-if {[get_collection_size $v25_clk] == 1} {
+if {[s32_require [expr {[get_collection_size $v25_clk] == 1}] \
+        "clk_v25 PLL output clock for the asynchronous clock group"]} {
     set_clock_groups -asynchronous -group $v25_clk
 }

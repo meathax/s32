@@ -32,6 +32,10 @@ module s32_core #(
     input             ce_z80,       // 8.054 / 8.0
     input             ce_fm,
     input             ce_pcm,       // 12.5 / 10.0
+    // OSD pause: the emu top zeroes ce_cpu/ce_z80/ce_pcm; the real V25 has
+    // its own clk_v25-domain CE generator, so it must be told separately or
+    // it keeps running against a frozen V60 (mailbox tear on ga2/arabfgt).
+    input             pause,
 
     // SDRAM ports (to sdram.sv in emu top)
     output            sdr_p0_req,
@@ -1035,6 +1039,7 @@ end
 
 s32_v25_cpu v25 (
     .clk_v25(clk_v25),
+    .pause(pause),
 `else
 s32_v25 v25 (
 `endif
@@ -1062,10 +1067,19 @@ s32_v25 v25 (
 // ---------------------------------------------------------------------------
 
 `ifdef S32_REAL_V25
-assign sdr_p5_req  = sweep_active ? sweep_req_r : v25_p5_req;
-assign sdr_p5_addr = SDR_MCU_BASE[24:3] +
+// Registered so the sweep/V25 mux + base add never sits combinationally on
+// the clk_sys -> clk_ram controller crossing.  Both requesters tolerate the
+// one-cycle latency (the bridge and the sweep wait on sdr_p5_ack levels).
+reg        sdr_p5_req_r;
+reg [24:3] sdr_p5_addr_r;
+always @(posedge clk_sys) begin
+    sdr_p5_req_r  <= sweep_active ? sweep_req_r : v25_p5_req;
+    sdr_p5_addr_r <= SDR_MCU_BASE[24:3] +
                      (sweep_active ? {9'b0, sweep_line}
                                    : {9'b0, v25_rom_addr});
+end
+assign sdr_p5_req  = sdr_p5_req_r;
+assign sdr_p5_addr = sdr_p5_addr_r;
 `else
 assign sdr_p5_req  = 1'b0;
 assign sdr_p5_addr = '0;

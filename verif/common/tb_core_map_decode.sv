@@ -19,7 +19,7 @@ module tb_core_map_decode;
 
     s32_core core (
         .clk_sys(clk), .clk_ram(clk), .rst(1'b1), .video_rst(1'b1), .board(bd),
-        .ce_cpu(1'b0), .ce_z80(1'b0), .ce_fm(1'b0), .ce_pcm(1'b0),
+        .ce_cpu(1'b0), .ce_z80(1'b0), .ce_fm(1'b0), .ce_pcm(1'b0), .pause(1'b0),
         .sdr_p0_dout(16'h0), .sdr_p0_ack(1'b0),
         .sdr_p1_dout(64'h0), .sdr_p1_ack(1'b0),
         .sdr_p2_dout(128'h0), .sdr_p2_ack(1'b0),

@@ -160,6 +160,8 @@ reg [15:0] concurrent_p0_expected;
 reg [63:0] delayed_p5_expected;
 reg saw_concurrent_p0;
 reg saw_concurrent_p5;
+reg starve_p5_done;
+reg p0_regap;
 initial begin
     repeat (4) @(posedge clk);
     @(negedge clk); init = 1'b0;
@@ -231,16 +233,26 @@ initial begin
     if (!saw_concurrent_p5) $fatal(1, "bounded p5 read timed out");
 
     // Continuous p0 demand must not starve a one-cycle low-priority p5 line
-    // fill.  Keep p0 asserted while p5 waits and require the p5 grant within
-    // a small, implementation-independent transaction bound.
+    // fill.  Under the rising-edge request contract a held level is serviced
+    // exactly once, so sustained demand means RE-PULSING p0 off every ack —
+    // the V60 icache fill chain pattern.  Require the p5 grant within a
+    // small, implementation-independent transaction bound.
     @(negedge clk); p0_addr = 24'h000033; p0_req = 1'b1;
                     p5_addr = 22'h000012; p5_req = 1'b1;
     @(negedge clk); p5_req = 1'b0;
     delayed_timeout = 0;
-    while (!p5_ack && delayed_timeout < 300) begin
+    starve_p5_done = 1'b0;
+    p0_regap = 1'b0;
+    while (!starve_p5_done && delayed_timeout < 300) begin
         @(posedge clk); #1; delayed_timeout = delayed_timeout + 1;
+        if (p5_ack) starve_p5_done = 1'b1;
+        // one-cycle req gap after each p0 ack, then chain the next request
+        if (p0_ack && p0_req) begin p0_req = 1'b0; p0_regap = 1'b1; end
+        else if (p0_regap) begin
+            p0_addr = p0_addr + 24'h2; p0_req = 1'b1; p0_regap = 1'b0;
+        end
     end
-    if (!p5_ack) $fatal(1, "round-robin starvation bound violated");
+    if (!starve_p5_done) $fatal(1, "round-robin starvation bound violated");
     @(negedge clk); p0_req = 1'b0;
     while (p0_ack || p5_ack) begin @(posedge clk); #1; end
 
