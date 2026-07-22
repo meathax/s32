@@ -537,7 +537,26 @@ try {
     Assert-Marker $v25Output "V25_FIRMWARE RUNNER: PASS" "real V25 firmware"
     Assert-Marker $v25Output "V25_FIRMWARE CE: PASS" "V25 clock enable cadence"
 
-    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (35/35 tiers)"
+    Write-Tier 36 "real V25 INTEGRATION in s32_core (p5 program fetch + mailbox round-trip)"
+    $v25iOutput = @(& (Join-Path $Root "verif/v25/run_v25_integration.ps1") 2>&1)
+    foreach ($line in $v25iOutput) { Write-RunLine $line }
+    Assert-Marker $v25iOutput "V25_INTEGRATION RUNNER: PASS" "real V25 integration"
+
+    Write-Tier 37 "MCU download integrity: DQM byte-lane writes + HPS ioctl pacing end-to-end"
+    Run-HdlTest "t37_sdram_v25load" "tb_sdram_v25load" @(
+        "rtl/mem/sdram.sv", "verif/common/tb_sdram_v25load.sv"
+    ) "SDRAM V25LOAD PASS"
+    Run-HdlTest "t37_loader_hpspace" "tb_loader_hpspace" @(
+        "rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "rtl/mem/sdram.sv",
+        "verif/common/tb_loader_hpspace.sv"
+    ) "LOADER HPSPACE PASS"
+
+    Write-Tier 38 "full-core real V25 + PRODUCTION sdram.sv (request-drop protocol regression)"
+    $v25sOutput = @(& (Join-Path $Root "verif/v25/run_v25_sdram.ps1") 2>&1)
+    foreach ($line in $v25sOutput) { Write-RunLine $line }
+    Assert-Marker $v25sOutput "V25_SDRAM RUNNER: PASS" "real V25 + production SDRAM integration"
+
+    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (38/38 tiers)"
     Write-RunLine "Detailed log: $LogPath"
     $Completed = $true
 }

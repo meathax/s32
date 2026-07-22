@@ -18,7 +18,8 @@
 `default_nettype none
 
 module s32_v25_cpu (
-    input  wire        clk,
+    input  wire        clk,          // clk_sys (48.324 MHz): V60-side mailbox + p5 bridge
+    input  wire        clk_v25,      // ~24.162 MHz (clk_sys/2): the s80x86 compute domain
     input  wire        rst,
     input  wire        enable,
     input  wire        table_sel,    // 0 = ga2, 1 = arabfgt
@@ -49,25 +50,61 @@ module s32_v25_cpu (
     output reg         debug_io_seen,
     output reg  [15:0] debug_last_io_addr,
     output reg         debug_unmapped_seen,
-    output reg  [19:0] debug_last_unmapped_addr
+    output reg  [19:0] debug_last_unmapped_addr,
+    // The first program line the CPU actually fetched (clk domain): compares
+    // byte-for-byte on the OSD against the known-good image's reset line.
+    output reg         debug_first_fetch_valid,
+    output reg  [63:0] debug_first_fetch_data,
+    output reg  [15:3] debug_first_fetch_addr
 );
 
+// The s80x86 now runs on clk_v25 = clk_sys/2 (~24.162 MHz), which halves its
+// fabric timing requirement so the large core meets timing with real margin.
+// The fractional enable keeps the EXACT same 10 MHz average V25 cadence: on the
+// half-rate clock the increment is doubled (5000/12081 * 24.162 = 9.9986 MHz),
+// identical to the original 2500/12081 * 48.324.  Enable pulses are one clk_v25
+// period wide, separated by two or three periods -- cycle-accuracy is unchanged.
 localparam [13:0] V25_CE_MODULUS = 14'd12081;
-localparam [13:0] V25_CE_INCREMENT = 14'd2500;
+localparam [13:0] V25_CE_INCREMENT = 14'd5000;
+
+// clk_v25-domain reset: asserts asynchronously with rst, deasserts only on a
+// clk_v25 edge.  rst is a clk_sys-domain level and clk_v25 is a phase-locked
+// output of the same PLL, so an unsynchronised release edge can land inside a
+// clk_v25 flop's recovery window on every boot -- and the SDC's asynchronous
+// clock group removes that timing from analysis.  Every clk_v25 flop below
+// (including the s80x86) must reset from rst_v25, never from raw rst.
+reg [2:0] rst_v25_sync;
+always @(posedge clk_v25 or posedge rst)
+    if (rst) rst_v25_sync <= 3'b111;
+    else     rst_v25_sync <= {rst_v25_sync[1:0], 1'b0};
+wire rst_v25 = rst_v25_sync[2];
+
+// enable/table_sel are quasi-static clk_sys-domain config bits (latched from
+// the MRA descriptor during download, while reset is held).  Two-flop them so
+// the clk_v25 domain never samples a mid-transition level.
+reg enable_s1, enable_v25, table_sel_s1, table_sel_v25;
+always @(posedge clk_v25 or posedge rst_v25)
+    if (rst_v25) begin
+        enable_s1 <= 1'b0; enable_v25 <= 1'b0;
+        table_sel_s1 <= 1'b0; table_sel_v25 <= 1'b0;
+    end else begin
+        enable_s1 <= enable;       enable_v25 <= enable_s1;
+        table_sel_s1 <= table_sel; table_sel_v25 <= table_sel_s1;
+    end
 
 reg [13:0] v25_ce_accum;
 reg        v25_ce;
-wire       core_reset = rst | ~enable;
+wire       core_reset = rst_v25 | ~enable_v25;
 // Upstream has a few synchronously initialized pipeline/state registers.
 // Advancing them while reset is active preserves the original reset contract;
 // normal architectural execution remains qualified by v25_ce.
 wire       core_ce = v25_ce | core_reset;
 
-always @(posedge clk or posedge rst) begin
-    if (rst) begin
+always @(posedge clk_v25 or posedge rst_v25) begin
+    if (rst_v25) begin
         v25_ce_accum <= 14'd0;
         v25_ce       <= 1'b0;
-    end else if (!enable) begin
+    end else if (!enable_v25) begin
         v25_ce_accum <= 14'd0;
         v25_ce       <= 1'b0;
     end else if (v25_ce_accum >= V25_CE_MODULUS - V25_CE_INCREMENT) begin
@@ -102,9 +139,9 @@ wire  [7:0] opcode_xlat_in;
 wire  [7:0] opcode_xlat_out;
 
 Core cpu (
-    .clk(clk),
+    .clk(clk_v25),
     .ce(core_ce),
-    .reset(rst | ~enable),
+    .reset(core_reset),
     .nmi(1'b0),
     .intr(1'b0),
     .irq(8'h00),
@@ -127,7 +164,7 @@ Core cpu (
 
     .opcode_xlat_in(opcode_xlat_in),
     .opcode_xlat_out(opcode_xlat_out),
-    .opcode_xlat_en(enable),
+    .opcode_xlat_en(enable_v25),
 
     .debug_stopped(),
     .debug_seize(1'b0),
@@ -190,8 +227,8 @@ begin
 end
 endfunction
 
-assign opcode_xlat_out = table_sel ? arf_opcode(opcode_xlat_in)
-                                     : ga2_opcode(opcode_xlat_in);
+assign opcode_xlat_out = table_sel_v25 ? arf_opcode(opcode_xlat_in)
+                                       : ga2_opcode(opcode_xlat_in);
 
 // Program ROM lives in external SDRAM and is mirrored at 00000h and f0000h.
 // Keeping the 64 KiB image out of M10Ks recovers 64 blocks required to fit the
@@ -203,13 +240,87 @@ reg [15:1] cache_addr;
 wire       cache_ack;
 wire [15:0] cache_data;
 
+// prg_wr (a clk_sys loader pulse) synchronised into the clk_v25 cache domain.
+// It only matters during ROM download, when rst is held, so a missed/stretched
+// pulse is harmless -- the cache is reset then anyway.
+reg prg_wr_s1, prg_wr_s2;
+always @(posedge clk_v25 or posedge rst_v25)
+    if (rst_v25) begin prg_wr_s1 <= 1'b0; prg_wr_s2 <= 1'b0; end
+    else         begin prg_wr_s1 <= prg_wr; prg_wr_s2 <= prg_wr_s1; end
+wire prg_wr_v25 = prg_wr_s2;
+
+// Cache runs in clk_v25; its SDRAM p5 fetch crosses to the clk_sys/clk_ram SDRAM
+// controller through the CDC toggle handshake below.
+wire        cache_rom_req;
+wire [15:3] cache_rom_addr;
+wire [63:0] cache_rom_data;
+wire        cache_rom_ack;
+
 s32_v25_rom_cache program_cache (
-    .clk(clk), .rst(rst), .invalidate(prg_wr),
+    .clk(clk_v25), .rst(rst_v25), .invalidate(prg_wr_v25),
     .cpu_req(cache_req), .cpu_addr(cache_addr),
     .cpu_data(cache_data), .cpu_ack(cache_ack),
-    .rom_req(rom_req), .rom_addr(rom_addr),
-    .rom_data(rom_data), .rom_ack(rom_ack)
+    .rom_req(cache_rom_req), .rom_addr(cache_rom_addr),
+    .rom_data(cache_rom_data), .rom_ack(cache_rom_ack)
 );
+
+// ---- p5 clock-domain bridge: clk_v25 cache <-> clk_sys/clk_ram SDRAM --------
+// A two-flop toggle handshake carries one aligned 8-byte line fetch across the
+// crossing.  cache_rom_req (a one-clk_v25 pulse) flips req_tgl; the clk_sys side
+// syncs it, issues the SDRAM p5 request, captures the burst on rom_ack, then
+// flips ack_tgl; the clk_v25 side syncs that and pulses cache_rom_ack with the
+// latched data.  Address and data buses are held stable across each half of the
+// handshake, so only the toggles are synchronised.
+reg        req_tgl_v25;
+reg [15:3] req_addr_v25;
+always @(posedge clk_v25 or posedge rst_v25)
+    if (rst_v25) begin req_tgl_v25 <= 1'b0; req_addr_v25 <= 13'd0; end
+    else if (cache_rom_req) begin
+        req_tgl_v25  <= ~req_tgl_v25;
+        req_addr_v25 <= cache_rom_addr;
+    end
+
+reg        req_s1, req_s2, req_s3;
+reg [15:3] br_addr_r;
+reg [63:0] br_data_r;
+reg        br_busy;
+reg        ack_tgl_clk;
+reg        sdr_req_r;
+always @(posedge clk or posedge rst)
+    if (rst) begin
+        req_s1<=1'b0; req_s2<=1'b0; req_s3<=1'b0; br_busy<=1'b0;
+        ack_tgl_clk<=1'b0; sdr_req_r<=1'b0; br_addr_r<=13'd0; br_data_r<=64'd0;
+        debug_first_fetch_valid <= 1'b0;
+        debug_first_fetch_data  <= 64'd0;
+        debug_first_fetch_addr  <= 13'd0;
+    end else begin
+        req_s1 <= req_tgl_v25; req_s2 <= req_s1; req_s3 <= req_s2;
+        sdr_req_r <= 1'b0;
+        if (!br_busy && (req_s2 ^ req_s3)) begin
+            br_busy   <= 1'b1;
+            br_addr_r <= req_addr_v25;   // stable while the cache holds the miss
+            sdr_req_r <= 1'b1;
+        end
+        if (br_busy && rom_ack) begin
+            br_busy     <= 1'b0;
+            br_data_r   <= rom_data;
+            ack_tgl_clk <= ~ack_tgl_clk;
+            if (!debug_first_fetch_valid) begin
+                debug_first_fetch_valid <= 1'b1;
+                debug_first_fetch_data  <= rom_data;
+                debug_first_fetch_addr  <= br_addr_r;
+            end
+        end
+    end
+assign rom_req  = sdr_req_r;
+assign rom_addr = br_addr_r;
+
+reg ack_s1, ack_s2, ack_s3;
+always @(posedge clk_v25 or posedge rst_v25)
+    if (rst_v25) begin ack_s1<=1'b0; ack_s2<=1'b0; ack_s3<=1'b0; end
+    else begin ack_s1 <= ack_tgl_clk; ack_s2 <= ack_s1; ack_s3 <= ack_s2; end
+assign cache_rom_ack  = ack_s2 ^ ack_s3;
+assign cache_rom_data = br_data_r;      // stable when cache_rom_ack pulses
 
 // -------------------------------------------------------------------------
 // MB8421 mailbox.  The physical part has 2 KiB, mirrored throughout the
@@ -225,14 +336,14 @@ reg         dpram_cpu_wren;
 wire [15:0] dpram_cpu_q;
 
 s32_v25_mailbox_dpram mb_ram (
-    .v60_clock(clk),
+    .v60_clock(clk),                 // clk_sys: V60 side (System 32 bus)
     .v60_addr(addr),
     .v60_wdata(wdata),
     .v60_rden(enable && cs),
     .v60_wren(enable && cs && we),
     .v60_q(dpram_v60_q),
 
-    .cpu_clock(clk),
+    .cpu_clock(clk_v25),             // clk_v25: s80x86 side
     .cpu_addr(dpram_cpu_addr),
     .cpu_wdata(dpram_cpu_wdata),
     .cpu_byteena(dpram_cpu_byteena),
@@ -268,8 +379,8 @@ wire data_is_rom   = (data_addr[19:16] == 4'h0) ||
                     (data_addr[19:16] == 4'hf);
 wire data_is_dpram = (data_addr[19:16] == 4'h1);
 
-always @(posedge clk or posedge rst) begin
-    if (rst) begin
+always @(posedge clk_v25 or posedge rst_v25) begin
+    if (rst_v25) begin
         bus_state                <= BUS_IDLE;
         instr_ack               <= 1'b0;
         data_ack                <= 1'b0;
@@ -300,7 +411,7 @@ always @(posedge clk or posedge rst) begin
             rom_ready <= 1'b1;
         end
 
-        if (!enable || prg_wr) begin
+        if (!enable_v25 || prg_wr_v25) begin
             bus_state  <= BUS_IDLE;
             instr_ack <= 1'b0;
             data_ack  <= 1'b0;
@@ -439,7 +550,7 @@ defparam
     ram.outdata_reg_a = "UNREGISTERED",
     ram.outdata_reg_b = "UNREGISTERED",
     ram.power_up_uninitialized = "FALSE",
-    ram.read_during_write_mode_mixed_ports = "OLD_DATA";
+    ram.read_during_write_mode_mixed_ports = "DONT_CARE";
 `else
 reg [7:0] mem [0:2047];
 reg [7:0] v60_q_r;

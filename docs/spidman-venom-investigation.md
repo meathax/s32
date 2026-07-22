@@ -1,5 +1,36 @@
 # Spider-Man early-trigger investigation (Venom / Scorpion)
 
+## 2026-07-22 update — REPRODUCES IN ATTRACT MODE (user report)
+
+On hardware, the moment the **camera** pans right (not merely player movement),
+**all** scroll-gated events fire at once — Scorpion, the fat mini-boss, and
+Venom together — instead of one-by-one screens apart.  **This also happens in
+attract mode.**  Consequences:
+
+- Input-independent and fully deterministic → the whole failure can be
+  reproduced and diffed against MAME's attract sequence frame-by-frame, no
+  driving required (removes the "needs one short drive" blocker below).
+- Every scroll-gated event trips on the FIRST pan → whatever value the spawn
+  manager compares against thresholds saturates/jumps to max immediately when
+  scrolling starts (not a slow drift, confirming the earlier signature).
+- The same all-at-once early triggering happens on OTHER MAPS too (e.g. the
+  caves stage), not just the street/truck level → the bug is in the shared
+  scroll-gated spawn mechanism itself, not per-level script data.  One fix
+  should cure every stage.
+- RE-TESTED on the sdram.sv request-drop-fix build (SHA b44f8d39, 2026-07-22):
+  **unchanged** — ~12 "waiting" enemies flood immediately at the start of play.
+  SDRAM service timing is ruled out; this is a logic-level divergence (V60
+  instruction semantics or a memory-value bug in the spawn manager's variable).
+  NEXT STEP: deterministic MAME attract-mode trace of the spawn-manager
+  variables (no driving needed) diffed against the core.
+- Side-by-side confirmation (2026-07-22): the user ran reference MAME
+  (spidman World, same ROM) interactively — spawns are correctly staggered
+  (~1 screen of walking -> 2 enemies).  On the core, everything triggers the
+  moment the screen first moves.  The contract is clean; the divergence is
+  entirely ours.  verif/mame/spidman_camtrace.lua now captures the camera
+  variable + its copies per attract frame plus a write-tap PC histogram of
+  the copy block 0x208300-0x20835F.
+
 **Symptom (hardware, spidman World on MiSTer):** scripted boss events that are
 supposed to wait until the camera pans right to a specific point (the truck
 opening → Venom from the coffin; Scorpion likewise) fire **almost immediately,
@@ -125,3 +156,22 @@ ahead → hypothesis confirmed.** Also carries PF-6 (FB Overrun mode).
     double-buffer desync — the failure mode of the reverted 2-buffer attempt),
     and switch only the mixer's `rd_buf` view at the frame boundary (no tear).
     Verify against `t27_sprite_fb` + the sprite differential before shipping.
+  - **2026-07-21 assessment (why this stays hardware-gated).** Mechanism
+    confirmed exactly: `s32_core.sv` re-samples `fb_rd_buf_r <= {1'b0,
+    disp_buf[0]}` on **every** per-scanline read kick (`fb_rd_kick`, ~line 578),
+    so the instant the sprite engine flips `disp_buf` mid-frame the mixer starts
+    reading the other buffer partway down — the tear. The tempting minimal fix
+    (latch the mixer's `disp_buf` view at vblank, 2 buffers) is **unsafe**: after
+    a mid-frame swap the sprite engine renders into the buffer the mixer is still
+    displaying → *render-into-displayed corruption*, worse than the tear. Avoiding
+    that genuinely needs the 3-buffer remap (game keeps its 2-state ping-pong for
+    `~disp_buf` sync; the mixer displays a third, always-completed buffer). The
+    catch for a *sim-only* close-out: the tear only appears under full-game
+    mid-frame-swap timing, which `t27_sprite_fb` (directed FB round-trip) does not
+    reproduce, so neither the tear-fix nor the absence of corruption can be
+    confirmed in ModelSim/Verilator. Per the user's "no RBF/MiSTer, sim only"
+    constraint this cannot be responsibly closed now — implementing it blind would
+    risk a change that passes every sim tier yet corrupts on hardware. **Decision:
+    deferred to a dedicated hardware-verified pass** (build with the raw Sprite-FB
+    OSD mode, confirm both no-tear and no-corruption on the DE10-Nano). This is the
+    one ga2/spidman software item that is inherently hardware-gated.

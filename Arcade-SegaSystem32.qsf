@@ -54,7 +54,10 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 6
+set_global_assignment -name SEED 5
+# Bound the parallel fitter inside the Docker container: unbounded thread
+# detection has produced early quartus_fit crashes (293007) on this host.
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
 
 # This revision deliberately targets single-screen Sega System 32.  It keeps
 # the future Multi 32 RTL path in source, but compiles out the second palette /
@@ -69,6 +72,25 @@ set_global_assignment -name VERILOG_MACRO "S32_HOLO_ONLY=1"
 # Flags module requires this compile-time choice even when S32_REAL_V25 is off;
 # defining it does not instantiate V25 hardware in the Holosseum profile.
 set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
+
+# --- Real V25 opt-in (V25-game compatibility builds) --------------------------
+# Uncomment to instantiate the cycle-accurate NEC V25 (s80x86, already in
+# files.qip) for the protected V25 games (ga2, arabfgt) in place of the static
+# HLE mailbox.  Enabling it adds ~a CPU of logic, so re-run fit + timing.  The
+# path elaborates with the current profile and is integration-tested in sim
+# (verif/common/tb_core_v25int.sv: real V25 fetches program via SDRAM p5 and
+# round-trips the wake mailbox to the V60 in-core).  This is the candidate fix
+# for the V25 games' missing character-select sprites, which the HLE's static
+# tables cannot supply dynamically.
+set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+#
+# PROFILE NOTE: S32_SYSTEM32_ONLY + S32_HOLO_ONLY build a Holosseum-optimized core
+# that COMPILES OUT the trackball/ADC read decode (s32_core sel_ioex under
+# GAME_ONLY) and the Multi 32 path (is_multi32 forced 0).  On this profile sonic
+# cannot read its trackball and Multi 32 games (orunners) stay in service mode --
+# by design.  To exercise those games build a UNIVERSAL core by commenting out
+# BOTH S32_SYSTEM32_ONLY and S32_HOLO_ONLY (GAME_ONLY=0, is_multi32 follows the
+# MRA); it is larger, so re-check fit + timing.
 
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 

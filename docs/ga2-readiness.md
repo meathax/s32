@@ -158,9 +158,23 @@ and renderer-progress faults rather than basic ROM boot or controller input.
 
 ## Protection posture
 
-The production source now selects a real cycle-executed 80186-compatible core
-for V25 games. Opcode bytes alone pass through the MAME-derived GA2/Arabian
-Fight translation tables; operands remain raw. The genuine GA2 firmware passes
-strict wake-string, table, stack, address-map, and 10 MHz cadence checks. The
-older HLE remains useful only as a legacy unit-test/reference path. A new
-Quartus fit and MiSTer run are still required to qualify the real CPU in hardware.
+The production source selects a real cycle-executed 80186-compatible core for
+V25 games behind `S32_REAL_V25`. Opcode bytes alone pass through the MAME-derived
+GA2/Arabian Fight translation tables; operands remain raw. The genuine GA2
+firmware passes strict wake-string, table, stack, address-map, and 10 MHz cadence
+checks in isolation (`tb_v25_firmware`). The older HLE remains the default
+compile and a legacy reference path.
+
+**Real-V25 full-core integration is now proven in simulation (2026-07-21).** The
+`S32_REAL_V25` path had never been compiled, so it carried a latent
+use-before-declaration of `v25_rom_addr` in `s32_core.sv`; that is fixed, and the
+full `s32_core` now elaborates with the real V25 under Verilator 5.032. A new
+integration tier — `verif/common/tb_core_v25int.sv` (Verilator, tier 36,
+`run_v25_integration.sh`) — instantiates the whole `s32_core` with `S32_REAL_V25`,
+serves the genuine descrambled `mcu.bin` on SDRAM **port 5**, and shows the real
+V25 fetching its program through the p5 arbiter (`p5_reads=38`) and writing the
+wake string into the mailbox, which the V60 then reads back over the real core
+bus (the V60 poll loops only release into HALT once the firmware's bytes arrive,
+at cycle ~165k). This closes the last *software* gap: the real CPU is proven both
+in isolation and integrated. A new Quartus fit and MiSTer run remain to qualify
+it in hardware.

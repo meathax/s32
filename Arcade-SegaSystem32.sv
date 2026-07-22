@@ -131,15 +131,15 @@ localparam CONF_STR = {
     "-;",
     "O[6],Screen (Multi32),A,B;",
     "O[7],Service Mode,Off,On;",
-    "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var;",
+    "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var,V25;",
     "-;",
     "R[0],Reset;",
-    "J1,B1,B2,B3,B4,B5,B6,Start,Coin;",
+    "J1,B1,B2,B3,B4,B5,B6,Start,Coin,Test,Service;",
     "V,v",`BUILD_DATE
 };
 
 ////////////////////////////   CLOCKS/PLL   ///////////////////////////////////
-wire clk_sys, clk_ram, pll_locked;
+wire clk_sys, clk_ram, clk_v25, pll_locked;
 wire rom_loaded;
 wire sdram_ready;
 reg  sdram_ready_meta, sdram_ready_sys;
@@ -149,6 +149,7 @@ pll pll (
     .outclk0_clk(clk_ram),    // 96.648 MHz
     .outclk1_clk(clk_sys),    // 48.324 MHz
     .outclk2_clk(SDRAM_CLK),  // 96.648 MHz, 180 deg: centred SDRAM interface
+    .outclk3_clk(clk_v25),    // 24.162 MHz (clk_sys/2): s80x86 compute domain
     .locked_export(pll_locked)
 );
 assign DDRAM_CLK = clk_ram;
@@ -465,18 +466,51 @@ wire [7:0] trk_btn [0:2];
 assign trk_btn[0] = {4'b0, ~joystick_0[4], 3'b0};
 assign trk_btn[1] = {4'b0, ~joystick_1[4], 3'b0};
 assign trk_btn[2] = {4'b0, ~joystick_2[4], 3'b0};
+// Digital trackball fallback: the trackball games (sonic, 3 players) were
+// mouse-only, and players 2/3 had no source at all.  A held D-pad now injects
+// rate-limited trackball deltas so a gamepad can play.  Player 1 still prefers
+// the real mouse when it moves.  TRK_STEP/rate are hardware-tunable, and the Y
+// sign may want inverting on hardware.  NOTE: this only reaches the game on a
+// UNIVERSAL build -- the S32_HOLO_ONLY profile trims the trackball read decode
+// (s32_core sel_ioex under GAME_ONLY).
+reg [15:0] trk_div = 16'd0;
+always @(posedge clk_sys) trk_div <= trk_div + 1'b1;
+wire trk_tick = (trk_div == 16'd0);       // ~12 injections/frame @48 MHz
+localparam signed [8:0] TRK_STEP = 9'sd4;
+
+wire p0_dpad = joystick_0[0] | joystick_0[1] | joystick_0[2] | joystick_0[3];
+wire p1_dpad = joystick_1[0] | joystick_1[1] | joystick_1[2] | joystick_1[3];
+wire p2_dpad = joystick_2[0] | joystick_2[1] | joystick_2[2] | joystick_2[3];
+
 wire trk_dv_a [0:2];
-assign trk_dv_a[0] = m_dv[0]; assign trk_dv_a[1] = m_dv[1]; assign trk_dv_a[2] = m_dv[2];
+assign trk_dv_a[0] = m_dv[0] | (trk_tick & p0_dpad);
+assign trk_dv_a[1] = trk_tick & p1_dpad;
+assign trk_dv_a[2] = trk_tick & p2_dpad;
 wire signed [8:0] trk_dx_a [0:2];
 wire signed [8:0] trk_dy_a [0:2];
-assign trk_dx_a[0] = m_dx[0]; assign trk_dx_a[1] = m_dx[1]; assign trk_dx_a[2] = m_dx[2];
-assign trk_dy_a[0] = m_dy[0]; assign trk_dy_a[1] = m_dy[1]; assign trk_dy_a[2] = m_dy[2];
+// j[0]=right(+x) j[1]=left(-x) j[2]=down(+y) j[3]=up(-y)
+assign trk_dx_a[0] = m_dv[0] ? m_dx[0] : joystick_0[0] ? TRK_STEP : joystick_0[1] ? -TRK_STEP : 9'sd0;
+assign trk_dy_a[0] = m_dv[0] ? m_dy[0] : joystick_0[2] ? TRK_STEP : joystick_0[3] ? -TRK_STEP : 9'sd0;
+assign trk_dx_a[1] = joystick_1[0] ? TRK_STEP : joystick_1[1] ? -TRK_STEP : 9'sd0;
+assign trk_dy_a[1] = joystick_1[2] ? TRK_STEP : joystick_1[3] ? -TRK_STEP : 9'sd0;
+assign trk_dx_a[2] = joystick_2[0] ? TRK_STEP : joystick_2[1] ? -TRK_STEP : 9'sd0;
+assign trk_dy_a[2] = joystick_2[2] ? TRK_STEP : joystick_2[3] ? -TRK_STEP : 9'sd0;
 
 // MAME system32_generic: port C is unused; port E/SERVICE12 is
 // {unknown[7:6], start2, start1, coin2, coin1, test, service}, active low.
+// Test = the OSD "Service Mode" toggle OR the mappable Test button (j12);
+// Service (coin-service credit) = the mappable Service button (j13).
 wire [7:0] portc = 8'hff;
+wire test_btn = status[7] | joystick_0[12] | joystick_1[12];
+wire svc_btn  = joystick_0[13] | joystick_1[13];
 wire [7:0] svc12 = ~{2'b00, joystick_1[10], joystick_0[10],
-                     joystick_1[11], joystick_0[11], status[7], 1'b0};
+                     joystick_1[11], joystick_0[11], test_btn, svc_btn};
+// Port F/SERVICE34: bits 3:0 = DIP SW1:1-4 (Off), bit4 = PCB Push SW1
+// (Service), bit5 = PCB Push SW2 (Test), bit6 unknown; bit7 is replaced by the
+// EEPROM DO line inside s32_core.  Some games poll the PCB push switches
+// rather than the cabinet Test line, so drive them from the same buttons —
+// physically equivalent to pressing the matching switch on the board.
+wire [7:0] svc34 = ~{2'b00, test_btn, svc_btn, 4'b0000};
 // GA2's 4-player i8255 port C is MAME EXTRA3 (ppi.in_pc_callback -> "EXTRA3").
 // Base sets: bit0=Start3, bit1=Start4, bits[7:2] unused. The US sets (ga2u,
 // spidmanu, arabfgtu) instead read COIN1 on bit3 (0x08) and COIN2 on bit2
@@ -512,9 +546,15 @@ wire  [47:0] core_debug_sprram_cpu;
 wire  [47:0] core_debug_pal_rd;      // clk_sys palette shadow {0x410,0x200,0x000}
 wire  [23:0] core_debug_fb_underrun; // PF-6: sprite line-fetch overrun telemetry
 wire  [15:0] core_debug_cam;         // spidman world-camera {page, display_lo}
+wire  [23:0] core_debug_v25;         // V25 bring-up flags/mailbox snoop
+wire  [89:0] core_debug_v25_img;     // MCU image hash sweep + first fetched line
 
 s32_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(reset), .video_rst(video_reset),
+    .clk_sys(clk_sys), .clk_ram(clk_ram),
+`ifdef S32_REAL_V25
+    .clk_v25(clk_v25),
+`endif
+    .rst(reset), .video_rst(video_reset),
     .board(board_desc),
     .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
@@ -536,7 +576,7 @@ s32_core core (
     .eep_rd_data(eep_rd_data), .eep_rd_addr(eep_rd_addr),
     .eep_upload(eep_upload), .eep_modified(eep_modified),
     .in_p1a(p_dig(joystick_0)), .in_p2a(p_dig(joystick_1)),
-    .in_portc(portc), .in_svc12(svc12), .in_svc34(8'hff),
+    .in_portc(portc), .in_svc12(svc12), .in_svc34(svc34),
     .in_p1b(p_dig(joystick_2)), .in_p2b(p_dig(joystick_3)),
     .in_portc_b(8'hff), .in_svc12_b(8'hff), .in_svc34_b(8'hff),
     .adc_ch(adc_ch),
@@ -561,7 +601,9 @@ s32_core core (
     .debug_sprram_cpu(core_debug_sprram_cpu),
     .debug_pal_rd(core_debug_pal_rd),
     .debug_fb_underrun(core_debug_fb_underrun),
-    .debug_cam(core_debug_cam)
+    .debug_cam(core_debug_cam),
+    .debug_v25(core_debug_v25),
+    .debug_v25_img(core_debug_v25_img)
 );
 
 assign AUDIO_L = aud_l;
@@ -697,6 +739,48 @@ wire [7:0] cam_lo   = core_debug_cam[7:0];
 wire [7:0] cam_mag  = {cam_page[2:0], 5'h00};
 wire [23:0] debug_cam_rgb = {cam_mag, cam_lo, cam_mag};
 
+// V25 view, three horizontal bands (core_debug_v25 =
+// {ce[3:0], wake, mb_nonzero, unmapped, io, rd_cnt[7:0], mb_last[7:0]}):
+//   top:    RED flickers ~10Hz while the V25 is being clocked;
+//           GREEN solid = firmware touched internal I/O (it executes);
+//           BLUE solid  = unmapped access seen (executing garbage).
+//   middle: gray level = the byte the V60 last read from 0xA00100
+//           (0x00 black = V25 silent; 'w' 0x77 = wake string present).
+//   bottom: RED changes while the V60 polls the mailbox;
+//           GREEN solid = wake byte confirmed  ->  V25 fully healthy;
+//           BLUE solid  = some nonzero mailbox byte was read.
+wire [7:0] v25_mb_last  = core_debug_v25[7:0];
+wire [7:0] v25_rd_cnt   = core_debug_v25[15:8];
+wire       v25_io       = core_debug_v25[16];
+wire       v25_unm      = core_debug_v25[17];
+wire       v25_mb_nz    = core_debug_v25[18];
+wire       v25_wake     = core_debug_v25[19];
+wire [3:0] v25_ce_blink = core_debug_v25[23:20];
+wire [63:0] v25_first_line = core_debug_v25_img[63:0];
+wire [23:0] v25_img_hash   = core_debug_v25_img[87:64];
+wire        v25_first_vld  = core_debug_v25_img[88];
+wire        v25_sweep_done = core_debug_v25_img[89];
+// Bands top→bottom: status flags / image hash as a solid colour / the first
+// fetched 8-byte line as 8 grey stripes (32px each, repeating) / last V60
+// mailbox-0x100 byte / V60 poll activity.
+wire  [2:0] v25_seg = core_debug_hcnt[7:5];
+wire  [7:0] v25_seg_byte = v25_first_line[{v25_seg, 3'b000} +: 8];
+wire [23:0] debug_v25_rgb =
+    (core_debug_vcnt < 9'd40)  ? {{v25_ce_blink, 4'h0},
+                                  v25_io  ? 8'hff : 8'h00,
+                                  v25_unm ? 8'hff : 8'h00} :
+    (core_debug_vcnt < 9'd80)  ? (v25_sweep_done
+                                    ? {v25_img_hash[23:16], v25_img_hash[15:8],
+                                       v25_img_hash[7:0]}
+                                    : 24'h400040) :
+    (core_debug_vcnt < 9'd140) ? (v25_first_vld
+                                    ? {v25_seg_byte, v25_seg_byte, v25_seg_byte}
+                                    : 24'h400000) :
+    (core_debug_vcnt < 9'd180) ? {v25_mb_last, v25_mb_last, v25_mb_last} :
+                                 {v25_rd_cnt,
+                                  v25_wake  ? 8'hff : 8'h00,
+                                  v25_mb_nz ? 8'hff : 8'h00};
+
 wire [23:0] debug_rgb = status[11:8] == 4'd1 ? core_debug_pc[23:0] :
                         status[11:8] == 4'd2 ? core_debug_status :
                         status[11:8] == 4'd3 ? {8'h00, core_debug_first_rom} :
@@ -709,6 +793,7 @@ wire [23:0] debug_rgb = status[11:8] == 4'd1 ? core_debug_pc[23:0] :
                         status[11:8] == 4'd8 ? debug_pal_rgb :
                         status[11:8] == 4'd9 ? core_debug_fb_underrun :
                         status[11:8] == 4'd10 ? debug_cam_rgb :
+                        status[11:8] == 4'd11 ? debug_v25_rgb :
                                                    game_rgb;
 // Valid sync continues throughout startup. The solid colour identifies the
 // exact gate holding game logic: blue=download, red=ROM completion,

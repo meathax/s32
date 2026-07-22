@@ -18,6 +18,9 @@ module s32_core #(
 ) (
     input             clk_sys,      // 48.324 MHz
     input             clk_ram,      // 96.648 MHz
+`ifdef S32_REAL_V25
+    input             clk_v25,      // ~24.162 MHz (clk_sys/2): s80x86 compute domain
+`endif
     input             rst,
     // Keep CRT timing alive while game logic is held in ROM-load reset.
     input             video_rst,
@@ -131,7 +134,9 @@ module s32_core #(
     output     [47:0] debug_sprram_cpu,
     output     [47:0] debug_pal_rd,    // clk_sys palette shadow {0x410,0x200,0x000}
     output     [23:0] debug_fb_underrun,// PF-6: {sticky?0xff:0, underrun_count[15:0]}
-    output     [15:0] debug_cam         // spidman world-camera {page, display_lo}
+    output     [15:0] debug_cam,        // spidman world-camera {page, display_lo}
+    output     [23:0] debug_v25,        // V25 bring-up: {ce[3:0],wake,mb!=0,unm,io,rd_cnt,mb_last}
+    output     [89:0] debug_v25_img     // {sweep_done, first_valid, hash[23:0], first_line[63:0]}
 );
 
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
@@ -803,10 +808,21 @@ wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && board.has_ppi;
 genvar t;                         // declare outside the generate-for (Quartus 17.0)
 generate
     if (GAME_ONLY) begin : g_game_no_analog
-        // GA2's 0x22 descriptor has neither ADC nor trackball hardware.
-        // Removing these runtime-dead peripherals also removes their input
-        // selection muxes from the dedicated release.
-        assign adc_bit = 1'b1;
+        // The trackball counters (sonic) stay compiled out of the dedicated
+        // release, but the MSM6253 ADC is tiny and the gun/positional games on
+        // this profile (alien3, jpark: descriptor has_adc=1) read their aim
+        // through it at 0xC00050-57, so it is retained.  Non-ADC descriptors
+        // gate sel_adc off and Quartus sweeps it as before.  System 32 games
+        // never bank the analog mux (0xC00060 is Multi 32-only), so the four
+        // fixed channels P1X/P1Y/P2X/P2Y match MAME's ANALOG1-4.
+        s32_msm6253 adc (
+            .clk(clk_sys),
+            .cs(m_req && sel_adc && m_be[0]), // 0xC00050-57
+            .we(m_we), .addr(A[2:1]),
+            .dout_bit(adc_bit),
+            .an0(adc_ch[0]), .an1(adc_ch[1]),
+            .an2(adc_ch[2]), .an3(adc_ch[3])
+        );
         for (t = 0; t < 3; t = t + 1) begin : tracks
             assign trk_q[t] = 8'hff;
         end
@@ -935,17 +951,99 @@ generate
     end
 endgenerate
 
+// Raw V25 core diagnostics (clk_v25 domain in the real build).  Declared before
+// the instantiation so no implicit nets are inferred; the HLE build ties them
+// off — its static tables are always "alive" so the flags carry no signal.
+wire v25_dbg_ce_raw, v25_dbg_io_raw, v25_dbg_unm_raw;
+`ifndef S32_REAL_V25
+assign v25_dbg_ce_raw  = 1'b0;
+assign v25_dbg_io_raw  = 1'b0;
+assign v25_dbg_unm_raw = 1'b0;
+`endif
+
 `ifdef S32_REAL_V25
+// V25 program-fetch address to SDRAM port 5 — declared before the instantiation
+// that drives .rom_addr so no wrong-width implicit net is inferred (this path was
+// previously never compiled; ModelSim/Verilator both reject the use-before-decl).
+wire [15:3] v25_rom_addr;
+wire        v25_p5_req;
+wire        v25_first_valid;
+wire [63:0] v25_first_data;
+wire [15:3] v25_first_addr;
+
+// ---- MCU image checksum sweep (bring-up diagnostic, permanent) -------------
+// After every reset release on a V25 board, read the whole 64 KiB program
+// image back through the SAME SDRAM port 5 the V25 fetches from, folding it
+// into a position-dependent 24-bit hash (rotate-left-1 then XOR of the three
+// line thirds).  The V25 is held disabled (enable low) until the sweep hands
+// the port over, so the two never contend; the V60 spends the ~4 ms polling
+// the mailbox it would poll anyway.  The hash is shown in the Debug Video
+// "V25" view and compared against the same fold computed offline from the
+// descrambled ROM — a mismatch proves the image in external SDRAM is corrupt
+// (the per-byte DQM-masked write path is used by nothing else in the design).
+reg         sweep_active, sweep_done;
+reg  [12:0] sweep_line;
+reg         sweep_req_r, sweep_wait;
+reg  [23:0] sweep_hash;
+always @(posedge clk_sys) begin
+    if (rst) begin
+        sweep_active <= 1'b0; sweep_done <= 1'b0;
+        sweep_line <= 13'd0; sweep_req_r <= 1'b0; sweep_wait <= 1'b0;
+        sweep_hash <= 24'd0;
+    end
+    else if (!sweep_done && !sweep_active) begin
+        if (board.has_v25) begin
+            sweep_active <= 1'b1;
+            sweep_line   <= 13'd0;
+            sweep_hash   <= 24'd0;
+            sweep_req_r  <= 1'b1;
+            sweep_wait   <= 1'b1;
+        end
+        else sweep_done <= 1'b1;        // no V25: hand the port over at once
+    end
+    else if (sweep_active) begin
+        sweep_req_r <= 1'b0;
+        if (sweep_wait && sdr_p5_ack) begin
+            sweep_hash <= {sweep_hash[22:0], sweep_hash[23]}
+                        ^ sdr_p5_dout[23:0] ^ sdr_p5_dout[47:24]
+                        ^ {8'h00, sdr_p5_dout[63:48]};
+            sweep_wait <= 1'b0;
+        end
+        else if (!sweep_wait) begin
+            if (sweep_line == 13'h1FFF) begin
+                sweep_active <= 1'b0;
+                sweep_done   <= 1'b1;
+            end
+            else begin
+                sweep_line  <= sweep_line + 1'd1;
+                sweep_req_r <= 1'b1;
+                sweep_wait  <= 1'b1;
+            end
+        end
+    end
+end
+
 s32_v25_cpu v25 (
+    .clk_v25(clk_v25),
 `else
 s32_v25 v25 (
 `endif
+`ifdef S32_REAL_V25
+    .clk(clk_sys), .rst(rst), .enable(board.has_v25 && sweep_done),
+`else
     .clk(clk_sys), .rst(rst), .enable(board.has_v25),
+`endif
     .table_sel(board.v25_table),
     .prg_wr(v25_prg_wr), .prg_waddr(v25_prg_waddr), .prg_wdata(v25_prg_wdata),
 `ifdef S32_REAL_V25
-    .rom_req(sdr_p5_req), .rom_addr(v25_rom_addr),
-    .rom_data(sdr_p5_dout), .rom_ack(sdr_p5_ack),
+    .rom_req(v25_p5_req), .rom_addr(v25_rom_addr),
+    .rom_data(sdr_p5_dout), .rom_ack(sdr_p5_ack && !sweep_active),
+    .debug_cpu_clk(v25_dbg_ce_raw),
+    .debug_io_seen(v25_dbg_io_raw),
+    .debug_unmapped_seen(v25_dbg_unm_raw),
+    .debug_first_fetch_valid(v25_first_valid),
+    .debug_first_fetch_data(v25_first_data),
+    .debug_first_fetch_addr(v25_first_addr),
 `endif
     .cs(m_req && sel_v25 && board.has_v25 && m_be[0]), .we(m_we),
     .addr(A[11:1]), .wdata(m_wdata[7:0]), .rdata(v25_q)
@@ -954,8 +1052,10 @@ s32_v25 v25 (
 // ---------------------------------------------------------------------------
 
 `ifdef S32_REAL_V25
-wire [15:3] v25_rom_addr;
-assign sdr_p5_addr = SDR_MCU_BASE[24:3] + {9'b0, v25_rom_addr};
+assign sdr_p5_req  = sweep_active ? sweep_req_r : v25_p5_req;
+assign sdr_p5_addr = SDR_MCU_BASE[24:3] +
+                     (sweep_active ? {9'b0, sweep_line}
+                                   : {9'b0, v25_rom_addr});
 `else
 assign sdr_p5_req  = 1'b0;
 assign sdr_p5_addr = '0;
@@ -1102,7 +1202,10 @@ always @(posedge clk_sys) begin
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
                 sel_ioex:    if (GAME_ONLY)
-                                 rmux <= sel_ppi ? {8'hff, ppi_q} : 16'hffff;
+                                 // MSM6253 serial output on D7 (audit R20
+                                 // IO-3), same as the universal profile.
+                                 rmux <= sel_adc ? {8'hff, adc_bit, 7'h7f} :
+                                         sel_ppi ? {8'hff, ppi_q} : 16'hffff;
                              else
                                  // MSM6253 serial output is wired to D7, not
                                  // D0 (MAME msm6253 d7_r); audit R20 IO-3.
@@ -1116,6 +1219,59 @@ always @(posedge clk_sys) begin
         end
     end
 end
+
+// V25 bring-up diagnostic (Debug Video "V25").  Classifies the V25-game
+// black screen from the V60-visible mailbox plus three synchronised core
+// flags, without touching operation:
+//   - never executes  -> io_seen stays 0 and every V60 mailbox read is 0x00
+//   - executes garbage-> io/unmapped flags set but no wake string appears
+//   - V25 healthy     -> byte 0xA00100 reads 'w' (0x77): wake string present
+// mb_last samples exactly when the read mux does (rd_wait cycle), so it shows
+// the byte the V60 actually consumed.
+reg  [23:0] dbg_v25_ce_cnt;                 // ~10MHz CE pulses; [23:20] blink
+reg  [7:0]  dbg_v25_mb_last;                // last V60 read of byte 0xA00100
+reg  [7:0]  dbg_v25_rd_cnt;                 // V60 mailbox reads (proves polling)
+reg         dbg_v25_mb_nonzero, dbg_v25_wake;
+reg         v25_dbg_ce_s1, v25_dbg_ce_s2, v25_dbg_ce_s3;
+reg         v25_dbg_io_s1, v25_dbg_io_s2;
+reg         v25_dbg_unm_s1, v25_dbg_unm_s2;
+wire        v25_dbg_rd_sample = m_req && !m_we && sel_v25 && board.has_v25 &&
+                                m_be[0] && !ack_r && rd_wait;
+always @(posedge clk_sys) begin
+    if (rst) begin
+        dbg_v25_ce_cnt     <= 24'd0;
+        dbg_v25_mb_last    <= 8'h00;
+        dbg_v25_rd_cnt     <= 8'd0;
+        dbg_v25_mb_nonzero <= 1'b0;
+        dbg_v25_wake       <= 1'b0;
+    end
+    else begin
+        // CE pulses are one clk_v25 (~41ns) wide, so 48MHz sampling sees each.
+        if (v25_dbg_ce_s2 && !v25_dbg_ce_s3) dbg_v25_ce_cnt <= dbg_v25_ce_cnt + 1'b1;
+        if (v25_dbg_rd_sample) begin
+            dbg_v25_rd_cnt <= dbg_v25_rd_cnt + 1'b1;
+            if (v25_q != 8'h00) dbg_v25_mb_nonzero <= 1'b1;
+            if (A[11:1] == 11'h080) begin       // mailbox byte 0xA00100
+                dbg_v25_mb_last <= v25_q;
+                if (v25_q == 8'h77) dbg_v25_wake <= 1'b1;   // 'w'ake up!
+            end
+        end
+    end
+end
+always @(posedge clk_sys) begin
+    v25_dbg_ce_s1  <= v25_dbg_ce_raw;  v25_dbg_ce_s2  <= v25_dbg_ce_s1;
+    v25_dbg_ce_s3  <= v25_dbg_ce_s2;
+    v25_dbg_io_s1  <= v25_dbg_io_raw;  v25_dbg_io_s2  <= v25_dbg_io_s1;
+    v25_dbg_unm_s1 <= v25_dbg_unm_raw; v25_dbg_unm_s2 <= v25_dbg_unm_s1;
+end
+assign debug_v25 = {dbg_v25_ce_cnt[23:20], dbg_v25_wake, dbg_v25_mb_nonzero,
+                    v25_dbg_unm_s2, v25_dbg_io_s2,
+                    dbg_v25_rd_cnt, dbg_v25_mb_last};
+`ifdef S32_REAL_V25
+assign debug_v25_img = {sweep_done, v25_first_valid, sweep_hash, v25_first_data};
+`else
+assign debug_v25_img = 90'd0;
+`endif
 
 // Sticky boot-progress telemetry for first-hardware bring-up. A screenshot of
 // the diagnostic modes preserves enough state to locate a boot stall without

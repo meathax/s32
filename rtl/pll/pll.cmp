@@ -4,6 +4,7 @@
 			outclk0_clk   : out std_logic;        -- clk
 			outclk1_clk   : out std_logic;        -- clk
 			outclk2_clk   : out std_logic;        -- clk
+			outclk3_clk   : out std_logic;        -- clk
 			refclk_clk    : in  std_logic := 'X'; -- clk
 			reset_reset   : in  std_logic := 'X'  -- reset
 		);

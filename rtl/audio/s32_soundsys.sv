@@ -215,7 +215,14 @@ generate
 endgenerate
 
 // ---------------------------------------------------------------------------
-// FM: 2x jt12 in YM2612/3438 mode (jt12 top: jt12; using jt03-style wrapper)
+// FM: 2x jt12 in YM2612/3438 mode (jt12 top: jt12; using jt03-style wrapper).
+// The board's real part is the YM3438 (no accumulator limiter); jt12 always has
+// the YM2612-style limiter enabled (jt12_acc.v: "JT12 always has a limiter") with
+// no mode parameter to disable it.  This is the canonical, community-accepted
+// YM3438 approximation (same jt12 core every MiSTer YM3438 game uses); the only
+// difference is peak-level linearity on the loudest legal samples.  Accepted, not
+// patched -- forking the vendored core for that cosmetic delta is not sim-verifiable
+// (the sim path uses jt12_stub) and would diverge from the canonical core.
 // ---------------------------------------------------------------------------
 wire [7:0] fm1_dout, fm2_dout;
 wire       fm1_irq_n, fm2_irq_n;

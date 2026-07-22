@@ -355,6 +355,33 @@ initial begin
     wreg(6'h19, 16'h4000);
     px(9'd22); check(rgb, 24'h889098, 9'd22);
 
+    // --- 10: alien3's exact production config (MAME segas32_v.cpp mixer dump:
+    // 0x40=0x42=0x44=0xFFEB, 0x4E=0x0C00).  util::sext(0xFFEB,6) = -21 must
+    // darken every channel with the upper write bits ignored, clamping at 0;
+    // with blend factor 4 the offsets apply per-operand before the weighted
+    // sum.  A sign-extension or clamp fault here is the "glowing" failure mode.
+    wreg(6'h20, 16'hFFEB); wreg(6'h21, 16'hFFEB); wreg(6'h22, 16'hFFEB);
+    wreg(6'h23, 16'h0000); wreg(6'h24, 16'h0000); wreg(6'h25, 16'h0000);
+    wreg(6'h1f, 16'h0000);             // mode 00: bank = !layerflag
+    wreg(6'h27, 16'h0000);             // blend off first
+    wreg(6'h19, 16'h4000);             // NBG0 flag=1 -> bank 0 (-21)
+    wreg(6'h1a, 16'h0000);
+    px(9'd10);                          // white (31,31,31) - 21 = (10,10,10)
+    check(rgb, 24'h505050, 9'd10);
+    px(9'd22);                          // grey (16,16,16) - 21 clamps to 0
+    check(rgb, 24'h000000, 9'd22);
+    // alien3 blend: 0x4E=0x0C00 (enable, factor 4). Winner NBG0 darkened by
+    // bank 0; partner NBG1 (flag 0 -> bank 1 = zero offsets) stays white:
+    // each channel = (10*3 + 31*5) >> 3 = 23 -> 0xB8.
+    wpal(15'h0002, 16'h7FFF);
+    wreg(6'h27, 16'h0C00);
+    wreg(6'h19, 16'h4100);             // bank 0 + blendmask NBG1
+    px(9'd10);
+    check(rgb, 24'hB8B8B8, 9'd10);
+    wreg(6'h27, 16'h0000);
+    wreg(6'h19, 16'h0000);
+    wreg(6'h20, 16'h0000); wreg(6'h21, 16'h0000); wreg(6'h22, 16'h0000);
+
     if (errors == 0) $display("MIXER PASS");
     else             $display("MIXER FAIL (%0d errors)", errors);
     $finish;

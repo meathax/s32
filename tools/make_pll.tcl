@@ -21,7 +21,7 @@ add_instance pll_inst altera_pll 17.0
 set_instance_parameter_value pll_inst {gui_device_speed_grade}          {7}
 set_instance_parameter_value pll_inst {gui_pll_mode}                    {Integer-N PLL}
 set_instance_parameter_value pll_inst {gui_reference_clock_frequency}   {50.0}
-set_instance_parameter_value pll_inst {gui_number_of_clocks}            {3}
+set_instance_parameter_value pll_inst {gui_number_of_clocks}            {4}
 set_instance_parameter_value pll_inst {gui_operation_mode}              {direct}
 
 # outclk_0 = 96.648 MHz (clk_ram), outclk_1 = 48.324 MHz (clk_sys)
@@ -42,6 +42,13 @@ set_instance_parameter_value pll_inst {gui_output_clock_frequency2}     {96.648}
 set_instance_parameter_value pll_inst {gui_phase_shift2}                {5174}
 set_instance_parameter_value pll_inst {gui_duty_cycle2}                 {50}
 
+# outclk_3 = clk_v25 = 24.162 MHz (exactly clk_sys/2), phase 0.  The large NEC
+# V25 (s80x86) runs here so its fabric paths get twice the settle time and meet
+# timing with real margin; the fractional enable keeps the 10 MHz V25 cadence.
+set_instance_parameter_value pll_inst {gui_output_clock_frequency3}     {24.162}
+set_instance_parameter_value pll_inst {gui_phase_shift3}                {0}
+set_instance_parameter_value pll_inst {gui_duty_cycle3}                 {50}
+
 # Export refclk / reset / outclks / locked to match emu's pll instance.
 add_interface        refclk    clock      sink
 set_interface_property refclk  EXPORT_OF  pll_inst.refclk
@@ -53,6 +60,8 @@ add_interface        outclk1   clock      source
 set_interface_property outclk1 EXPORT_OF  pll_inst.outclk1
 add_interface        outclk2   clock      source
 set_interface_property outclk2 EXPORT_OF  pll_inst.outclk2
+add_interface        outclk3   clock      source
+set_interface_property outclk3 EXPORT_OF  pll_inst.outclk3
 add_interface        locked    conduit    end
 set_interface_property locked  EXPORT_OF  pll_inst.locked
 

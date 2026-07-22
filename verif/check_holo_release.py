@@ -10,7 +10,12 @@ qsf = (ROOT / "Arcade-SegaSystem32.qsf").read_text(encoding="utf-8")
 assert 'VERILOG_MACRO "S32_SYSTEM32_ONLY=1"' in qsf, "release is not System 32-only"
 assert 'VERILOG_MACRO "S32_HOLO_ONLY=1"' in qsf, "release is not Holosseum-only"
 assert 'VERILOG_MACRO "S32_GA2_ONLY=1"' not in qsf, "GA2 pruning leaked into Holo release"
-assert 'VERILOG_MACRO "S32_REAL_V25=1"' not in qsf, "unused V25 enabled in Holo release"
+# Since 2026-07-21 the release targets are ga2/spidman/arabfgt on the holo
+# profile, so the real V25 (the ga2/arabfgt protection MCU) must now be BUILT
+# IN — the opposite of the original holo-only contract.  Non-V25 games are
+# unaffected: board.has_v25 comes from each MRA descriptor.
+assert 'VERILOG_MACRO "S32_REAL_V25=1"' in qsf, \
+    "real V25 missing from the release profile (ga2/arabfgt need it)"
 assert 'VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"' in qsf, \
     "dormant V25 sources do not have a deterministic interrupt-mode parse option"
 

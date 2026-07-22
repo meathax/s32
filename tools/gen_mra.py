@@ -76,6 +76,18 @@ GAMES = {
 }
 UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
 
+# MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
+# to every set of that parent.  Offsets are into the composed index-0 stream
+# (0x40 descriptor + maincpu region offset).
+#   jpark: init_jpark (segas32.cpp) pokes pROM[0xC15A8/2]=0xCD70 and
+#   pROM[0xC15AA/2]=0xD8CD -- "Temp. Patch until we emulate the 'Drive
+#   Board', thanks to Malice" -- letting the MAIN BD -> DRIVE BD network
+#   check pass without the cabinet's drive-board Z80.  V60 is little-endian,
+#   so the words become bytes 70 CD / CD D8.
+PATCHES = {
+    "jpark": [(0x40 + 0xC15A8, "70 CD CD D8")],
+}
+
 def parse(src):
     """Return {setname: {'regions': [(region, size, loads)], 'title', 'parent'}}"""
     sets = {}
@@ -252,6 +264,8 @@ def gen(setname, data, outdir):
             lines += parts
         else:
             lines.append(f'    <part repeat="{size}">FF</part>')
+    for off, patch_hex in PATCHES.get(parent, []):
+        lines.append(f'    <patch offset="0x{off:X}">{patch_hex}</patch>')
     lines.append('  </rom>')
     # eeprom default
     ee = regions.get("eeprom")

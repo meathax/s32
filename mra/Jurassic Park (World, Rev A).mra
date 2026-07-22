@@ -37,6 +37,7 @@
       <part name="mpr-16410.ic27" crc="49c8f952" map="00210000"/>
       <part name="mpr-16412.ic25" crc="105dc26e" map="21000000"/>
     </interleave>
+    <patch offset="0xC15E8">70 CD CD D8</patch>
   </rom>
   <nvram index="3" size="128"/>
 </misterromdescription>

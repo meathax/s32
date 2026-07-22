@@ -156,42 +156,72 @@ always @* begin
     endcase
 end
 
+// Latch each port on the RISING EDGE of its request.  The previous
+// level-sampled guard (req && !pend && !ack) had a one-clk_ram drop window: a
+// requester that pulses its next request in direct response to an ack (the V60
+// icache fill chain does) can present a 2-cycle pulse whose first cycle is
+// blocked by the still-clearing pend and whose second is blocked by the
+// stretched ack — the transaction vanished and the port hung forever.  Which
+// transactions hit the window depended on each ack's clk_ram parity, i.e. on
+// arbitration history — so adding V25 p5 traffic could sink the V60 while
+// lighter boards never faulted.  Edge-detection latches exactly once per
+// request pulse (or per level-request start: the loader holds wr_req until
+// wr_ack) regardless of ack overlap.
+reg p0_req_d, p1_req_d, p2_req_d, p3_req_d, p4_req_d, p5_req_d, wr_req_d;
+reg p0_ack_d2, p1_ack_d2, p2_ack_d2, p3_ack_d2, p4_ack_d2, p5_ack_d2, wr_ack_d2;
 always @(posedge clk) begin
-    if (p0_req && !p0_pend && !p0_ack) begin
+    // Completion clears pend on the ack RISING EDGE only, and FIRST, so a
+    // same-edge new request edge below overrides it (the later nonblocking
+    // assignment wins).  Two hazards are closed together: (1) a chained
+    // request whose rising edge lands on the very edge the previous ack
+    // clears pend — the V60 icache fill pattern — latches instead of
+    // vanishing; (2) the 2-cycle ack stretch must not wipe a request that
+    // latched during the stretch window on the stretch's second cycle.
+    p0_ack_d2 <= p0_ack; p1_ack_d2 <= p1_ack; p2_ack_d2 <= p2_ack;
+    p3_ack_d2 <= p3_ack; p4_ack_d2 <= p4_ack; p5_ack_d2 <= p5_ack;
+    wr_ack_d2 <= wr_ack;
+    if (p0_ack && !p0_ack_d2) p0_pend <= 1'b0;
+    if (p1_ack && !p1_ack_d2) p1_pend <= 1'b0;
+    if (p2_ack && !p2_ack_d2) p2_pend <= 1'b0;
+    if (p3_ack && !p3_ack_d2) p3_pend <= 1'b0;
+    if (p4_ack && !p4_ack_d2) p4_pend <= 1'b0;
+    if (p5_ack && !p5_ack_d2) p5_pend <= 1'b0;
+    if (wr_ack && !wr_ack_d2) wr_pend <= 1'b0;
+    p0_req_d <= p0_req; p1_req_d <= p1_req; p2_req_d <= p2_req;
+    p3_req_d <= p3_req; p4_req_d <= p4_req; p5_req_d <= p5_req;
+    wr_req_d <= wr_req;
+    // Every s32 requester keeps at most one transaction outstanding (pulse, or
+    // level held until ack), so an unqualified rising-edge latch is exact.
+    if (p0_req && !p0_req_d) begin
         p0_pend <= 1'b1; p0_addr_p <= p0_addr;
     end
-    if (p1_req && !p1_pend && !p1_ack) begin
+    if (p1_req && !p1_req_d) begin
         p1_pend <= 1'b1; p1_addr_p <= p1_addr;
     end
-    if (p2_req && !p2_pend && !p2_ack) begin
+    if (p2_req && !p2_req_d) begin
         p2_pend <= 1'b1; p2_addr_p <= p2_addr;
     end
-    if (p3_req && !p3_pend && !p3_ack) begin
+    if (p3_req && !p3_req_d) begin
         p3_pend <= 1'b1; p3_addr_p <= p3_addr;
     end
-    if (p4_req && !p4_pend && !p4_ack) begin
+    if (p4_req && !p4_req_d) begin
         p4_pend <= 1'b1; p4_addr_p <= p4_addr;
     end
-    if (p5_req && !p5_pend && !p5_ack) begin
+    if (p5_req && !p5_req_d) begin
         p5_pend <= 1'b1; p5_addr_p <= p5_addr;
     end
-    if (wr_req && !wr_pend && !wr_ack) begin
+    if (wr_req && !wr_req_d) begin
         wr_pend <= 1'b1; wr_addr_p <= wr_addr;
         wr_din_p <= wr_din; wr_be_p <= wr_be;
     end
     if (init) begin
         {p0_pend,p1_pend,p2_pend,p3_pend,p4_pend,p5_pend,wr_pend} <= '0;
+        {p0_req_d,p1_req_d,p2_req_d,p3_req_d,p4_req_d,p5_req_d,wr_req_d} <= '0;
+        {p0_ack_d2,p1_ack_d2,p2_ack_d2,p3_ack_d2,p4_ack_d2,p5_ack_d2,wr_ack_d2} <= '0;
         p0_addr_p <= '0; p1_addr_p <= '0; p2_addr_p <= '0;
         p3_addr_p <= '0; p4_addr_p <= '0; p5_addr_p <= '0; wr_addr_p <= '0;
         wr_din_p <= '0; wr_be_p <= '0;
     end
-    if (p0_ack) p0_pend <= 1'b0;
-    if (p1_ack) p1_pend <= 1'b0;
-    if (p2_ack) p2_pend <= 1'b0;
-    if (p4_ack) p4_pend <= 1'b0;
-    if (p3_ack) p3_pend <= 1'b0;
-    if (p5_ack) p5_pend <= 1'b0;
-    if (wr_ack) wr_pend <= 1'b0;
 end
 
 // Centre the SDRAM board interface with SDRAM_CLK forwarded at 180 degrees.

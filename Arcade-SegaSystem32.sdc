@@ -80,3 +80,15 @@ if {[s32_require [expr {[get_collection_size $sprite_deferred_sources] > 0 && \
     set_multicycle_path -setup 2 -from $sprite_deferred_sources -to $sprite_regs
     set_multicycle_path -hold  1 -from $sprite_deferred_sources -to $sprite_regs
 }
+
+# The NEC V25 (s80x86) runs on clk_v25 = outclk3 (clk_sys/2, ~24.162 MHz) so its
+# large core meets timing with real margin.  Its two crossings to the clk_sys/
+# clk_ram world -- the SDRAM p5 line fetch and the V60-side mailbox port -- are
+# handled in RTL by two-flop toggle synchronisers (s32_v25_cpu) and a true-dual-
+# port RAM, so STA must NOT time those paths.  Declaring clk_v25 asynchronous to
+# the rest false-paths them.  Present only in the S32_REAL_V25 build; guarded on
+# the derived clock existing so other profiles skip it.
+set v25_clk [get_clocks -nowarn {*|pll|pll_inst|altera_pll_i|*[3].*|divclk}]
+if {[get_collection_size $v25_clk] == 1} {
+    set_clock_groups -asynchronous -group $v25_clk
+}

@@ -8,7 +8,10 @@
 module tb_v25_firmware;
 
 reg clk = 1'b0;
-always #10 clk = ~clk; // 50 MHz functional simulation
+always #10 clk = ~clk; // 50 MHz functional simulation (clk_sys stand-in)
+// clk_v25 = clk/2 (synchronous half-rate), the s80x86 compute domain.
+reg clk_v25 = 1'b0;
+always @(posedge clk) clk_v25 <= ~clk_v25;
 
 reg rst = 1'b1;
 reg enable = 1'b0;
@@ -31,7 +34,7 @@ reg [63:0] rom_data = 64'hffffffffffffffff;
 reg rom_ack = 1'b0;
 
 s32_v25_cpu dut (
-    .clk(clk), .rst(rst), .enable(enable), .table_sel(1'b0),
+    .clk(clk), .clk_v25(clk_v25), .rst(rst), .enable(enable), .table_sel(1'b0),
     .prg_wr(prg_wr), .prg_waddr(prg_waddr), .prg_wdata(prg_wdata),
     .rom_req(rom_req), .rom_addr(rom_addr), .rom_data(rom_data), .rom_ack(rom_ack),
     .cs(cs), .we(we), .addr(addr), .wdata(wdata), .rdata(rdata),
@@ -194,17 +197,32 @@ initial begin
     @(negedge clk);
     enable = 1'b1;
 
-    // One reduced accumulator period must contain exactly 2500 enables.
-    // Consecutive virtual CPU edges are four or five clk_sys periods apart.
+    // The s80x86 now runs on clk_v25 = clk/2, so one accumulator period (12081
+    // clk_v25 edges) contains exactly 5000 enables (5000/12081), gaps of two or
+    // three clk_v25 -- the same 10 MHz average as the former 2500/12081 on clk.
+    // The rst/enable synchronizers delay the accumulator start by a few clk_v25
+    // after enable rises, so align the window to the first CE pulse: by the
+    // accumulator arithmetic ANY 12081 consecutive clk_v25 hold exactly 5000.
     ce_pulses = 0;
     ce_last_cycle = -1;
-    for (cycles = 0; cycles < 12081; cycles = cycles + 1) begin
-        @(negedge clk);
+    for (cycles = 0; cycles < 200 && ce_last_cycle < 0; cycles = cycles + 1) begin
+        @(negedge clk_v25);
+        if (debug_cpu_ce) begin
+            ce_last_cycle = 0;
+            ce_pulses = 1;
+        end
+    end
+    if (ce_last_cycle < 0) begin
+        $display("V25_FIRMWARE FAIL: no CE pulse within 200 clk_v25 of enable");
+        $fatal(1);
+    end
+    for (cycles = 1; cycles < 12081; cycles = cycles + 1) begin
+        @(negedge clk_v25);
         if (debug_cpu_ce) begin
             if (ce_last_cycle >= 0) begin
                 ce_gap = cycles - ce_last_cycle;
-                if (ce_gap != 4 && ce_gap != 5) begin
-                    $display("V25_FIRMWARE FAIL: CE gap=%0d expected 4 or 5", ce_gap);
+                if (ce_gap != 2 && ce_gap != 3) begin
+                    $display("V25_FIRMWARE FAIL: CE gap=%0d expected 2 or 3", ce_gap);
                     $fatal(1);
                 end
             end
@@ -212,11 +230,11 @@ initial begin
             ce_pulses = ce_pulses + 1;
         end
     end
-    if (ce_pulses != 2500) begin
-        $display("V25_FIRMWARE FAIL: CE pulses=%0d expected 2500/12081", ce_pulses);
+    if (ce_pulses != 5000) begin
+        $display("V25_FIRMWARE FAIL: CE pulses=%0d expected 5000/12081", ce_pulses);
         $fatal(1);
     end
-    $display("V25_FIRMWARE CE: PASS (2500/12081, gaps 4 or 5)");
+    $display("V25_FIRMWARE CE: PASS (5000/12081 on clk_v25, gaps 2 or 3)");
 
     // Poll in blocks rather than continuously occupying the V60 port.  The
     // 50 MHz test clock gives a 10.347 MHz virtual CPU; two million clk_sys
