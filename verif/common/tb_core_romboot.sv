@@ -964,8 +964,11 @@ always @(posedge clk_sys) begin
 end
 
 integer frames, f, p1_ev;
+reg playmagic = 0, playfight = 0;
 initial begin
     if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
+    playmagic = $test$plusargs("PLAYMAGIC");
+    playfight = $test$plusargs("PLAYFIGHT");
     // Model the long board ROM-load reset: this fully flushes the production
     // jt12's 24-stage rings at its internally divided operator cadence.
     repeat (2048) @(posedge clk_sys);
@@ -997,6 +1000,31 @@ initial begin
             if (f == start_at)
                 $display("[input] frames %0d..%0d: P1 start low (port E bit 4)",
                     start_at, start_at + start_len - 1);
+        end
+        // +PLAYMAGIC gameplay autopilot: after coin+start, repeatedly tap
+        // Button1 (0x01) to confirm the char select, then in gameplay hold Right
+        // (0x40) toward the scripted rocks-flame and run a magic (Button3 0x04)
+        // charge/release duty cycle to cast the fire spell. Both are the flame
+        // triggers the user reports killing all sprites (#3).
+        if (playmagic || playfight) begin
+            // Char-select confirm (user tip): tap START + ATTACK a few times, then
+            // STOP and let the select screen TIME OUT into the level. Taps at
+            // 470/510/550/590, then quiet 600..660 so the timeout fires.
+            if (f >= 470 && f < 600 && (f % 40) < 6) begin
+                in_p1a_r[0]  = 1'b0;   // Button1 (attack)
+                in_svc12_r[4] = 1'b0;  // Start
+            end
+            // gameplay: hold Right from 680 (advance toward enemies / rocks)
+            if (f >= 680) in_p1a_r[6] = 1'b0;                            // Right
+        end
+        if (playmagic) begin
+            // magic charge(45)/release(20) cycle from 700 -> casts fire on release
+            if (f >= 700 && ((f - 700) % 65) < 45) in_p1a_r[2] = 1'b0;   // Button3
+        end
+        if (playfight) begin
+            // #2 enemy-AI observation: NO magic (so enemies survive to be seen);
+            // tap Attack (Button1) every 25 frames during gameplay to engage them
+            if (f >= 700 && (f % 25) < 5) in_p1a_r[0] = 1'b0;           // Button1 attack
         end
         repeat (804000) @(posedge clk_sys);
         $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
