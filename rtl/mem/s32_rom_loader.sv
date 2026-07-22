@@ -147,14 +147,24 @@ always @(posedge clk) begin
                     v25_wr    <= 1'b1;
                     v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
                     v25_wdata <= ioctl_dout;
-                    ma = map_addr(ioctl_addr);
-                    sdr_wr_req  <= 1'b1;
-                    busy        <= 1'b1;
-                    sdr_wr_addr <= ma[24:1];
-                    // Each descrambled destination byte is non-sequential, so
-                    // write it independently through the correct byte lane.
-                    sdr_wr_din  <= {ioctl_dout, ioctl_dout};
-                    sdr_wr_be   <= ma[0] ? 2'b10 : 2'b01;
+                    // The descramble permutation preserves address bits 1:0,
+                    // so stream bytes 2k/2k+1 always land in the SAME sdram
+                    // word (lanes lo/hi).  Pair them and use the ordinary
+                    // full-word write path: the per-byte DQM-masked writes
+                    // this replaced were the only masked writes in the whole
+                    // design and were observed corrupting scattered bytes of
+                    // exactly this region on real hardware (V25 image-hash
+                    // diagnostic, 2026-07-22) while every full-word region
+                    // loads perfectly.
+                    if (!ioctl_addr[0]) byte_lo <= ioctl_dout;
+                    else begin
+                        ma = map_addr(ioctl_addr);
+                        sdr_wr_req  <= 1'b1;
+                        busy        <= 1'b1;
+                        sdr_wr_addr <= ma[24:1];
+                        sdr_wr_din  <= {ioctl_dout, byte_lo};
+                        sdr_wr_be   <= 2'b11;
+                    end
                 end
                 else begin
                     // SDRAM regions: global stream addresses are aligned, so

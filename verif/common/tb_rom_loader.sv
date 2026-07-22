@@ -239,33 +239,38 @@ initial begin
     // contains only source bit 6, which the inverse permutation maps to
     // destination bit 10 (0x0400).  This also detects accidentally permuting
     // the global stream address rather than the MCU-local source offset.
+    // The permutation preserves bits 1:0, so consecutive even/odd stream
+    // bytes share one SDRAM word and the loader writes them as a single
+    // full-word (be=11) transaction on the odd byte — the design no longer
+    // performs any DQM-masked write (they corrupted the image on hardware).
     send_byte(8'd0, OFF_MCU + 27'h0000040, 8'hC7);
     check(v25_wr && v25_waddr === 16'h0400 && v25_wdata === 8'hC7,
           "V25 uses inverse-permuted MCU-local source address");
-    check(sdr_wr_req && ioctl_wait, "MCU byte raises SDRAM request/wait");
-    check(sdr_wr_addr === 24'h700200, "MCU destination 0400 word address");
-    check(sdr_wr_din === 16'hC7C7, "MCU byte replicated for lane write");
-    check(sdr_wr_be === 2'b01, "even MCU destination uses low byte lane");
+    check(!sdr_wr_req && !ioctl_wait, "even MCU byte only fills byte_lo");
+    send_byte(8'd0, OFF_MCU + 27'h0000041, 8'h5A);
+    check(v25_wr && v25_waddr === 16'h0401 && v25_wdata === 8'h5A,
+          "V25 odd source maps to odd destination");
+    check(sdr_wr_req && ioctl_wait, "odd MCU byte raises SDRAM request/wait");
+    check(sdr_wr_addr === 24'h700200, "MCU pair destination word address");
+    check(sdr_wr_din === 16'h5AC7, "MCU pair written little-endian");
+    check(sdr_wr_be === 2'b11, "MCU pair uses a full-word write");
     ack_sdr();
     check(!v25_wr, "V25 observation write is a one-cycle pulse");
 
-    // Source bit zero remains destination bit zero, covering the high lane.
-    send_byte(8'd0, OFF_MCU + 27'h0000001, 8'h5A);
-    check(v25_wr && v25_waddr === 16'h0001 && v25_wdata === 8'h5A,
-          "V25 odd source maps to odd destination");
-    check(sdr_wr_addr === 24'h700000, "odd MCU destination word address");
-    check(sdr_wr_be === 2'b10, "odd MCU destination uses high byte lane");
-    ack_sdr();
-
     // Golden Axe II stores encrypted reset byte 0x02 at raw source 0xFDDC.
-    // MAME's contract places that byte at V25 destination 0xFFF0.
+    // MAME's contract places that byte at V25 destination 0xFFF0; its stream
+    // partner 0xFDDD lands at 0xFFF1 in the same word.
     send_byte(8'd0, OFF_MCU + 27'h000FDDC, 8'h02);
     check(v25_wr && v25_waddr === 16'hFFF0 && v25_wdata === 8'h02,
           "GA2 raw reset source FDDC maps to V25 destination FFF0");
-    check(sdr_wr_req && ioctl_wait, "GA2 reset byte raises SDRAM request");
-    check(sdr_wr_addr === 24'h707FF8, "GA2 reset byte SDRAM word address");
-    check(sdr_wr_din === 16'h0202, "GA2 reset byte replicated for lane write");
-    check(sdr_wr_be === 2'b01, "GA2 reset byte uses low byte lane");
+    check(!sdr_wr_req && !ioctl_wait, "GA2 even reset byte only fills byte_lo");
+    send_byte(8'd0, OFF_MCU + 27'h000FDDD, 8'h11);
+    check(v25_wr && v25_waddr === 16'hFFF1 && v25_wdata === 8'h11,
+          "GA2 reset partner FDDD maps to V25 destination FFF1");
+    check(sdr_wr_req && ioctl_wait, "GA2 reset pair raises SDRAM request");
+    check(sdr_wr_addr === 24'h707FF8, "GA2 reset pair SDRAM word address");
+    check(sdr_wr_din === 16'h1102, "GA2 reset pair written little-endian");
+    check(sdr_wr_be === 2'b11, "GA2 reset pair uses a full-word write");
     ack_sdr();
     check(!v25_wr, "GA2 reset-vector observation is a one-cycle pulse");
 

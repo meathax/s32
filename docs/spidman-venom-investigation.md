@@ -1,5 +1,32 @@
 # Spider-Man early-trigger investigation (Venom / Scorpion)
 
+## 2026-07-22 BREAKTHROUGH — spawn gate located and disassembled
+
+MAME attract traces (verif/mame/spidman_camtrace.lua + camtrace2.lua; logs in
+scratch/spidman_camtrace*.log; disassemblies scratch/spid_*.asm):
+
+- The event gates do NOT use 0x208032.  The attract camera lives in 32-bit
+  fixed-point variables: block at **0x208340-0x208347** (int halves at
+  0x208342/0x208346), with copies at 0x208304/08 and 0x208344/48/50.  During
+  the attract pan the integer part advances 0x0240 -> +4/frame.
+- Per-frame maintainers: PC 0x0852E2/E8 (writes 208308/348), 0x08698A/90
+  (writes 208304/344 area), 0x086C4B (stepped, 208350).  Disassembled in
+  scratch/spid_w852.asm / spid_w869.asm / spid_w86c.asm.
+- **The spawn gate (hottest reader, PC 0x087A99, 55k reads/attract):** each
+  waiting object holds a window {38,3A,3C,3E}[R20] and spawns when the camera
+  value enters it:
+  `mov.h 6[2B0[R25]], R0` (double-indirect: pointer at R25+0x2B0 -> 0x208340,
+  reads 0x208346) then `cmp.h 3C[R20],R0 / bgt` + `cmp.h 3E[R20],R0 / blt`,
+  and the same for 4[2B0[R25]] (0x208344) vs 38/3A.  Secondary readers:
+  0x06204D/062069 (208344/46), 0x08784E (208340/42).
+- Suspect set for the core divergence (exactly one of):
+  1. V60 memory-indirect addressing (`disp[disp[reg]]`) fetching wrong,
+  2. `cmp.h` memory-displacement operand flag computation (signed bgt/blt),
+  3. the writer routine (0x852E2 etc.) computing the camera value wrong.
+- NEXT: capture 0x208340-0x208353 per frame in the CORE (full-core sim attract
+  or hardware snoop overlay at 0x208346) and diff against the MAME curve;
+  then differential-test the implicated instruction form (V60 harness).
+
 ## 2026-07-22 update — REPRODUCES IN ATTRACT MODE (user report)
 
 On hardware, the moment the **camera** pans right (not merely player movement),

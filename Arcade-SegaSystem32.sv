@@ -131,6 +131,7 @@ localparam CONF_STR = {
     "-;",
     "O[6],Screen (Multi32),A,B;",
     "O[7],Service Mode,Off,On;",
+    "O[12],Pause,Off,On;",
     "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var,V25;",
     "-;",
     "R[0],Reset;",
@@ -175,14 +176,20 @@ always @(posedge clk_sys) begin
 end
 
 // fractional clock enables (DESIGN.md §3.3)
+// OSD Pause freezes the CPU/sound enables (state preserved, video keeps
+// scanning the same frame — stable for screenshots); audio is muted below.
 reg ce_cpu, ce_z80, ce_fm, ce_pcm;
 reg [15:0] acc_cpu, acc_z80, acc_fm, acc_pcm;
 wire is_multi32 = board_desc.multi32;
+wire pause = status[12];
 always @(posedge clk_sys) begin
     logic [16:0] s;
     if (reset) begin
         ce_cpu <= 1'b0; ce_z80 <= 1'b0; ce_pcm <= 1'b0;
         acc_cpu <= 16'd0; acc_z80 <= 16'd0; acc_pcm <= 16'd0;
+    end
+    else if (pause) begin
+        ce_cpu <= 1'b0; ce_z80 <= 1'b0; ce_pcm <= 1'b0;
     end
     else begin
         // cpu: 16.108/48.324 = 1/3 (V60) ; 20/48.324 (V70)
@@ -606,8 +613,10 @@ s32_core core (
     .debug_v25_img(core_debug_v25_img)
 );
 
-assign AUDIO_L = aud_l;
-assign AUDIO_R = aud_r;
+// Mute during OSD Pause: ce_fm keeps the jt12 rings ticking (state must not
+// be poisoned), so silence the held DAC output instead.
+assign AUDIO_L = pause ? 16'sd0 : aud_l;
+assign AUDIO_R = pause ? 16'sd0 : aud_r;
 
 //////////////////////////////   VIDEO   //////////////////////////////////////
 wire [23:0] game_rgb = status[6] ? rgb_b : rgb_a;
