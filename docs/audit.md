@@ -1035,3 +1035,68 @@ a future round can decide:
   line/frame budget under SDRAM contention (reduces `tm_line_overrun` /
   `fb_rd_underrun` exposure) but is a self-contained state-machine change needing
   its own verification; left as recommended future work.
+
+## Round 24 addendum — full `s32_core.sv` audit pass (sim-only)
+
+A focused whole-file audit of `rtl/s32_core.sv` on top of the deployed
+2026-07-22 baseline (real-V25 + sdram request-drop fix). Four parallel reviewers
+(read-mux timing contract, MAME memory-map decode cross-check, clock-domain
+crossings, build-config/protection consistency) plus a direct MAME `segas32.cpp`
+map diff. Verified in Verilator lint (holo / universal / shipping `S32_REAL_V25`
+profiles) and the native ModelSim regression (34/35 tiers pass; tier 35 V25
+firmware passes once the gitignored `roms/sim/ga2/mcu.bin` is present — confirmed
+by a direct run).
+
+Implemented:
+- **SP-8 — sprite `vblank` double-render (the significant find).** `vblank`
+  (`vbl_end`) is a 1-`clk_sys` pulse consumed in the sprite's `clk_ram` domain,
+  so it is high across TWO consecutive `clk_ram` edges (phase-aligned 2:1). The
+  FSM consumed it as a bare level: edge 1 launched the pass from `R_IDLE`; edge 2
+  (now `R_DELAY`) latched a spurious `vblank_pending`, arming a **complete second
+  erase+swap+render pass every frame** — ~2x sprite SDRAM p2 traffic, a double
+  `render_count` decrement in 30 Hz mode, and a **mid-frame `disp_buf` swap**.
+  That mid-frame swap is a plausible contributor to the open "tearing line ~1/3
+  down" symptom (spidman/ga2). Fixed with a rising-edge qualifier
+  (`vblank_edge = vblank & ~vblank_d`) in `s32_sprite.sv`, matching every other
+  `clk_sys`→`clk_ram` pulse consumer in the core (scheduler kick, fb-read kick).
+  A 1-cycle TB pulse still yields exactly one edge, so the sprite tiers are
+  unaffected (SPRITE + SPRITE FB tiers pass).
+- **Config hardening — `is_multi32` under `GAME_ONLY`.** `is_multi32` was forced
+  0 only by `SYSTEM32_ONLY`; a hypothetical `S32_GA2_ONLY`-alone build
+  (GAME_ONLY=1, SYSTEM32_ONLY=0) would have followed a Multi 32 descriptor while
+  its analog/trackball hardware was compiled out. Now `(SYSTEM32_ONLY ||
+  GAME_ONLY)` forces the System 32 configuration — a dedicated single-screen
+  build is System 32 by definition. No effect on the shipping profile (both set).
+- **PF-6b — sprite line-fetch (`fb_rd_kick`) vblank-line suppression.** The DDR
+  line-read prefetch was kicked on every scanline including the 37 vblank lines,
+  fetching nonexistent buffer rows 224-255 and wasting ~14% of the p-read line
+  bandwidth (same class as the TM-5 tilemap vblank suppression). Gated to
+  `vcnt < 223 || vcnt == 261`, which still covers all 224 displayed lines.
+- **Diagnostics correctness (no gameplay effect).** (a) ROM-icache lookup now
+  qualifies on `!ack_r` so it does not re-arm/re-pulse `rom_ready` against an
+  already-served address while the V60 holds `m_req` post-ack; (b)
+  `debug_status[7]` ("PC left reset vector") compared the 32-bit PC against
+  `0x00FFFFF0` and so was stuck-on from cycle 0 — now compares the bus-visible 24
+  bits vs `0xFFFFF0`; (c) `debug_status[22]` (runaway-PC) now excludes the
+  architectural reset window `0xFFFFFFF0-FF` instead of firing at every reset.
+
+Verified-correct, no change needed (independent MAME cross-check):
+- The full V60 address decode is a faithful match to `system32_map` **and**
+  `multi32_map`: ROM, workram (0x0f0000 mirror), videoram/spriteram (0x0e0000),
+  sprite-control (umask 0x00ff, 0x0ffff0 mirror), the A16 palette/mixer split
+  with exact mirror masks (0x0e0000 / 0x0eff80; Multi 32 0x060000 / 0x06ff80 +
+  bank1 at 0x680000/0x690000), shared RAM (8 KiB, 0x0fe000), s32comm, the io-chip
+  A[6:5]==00 decode with 0x0fff80 mirror (Multi 32 dual chips split on A19), int
+  control (!A19), random (A19), and the 0xF00000 first-megabyte ROM mirror.
+- Unmapped-read fill value: MAME `map.unmap_value_high()` ⇒ 0xFFFF, exactly the
+  RTL `rmux` default.
+- INTC read returns 0xFF for all offsets (MAME `int_control_r` — timer readback
+  unimplemented in MAME too), matching the RTL.
+- Read-mux one-cycle timing contract holds for every source; all level-`cs`
+  write paths are idempotent or self-latched (no per-clock side-effect double-fire).
+
+Noted, not changed (out of shipping-profile scope): the universal-build
+`s32_prot_brival` / `s32_prot_hle` ROM-copy path is a non-functional stub
+(`rom_ack` tied 0, `pram_*` unconnected, no protection-RAM instantiated) — dead
+under GAME_ONLY (brival/sonic/jleague are not shipping targets); revisit if a
+universal build is ever targeted.

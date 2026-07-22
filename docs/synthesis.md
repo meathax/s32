@@ -66,9 +66,14 @@ artifact as deployable. This proves implementation and timing closure, not
 per-game physical-board acceptance.
 
 The Holo profile removes game-specific protection, link, DSP, Multi 32, and
-V25 hardware that Holosseum cannot reach. `S80X86_PSEUDO_286_INT=0` remains a
-parse-only definition for dormant source files; it does not enable the real
-V25 datapath.
+trackball hardware that Holosseum cannot reach. Since 2026-07-22 the release
+QSF additionally sets `S32_REAL_V25=1` (and `verif/check_holo_release.py`
+requires it): the same holo-profile bitstream serves the ga2/spidman/arabfgt
+target set, and ga2/arabfgt need the real V25 (`s32_v25_cpu`, clk_v25 domain).
+For Holosseum itself (`has_v25=0`) the core is held disabled and generates no
+SDRAM traffic. The fit/timing table above predates that addition; the
+2026-07-22 builds with the real V25 met timing at all corners.
+`S80X86_PSEUDO_286_INT=0` remains a parse-only definition.
 
 The EEPROM shadow is now an explicit 64×16 dual-port Cyclone V `altsyncram`
 M10K. Data is stored inverted so the device's zero power-up state has the
