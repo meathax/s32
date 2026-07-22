@@ -52,6 +52,15 @@ vvp /tmp/s32_v60_audit | grep -q "AUDIT PASS" && echo "V60 AUDIT: PASS" || { ech
 iverilog -g2012 -o /tmp/s32_v60_search \
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_search.sv
 vvp /tmp/s32_v60_search | grep -q "V60 SEARCH PASS" && echo "V60 SEARCH: PASS" || { echo "V60 SEARCH: FAIL"; exit 1; }
+iverilog -g2012 -o /tmp/s32_v60_strfs \
+  rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_strfs.sv
+vvp /tmp/s32_v60_strfs | grep -q "V60 STRFS PASS" && echo "V60 STRFS: PASS" || { echo "V60 STRFS: FAIL"; exit 1; }
+iverilog -g2012 -o /tmp/s32_v60_fp \
+  rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_fp.sv
+vvp /tmp/s32_v60_fp | grep -q "V60 FP PASS" && echo "V60 FP: PASS" || { echo "V60 FP: FAIL"; exit 1; }
+iverilog -g2012 -o /tmp/s32_v60_fpdecode \
+  rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_fpdecode.sv
+vvp /tmp/s32_v60_fpdecode | grep -q "V60 FPDECODE PASS" && echo "V60 FPDECODE: PASS" || { echo "V60 FPDECODE: FAIL"; exit 1; }
 echo "[8/35] GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
 python3 verif/check_holo_release.py | grep -q "HOLO RELEASE MRA PASS" || { echo "HOLO RELEASE MRA: FAIL"; exit 1; }
 python3 verif/check_ga2_release.py | grep -q "GA2 COMPAT MRA PASS" || { echo "GA2 COMPAT MRA: FAIL"; exit 1; }

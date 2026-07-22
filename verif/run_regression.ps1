@@ -416,6 +416,9 @@ try {
     Run-HdlTest "t07_v60_cmpc" "tb_v60_cmpc" ($V60Sources + "verif/v60/tb_v60_cmpc.sv") "V60 CMPC PASS"
     Run-HdlTest "t07_v60_movcd" "tb_v60_movcd" ($V60Sources + "verif/v60/tb_v60_movcd.sv") "V60 MOVCD PASS"
     Run-HdlTest "t07_v60_schd" "tb_v60_schd" ($V60Sources + "verif/v60/tb_v60_schd.sv") "V60 SCHD PASS"
+    Run-HdlTest "t07_v60_strfs" "tb_v60_strfs" ($V60Sources + "verif/v60/tb_v60_strfs.sv") "V60 STRFS PASS"
+    Run-HdlTest "t07_v60_fp" "tb_v60_fp" ($V60Sources + "verif/v60/tb_v60_fp.sv") "V60 FP PASS"
+    Run-HdlTest "t07_v60_fpdecode" "tb_v60_fpdecode" ($V60Sources + "verif/v60/tb_v60_fpdecode.sv") "V60 FPDECODE PASS"
 
     Write-Tier 8 "Holo release contract + GA2 compatibility boot path"
     $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_holo_release.py") "Holo release MRA check")

@@ -1100,3 +1100,53 @@ Noted, not changed (out of shipping-profile scope): the universal-build
 (`rom_ack` tied 0, `pram_*` unconnected, no protection-RAM instantiated) — dead
 under GAME_ONLY (brival/sonic/jleague are not shipping targets); revisit if a
 universal build is ever targeted.
+
+## Round 24 addendum — cpu/v60_v70 completeness audit (2026-07-22, sim-only)
+
+A full re-audit of `rtl/cpu/v60/s32_v60.sv` + `s32_v60_bus.sv` against the pinned
+MAME snapshot, driven by "complete, total implementation — improve/fix/optimize".
+The shipping integer/system ISA re-verified clean against the newly vendored EA
+bodies (`am1/am2/am3.hxx`, SHA-256 recorded in `docs/v60-mame-audit.md`); all
+findings below either close a documented deferral or a genuine latent bug. No RBF
+build (sim-only, per standing directive); verified in **both** Icarus and
+ModelSim plus a 50-seed differential and a clean Verilator lint.
+
+Implemented:
+- **Single-precision FP group (0x5C/0x5F) — the last ISA-class exclusion.** New
+  binary32 unit: CMPF, MOVFS, NEGFS, ABSFS, SCLFS, ADDFS, SUBFS, MULFS, DIVFS,
+  CVTWS, CVTSW. Round-to-nearest-even, gradual underflow (subnormals), IEEE
+  inf/NaN, matching MAME's host-`float`. FADD/FMUL/CVT combinational; FDIV a
+  27-step restoring mantissa divide (`S_FP_DIV`). Operands decode through the
+  existing EA engine (`S_FP_OP2`/`S_FP_LD`): op1 = ReadAM value, op2 = ReadAM
+  (CMPF) / WriteAM (MOVFS/CVTWS/CVTSW) / ReadAMAddress-RMW (rest). Replaces the
+  former reserved-op trap, so it cannot regress the shipping path. New tier
+  **`t07_v60_fp`** checks 1,800+ vectors bit-exact vs `numpy.float32` (incl.
+  subnormal/inf/NaN/tie cases); **`t07_v60_fpdecode`** runs real ADDFS/MULFS
+  (register + memory forms) end to end. Bug found + fixed during bring-up: the
+  subnormal-operand normalization shift in `fp_unpack` over-shifted by 3 and
+  overflowed the 24-bit mantissa (all subnormal inputs mis-scaled) — corrected
+  the leading-zero frame.
+- **String fill/stop variants + exact MOVC/CMPC tail (closes the R23 deferral).**
+  CMPCF (0x01), CMPCS (0x02), MOVCFU (0x0a), MOVCFD (0x0b), MOVCSU (0x0c) now
+  implement the R26 fill phase (`S_STR_FILL`) and the R26 stop/CY break per
+  `op7a.hxx opCMPSTRB/H` and `opMOVSTRU*/D*`. The MOVC completion registers
+  (R27/R28) were **off by one element step** for both up and down forms, and the
+  CMPC tail dropped the `*2` element scaling for the halfword (0x5A) family — a
+  genuine latent bug on the shipping MOVCU/CMPC path (byte was correct, halfword
+  and the exact tail were not). Both fixed via a shared `movc_finish` helper that
+  computes MAME-exact `R28 = op1 + i*step`, `R27 = op2 + i*step` (up) and the
+  `op1 + (len1-i-1)*step` down form, including the peculiar MOVCFD down-fill
+  addressing. New tier **`t07_v60_strfs`** proves 21 cases (all variants, both
+  widths, all length orderings) against a Python mirror of `op7a.hxx`.
+- **Dead-code / hygiene.** Removed the unused `wire [1:0] dim`, the never-called
+  `rotc_res` stub (ROTC is done iteratively in `S_ROTC`), and a redundant
+  partial nonblocking assignment to `mdacc[63:32]` in the multiply step that the
+  following full assignment always overwrote.
+
+Left as documented notes (not implemented):
+- **V70 32-bit external bus.** `s32_v60_bus` still issues 16-bit cycles even
+  under `IS_V70=1`; System 32 is V60-only and `is_multi32` is forced 0 in the
+  shipping profile, so the parameter is unused today. A System Multi 32 (V70)
+  build would need the 1..2 aligned 32-bit-cycle path added and re-timed.
+- **Genuinely-UNHANDLED FP sub-opcodes** stay on the reserved-instruction vector,
+  exactly as MAME `fatalerror`s them.

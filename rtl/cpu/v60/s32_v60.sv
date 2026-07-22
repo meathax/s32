@@ -10,13 +10,19 @@
 //  Scope (per DESIGN.md §5.2/§5.3):
 //   - Full integer ISA: F1/F2 two-operand ops, short-format ops, branches,
 //     DBcc/TB, JMP/JSR/CALL/RET/RETIU/RETIS, PREPARE/DISPOSE, PUSH(M)/POP(M),
-//     string ops (MOVC*/CMPC*/SCHC*/SKPC*), TASI, bit ops, GETPSW/UPDPSW,
-//     TRAP/TRAPFL/BRK/BRKV, CHLVL, task save/load, privileged register moves
-//     (LDPR/STPR), and MAME-defined decimal/bit-string/bit-field groups.
-//   - Not implemented (reserved-instruction exception, logged in sim):
-//     FP arithmetic/conversion (0x5C/0x5F groups). MMU/TLB effects are absent
-//     like MAME, but CLRTLB still decodes its complete operand. Address-trap
-//     and separate IN/OUT-space side effects remain outside the S32 profile.
+//     string ops incl. the fill/stop variants (MOVC*/CMPC*/SCHC*/SKPC*), TASI,
+//     bit ops, GETPSW/UPDPSW, TRAP/TRAPFL/BRK/BRKV, CHLVL, task save/load,
+//     privileged register moves (LDPR/STPR), and MAME-defined decimal/bit-
+//     string/bit-field groups.
+//   - Single-precision FP (0x5C/0x5F: CMPF/MOVFS/NEGFS/ABSFS/SCLFS/ADDFS/SUBFS/
+//     MULFS/DIVFS/CVTWS/CVTSW): a binary32 unit (round-to-nearest-even, gradual
+//     underflow) matching MAME's host-float contract; no System 32 game uses it.
+//   - Not implemented (reserved-instruction exception, logged in sim): the
+//     un-dispatched 0x5C/0x5F sub-opcodes (MAME UNHANDLED). MMU/TLB effects are
+//     absent like MAME, but CLRTLB still decodes its complete operand. Address-
+//     trap and separate IN/OUT-space side effects remain outside the S32 profile.
+//     The V70 (IS_V70=1) 32-bit external bus is declared but s32_v60_bus still
+//     issues 16-bit cycles; System 32 is V60 only, so the parameter is unused.
 //
 //  Bus: logical access port; unaligned/size handled by s32_v60_bus adapter.
 //============================================================================
@@ -202,9 +208,31 @@ reg [4:0]  reg_ptr;         // PUSHM/POPM iterator
 reg [31:0] str_cnt;
 reg [31:0] str_src, str_dst;   // string op source/dest addresses (A1)
 reg [31:0] str_len1, str_len2; // string op operand lengths
+// CMPC/MOVC fill+stop variants (CMPCF/CMPCS/MOVCFU/MOVCFD/MOVCSU, op7a.hxx).
+// The fill phase writes R26 to the shorter operand's tail; str_fi counts the
+// remaining fill elements, str_faddr walks them (+/- one element per step),
+// and str_fill_after selects the post-fill state (compare vs done).
+reg [31:0] str_fi;             // remaining fill elements
+reg [31:0] str_faddr;          // current fill write address
+reg [31:0] str_fdelta;         // per-element address step (two's-complement for down)
+reg [31:0] str_fr27;           // R27 to publish when a MOVC fill completes
+reg        str_fill_after;     // 0 = CMPC pre-fill -> compare; 1 = MOVC post-fill -> done
 reg [7:0]  dec_pat;            // 0x59 decimal group: F7c pattern byte
 reg [7:0]  dec_cur;            // current destination byte (BCD ops)
 reg [15:0] dec_res;            // result awaiting memory write-back
+
+// single-precision FP group (0x5C/0x5F: CMPF/MOVFS/NEGFS/ABSFS/SCLFS/ADDFS/
+// SUBFS/MULFS/DIVFS/CVTWS/CVTSW).  op7a-style F2 decode: op1 = ReadAM value,
+// op2 = ReadAM (CMPF) / WriteAM (MOVFS/CVTWS/CVTSW) / ReadAMAddress RMW (rest).
+reg [31:0] fp_a, fp_b;         // operand float bit patterns (a=op1, b=op2)
+reg [31:0] fp_res;             // packed binary32 result awaiting writeback
+reg [49:0] fdiv_rem;           // FDIV restoring-division partial remainder
+reg [26:0] fdiv_qacc;          // FDIV quotient accumulator (27 bits, MSB=int bit)
+reg [23:0] fdiv_den;           // FDIV divisor mantissa (normalized, bit23=1)
+reg [5:0]  fdiv_cnt;           // FDIV bit counter
+reg        fdiv_sign;          // FDIV result sign
+reg signed [15:0] fdiv_exp;    // FDIV result exponent (unbiased)
+reg        fp_op2_reg;         // op2 destination is a register (else memory)
 
 // 0x5B/0x5D bit string / bit field state (V60-10)
 reg [31:0] bam_base;           // BAM: byte base address
@@ -232,13 +260,14 @@ typedef enum logic [6:0] {
     S_BR_TAKE,
     S_PUSH, S_POP, S_PUSHM, S_POPM,
     S_JSR1, S_RET1, S_RET2, S_RETI1, S_RETI2, S_RETI3, S_CALL1, S_CALL1b, S_RSR,
-    S_STR_OP1, S_STR_OP2, S_STR_RD, S_STR_WR, S_STR_NEXT,
+    S_STR_OP1, S_STR_OP2, S_STR_RD, S_STR_WR, S_STR_NEXT, S_STR_FILL,
     S_DEC_OP1, S_DEC_OP2, S_DEC_RD, S_DEC_EX, S_DEC_WR,
     S_BAM_MODE, S_BAM_IND, S_BAM_VAL,
     S_BF_EXT1, S_BF_EXTW,
     S_BF_INS1, S_BF_INS2, S_BF_INSRD, S_BF_INSWR,
     S_BS_SCH1, S_BS_SCHRD, S_BS_SCHB, S_BS_SCHW,
     S_BS_MOV1, S_BS_MOV2, S_BS_MOVS, S_BS_MOVD, S_BS_MOVB, S_BS_MOVF,
+    S_FP_OP2, S_FP_LD, S_FP_EXEC, S_FP_DIV, S_FP_WB,
     S_EXC_PUSH1, S_EXC_EXTRA, S_EXC_CODE, S_EXC_PUSH2, S_EXC_VEC, S_EXC_JMP,
     S_TASK_LD_NEXT, S_TASK_LD_ACK, S_TASK_ST_NEXT, S_TASK_ST_ACK,
     S_TASI1, S_TASI2,
@@ -507,6 +536,7 @@ always @* begin
             rf_raddr_a = fb[5'd2 + len1 + len2][4:0];
         S_TASK_ST_NEXT:
             if (task_phase >= 6'd5) rf_raddr_a = task_phase - 6'd5;
+        S_FP_LD:   rf_raddr_b = op2[4:0];   // FP RMW register-operand read
         S_EXEC: begin
             rf_raddr_a = ((cur_op == 8'ha6) || (cur_op == 8'hb6))
                          ? op2[4:0] + 5'd1 : op1[4:0];
@@ -546,9 +576,6 @@ endfunction
 
 reg [3:0] fill_lo;
 reg nmi_r, nmi_seen;
-
-// ALU for F12 exec (combinational on latched ops)
-wire [1:0] dim  = cur_op[2:1];   // many ops encode B/H/W in bits 2:1 (see decode)
 
 always @(posedge clk) begin
 if (rst) begin
@@ -984,14 +1011,29 @@ else if (ce) begin
             endcase
         end
         8'h5c, 8'h5f: begin
-            // single-float ops: reserved-instruction trap (MAME leaves the
-            // groups un-dispatched for S32 games as well)
-            exc_vector <= 8'd8;
-            exc_pushval <= psw;
-            st <= S_EXC_PUSH1;
-            // synthesis translate_off
-            $display("V60: unimplemented group %02x sub %02x at %08x", opcode, fb[1], pc);
-            // synthesis translate_on
+            // single-precision FP group (op2.hxx / op5.hxx).  Second byte is the
+            // sub-opcode; op1 is decoded as a value (ReadAM), op2 later per role.
+            // Unhandled sub-opcodes still take the reserved-instruction vector
+            // exactly as MAME's op5C/op5F UNHANDLED entries fatalerror.
+            subop <= fb[1];
+            if (fp_valid(opcode, fb[1][4:0])) begin
+                ea_want_addr <= 1'b0;                    // op1 = value
+                ea_dim   <= fp_dim1(opcode, fb[1][4:0]); // SCLFS op1 is half
+                ea_modm  <= fb[1][6];
+                ea_ofs   <= 5'd2;
+                ea_target2 <= 1'b0;
+                ea_ret   <= 3'd0;
+                st <= S_EA_MODE;
+                st_after_ea <= S_FP_OP2;
+            end
+            else begin
+                exc_vector <= 8'd8;
+                exc_pushval <= psw;
+                st <= S_EXC_PUSH1;
+                // synthesis translate_off
+                $display("V60: unimplemented FP group %02x sub %02x at %08x", opcode, fb[1], pc);
+                // synthesis translate_on
+            end
         end
 
         // ---- privileged / system ----
@@ -1833,26 +1875,46 @@ else if (ce) begin
             st <= S_STR_RD;
         end
         else begin
+            logic [31:0] mn, off;
+            logic [4:0]  shf1;
             lb = fb[5'd3 + len1 + len2];
             l2 = lb[7] ? rf_rdata_a : {24'b0, lb};
             str_len2 <= l2;
-            str_cnt <= (str_len1 < l2) ? str_len1 : l2;
+            mn  = (str_len1 < l2) ? str_len1 : l2;
+            shf1 = cur_op[1] ? 5'd1 : 5'd0;
+            str_cnt <= mn;
             total_len <= 5'd4 + len1 + len2;
-            // MOVCD (down copy) transfers the ascending range base..base+min-1 in
-            // descending element order (MAME opMOVSTRD): start at the TOP of that
-            // range and decrement, instead of walking physically below the base
-            // as the old code did, which corrupted memory (audit R20 V60-14).
+            // MOVCD/MOVCFD (down copy) transfers the ascending range
+            // base..base+min-1 in descending element order (MAME opMOVSTRD):
+            // start at the TOP of that range and decrement, instead of walking
+            // physically below the base as the old code did (audit R20 V60-14).
             if (subop[0] && subop[4:0] >= 5'h08 && subop[4:0] <= 5'h0c) begin
-                logic [31:0] mmin, off;
-                mmin = (str_len1 < l2) ? str_len1 : l2;
-                off  = (mmin - 32'd1) << (cur_op[1] ? 1 : 0);   // (min-1)*step
+                off  = (mn - 32'd1) << shf1;                 // (min-1)*step
                 str_src <= op1 + off;
                 str_dst <= op2 + off;
             end
-            // A zero-length CMPC still needs its tail flags/registers, so route
-            // it through S_STR_RD; a zero-length MOVC has nothing to copy.
-            st <= ((str_len1 < l2 ? str_len1 : l2) == 0 && subop[4:0] > 5'h02)
-                  ? S_NEXT : S_STR_RD;
+            // CMPCS (0x02): stop mode starts with CY=1, cleared when a fill
+            // (R26) byte is met in the compare (MAME opCMPSTR bStop).
+            if (subop[4:0] == 5'h02) f_cy <= 1'b1;
+            // CMPCF (0x01): fill the SHORTER operand's tail with R26 BEFORE the
+            // compare (MAME bFill); MOVC fill happens AFTER the copy.  The
+            // compare still runs over min(len1,len2) elements afterwards.
+            if (subop[4:0] == 5'h01 && str_len1 != l2) begin
+                str_fill_after <= 1'b0;                      // resume into compare
+                str_fdelta <= cur_op[1] ? 32'd2 : 32'd1;
+                if (str_len1 < l2) begin
+                    str_fi    <= l2 - str_len1;
+                    str_faddr <= op1 + (str_len1 << shf1);
+                end
+                else begin
+                    str_fi    <= str_len1 - l2;
+                    str_faddr <= op2 + (l2 << shf1);
+                end
+                st <= S_STR_FILL;
+            end
+            // Everything else (incl. zero-length MOVC/CMPC) finalizes its tail
+            // registers/flags in S_STR_RD's exhaustion branch.
+            else st <= S_STR_RD;
         end
     end
     S_STR_RD: begin
@@ -1875,21 +1937,26 @@ else if (ce) begin
                     queue_reg_write(5'd27, str_len1, 32'hffff_ffff);
                 end
                 queue_reg_write(5'd28, str_src, 32'hffff_ffff);
+                st <= S_NEXT;
             end
             else if (subop[4:0] <= 5'h02) begin
                 // CMPC exhausted the common prefix (all min elements equal):
-                // R28=len1+min, R27=len2+min, and S/Z from the length compare
-                // (MAME opCMPSTR tail; the old path set no tail flags/registers,
-                // and zero-length compares were skipped entirely) — audit V60-13.
+                // R28=len1+min*step, R27=len2+min*step, and S/Z from the length
+                // compare (MAME opCMPSTR tail).  The index must be scaled by the
+                // element size — halfword CMPC previously stored len+min (audit
+                // V60-13 residual: byte was correct, halfword off by *2).
                 logic [31:0] cmin;
+                logic [4:0]  shf;
+                shf  = cur_op[1] ? 5'd1 : 5'd0;
                 cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
-                queue_reg_write(5'd28, str_len1 + cmin, 32'hffff_ffff);
-                queue_reg_write(5'd27, str_len2 + cmin, 32'hffff_ffff);
+                queue_reg_write(5'd28, str_len1 + (cmin << shf), 32'hffff_ffff);
+                queue_reg_write(5'd27, str_len2 + (cmin << shf), 32'hffff_ffff);
                 if (str_len1 > str_len2)      begin f_s <= 1'b1; f_z <= 1'b0; end
                 else if (str_len2 > str_len1) begin f_s <= 1'b0; f_z <= 1'b0; end
                 else                          begin f_s <= 1'b0; f_z <= 1'b1; end
+                st <= S_NEXT;
             end
-            st <= S_NEXT;
+            else movc_finish(32'd0);   // zero-length MOVC/MOVCF tail registers
         end
         else if (!bus_req) begin
             bus_req <= 1; bus_we <= 0;
@@ -1948,23 +2015,74 @@ else if (ce) begin
             bus_req <= 0; bus_we <= 0;
             if (subop[4:0] <= 5'h02) begin
                 // CMPC (MAME opCMPSTR): compare source(op1) vs dest(op2).  On the
-                // first difference S = (source > dest) — the RTL had it inverted;
-                // and R28/R27 hold len+index, not the raw addresses (audit V60-13).
+                // first difference S = (source > dest); R28/R27 hold len+index*step
+                // (byte was correct, halfword previously dropped the *2).  CMPCS
+                // (0x02, bStop) additionally breaks with CY=0 when either element
+                // equals the R26 fill byte (audit V60-13 + fill/stop completion).
                 logic [31:0] a, b, cmin, ci;
+                logic [4:0]  shf;
+                logic [31:0] fb26;
+                shf  = cur_op[1] ? 5'd1 : 5'd0;
                 a = cur_op[1] ? {16'b0,alu_r[15:0]} : {24'b0,alu_r[7:0]};
                 b = cur_op[1] ? {16'b0,bus_rdata[15:0]} : {24'b0,bus_rdata[7:0]};
+                fb26 = cur_op[1] ? {16'b0, r[26][15:0]} : {24'b0, r[26][7:0]};
                 cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
-                ci   = cmin - str_cnt;               // elements already matched
+                ci   = cmin - str_cnt;               // index of this element (i)
                 if (a != b) begin
                     f_z <= 1'b0;
                     f_s <= (a > b);
-                    queue_reg_write(5'd28, str_len1 + ci, 32'hffff_ffff);
-                    queue_reg_write(5'd27, str_len2 + ci, 32'hffff_ffff);
+                    queue_reg_write(5'd28, str_len1 + (ci << shf), 32'hffff_ffff);
+                    queue_reg_write(5'd27, str_len2 + (ci << shf), 32'hffff_ffff);
+                    st <= S_NEXT;
+                end
+                else if (subop[4:0] == 5'h02 && (a == fb26 || b == fb26)) begin
+                    // Equal AND matches the stop byte: MAME clears CY and breaks;
+                    // S/Z stay 0 (i != dest), R28/R27 at the current index.
+                    f_cy <= 1'b0;
+                    f_z  <= 1'b0;
+                    f_s  <= 1'b0;
+                    queue_reg_write(5'd28, str_len1 + (ci << shf), 32'hffff_ffff);
+                    queue_reg_write(5'd27, str_len2 + (ci << shf), 32'hffff_ffff);
                     st <= S_NEXT;
                 end
                 else st <= S_STR_NEXT;               // equal: tail flags set at exhaustion
             end
-            else st <= S_STR_NEXT;
+            else begin
+                // MOVC write complete.  MOVCSU (0x0c, bStop) ends the copy when the
+                // just-copied element equals the R26 stop byte (op7a bStop).
+                logic [31:0] elem, fb26;
+                elem = cur_op[1] ? {16'b0, alu_r[15:0]} : {24'b0, alu_r[7:0]};
+                fb26 = cur_op[1] ? {16'b0, r[26][15:0]} : {24'b0, r[26][7:0]};
+                if (subop[4:0] == 5'h0c && elem == fb26) begin
+                    logic [31:0] cmin;
+                    cmin = (str_len1 < str_len2) ? str_len1 : str_len2;
+                    movc_finish(cmin - str_cnt);     // break index i
+                end
+                else st <= S_STR_NEXT;
+            end
+        end
+    end
+    // MOVC/CMPC R26 fill phase (bFill): write the fill byte to the remaining
+    // tail elements, then resume into the compare (CMPCF) or finish (MOVCF).
+    S_STR_FILL: begin
+        if (str_fi == 0) begin
+            if (str_fill_after) begin                // MOVCFU/MOVCFD tail done
+                queue_reg_write(5'd27, str_fr27, 32'hffff_ffff);
+                st <= S_NEXT;
+            end
+            else st <= S_STR_RD;                     // CMPCF: run the compare now
+        end
+        else if (!bus_req) begin
+            bus_req <= 1; bus_we <= 1;
+            bus_size <= cur_op[1] ? 2'd1 : 2'd0;
+            bus_addr <= str_faddr;
+            bus_wdata <= r[26];
+        end
+        else if (bus_ack) begin
+            bus_req <= 0; bus_we <= 0;
+            str_faddr <= str_faddr + str_fdelta;
+            str_fi    <= str_fi - 32'd1;
+            st <= S_STR_FILL;
         end
     end
     // ------------------------------------------------------------------
@@ -2079,6 +2197,76 @@ else if (ce) begin
         else if (bus_ack) begin
             bus_req <= 0; bus_we <= 0;
             st <= S_NEXT;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // single-precision FP group (0x5C/0x5F).  op1 already decoded as a value;
+    // set up op2 per its role, then load/compute/write.
+    S_FP_OP2: begin
+        fp_a <= op1;
+        ea_want_addr <= fp_op2_value(cur_op, subop[4:0]) ? 1'b0 : 1'b1;
+        ea_dim   <= 2'd2;
+        ea_modm  <= subop[5];
+        ea_ofs   <= 5'd2 + len1;
+        ea_target2 <= 1'b1;
+        ea_ret   <= 3'd0;
+        st <= S_EA_MODE;
+        st_after_ea <= S_FP_LD;
+    end
+    S_FP_LD: begin
+        fp_op2_reg <= flag2;
+        total_len  <= 5'd2 + len1 + len2;
+        if (fp_op2_value(cur_op, subop[4:0])) begin      // CMPF: op2 = value
+            fp_b <= op2val_v ? op2val : op2;
+            st <= S_FP_EXEC;
+        end
+        else if (fp_op2_rmw(cur_op, subop[4:0])) begin   // NEG/ABS/SCLF/ADD/SUB/MUL/DIV
+            if (flag2) begin fp_b <= rf_rdata_b; st <= S_FP_EXEC; end
+            else if (!bus_req) begin
+                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op2;
+            end
+            else if (bus_ack) begin
+                bus_req <= 0; fp_b <= bus_rdata; st <= S_FP_EXEC;
+            end
+        end
+        else st <= S_FP_EXEC;                            // MOVFS/CVTWS/CVTSW: write-only
+    end
+    S_FP_EXEC: fp_exec();
+    // FDIV restoring mantissa division: one quotient bit per enabled clock.
+    // 27 bits are produced MSB-first (bit 26 = the integer quotient bit).
+    S_FP_DIV: begin
+        logic [49:0] r2;
+        logic ge;
+        ge = (fdiv_rem >= {26'd0, fdiv_den});
+        r2 = ge ? (fdiv_rem - {26'd0, fdiv_den}) : fdiv_rem;
+        fdiv_qacc <= {fdiv_qacc[25:0], ge};
+        if (fdiv_cnt == 6'd0) begin
+            logic [31:0] q;
+            q = fdiv_finish({fdiv_qacc[25:0], ge}, r2);   // r2 != 0 -> sticky
+            fp_res <= q;
+            f_ov <= 1'b0; f_cy <= 1'b0;
+            f_s  <= q[31];
+            f_z  <= (q == 32'd0);
+            st <= S_FP_WB;
+        end
+        else begin
+            fdiv_rem  <= {r2[48:0], 1'b0};                // remainder << 1
+            fdiv_cnt  <= fdiv_cnt - 6'd1;
+        end
+    end
+    S_FP_WB: begin
+        // flags were set by fp_exec (or the FDIV completion); just store fp_res.
+        if (fp_op2_reg) begin
+            queue_reg_write(op2[4:0], fp_res, 32'hffff_ffff);
+            st <= S_NEXT;
+        end
+        else if (!bus_req) begin
+            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
+            bus_addr <= op2; bus_wdata <= fp_res;
+        end
+        else if (bus_ack) begin
+            bus_req <= 0; bus_we <= 0; st <= S_NEXT;
         end
     end
 
@@ -2480,15 +2668,14 @@ else if (ce) begin
         str_cnt <= str_cnt - 1;
         if (str_cnt == 1) begin
             // CMPC finishes through S_STR_RD's exhaustion branch so the MAME
-            // length-tail flags/registers apply; MOVC keeps its address-based
-            // completion here (audit V60-13).
+            // length-tail flags/registers apply; MOVC finalizes R28/R27 from the
+            // operand bases and the copied count via movc_finish (which also
+            // scales by the element size and launches the MOVCF fill tail — the
+            // old address-based completion was off by one step, audit V60-13/14).
             if (subop[4:0] <= 5'h02)
                 st <= S_STR_RD;
-            else begin
-                queue_reg_write(5'd28, str_src, 32'hffff_ffff);
-                queue_reg_write(5'd27, str_dst, 32'hffff_ffff);
-                st <= S_NEXT;
-            end
+            else
+                movc_finish((str_len1 < str_len2) ? str_len1 : str_len2);
         end
         else st <= S_STR_RD;
     end
@@ -2806,6 +2993,52 @@ task automatic wb_op2(input [31:0] v, input [1:0] d);
     else begin
         wb_val <= v;
         st <= S_WB_MEM;
+    end
+endtask
+
+// MOVC completion (MAME opMOVSTRU*/opMOVSTRD*): publish R28/R27 for the final
+// element index `idx`, and — for the fill variants (MOVCFU/MOVCFD) with the
+// source shorter than the destination — kick off the R26 tail-fill phase.
+// `idx` is the break index for a stop hit, else the copied count `dest`.
+task automatic movc_finish(input [31:0] idx);
+    logic [4:0]  shf;
+    logic [31:0] step, dest, r28, r27;
+    logic        down, isfill;
+    shf    = cur_op[1] ? 5'd1 : 5'd0;             // 0x58 byte / 0x5a half
+    step   = cur_op[1] ? 32'd2 : 32'd1;
+    dest   = (str_len1 < str_len2) ? str_len1 : str_len2;
+    down   = subop[0];                            // 0x09 MOVCD / 0x0b MOVCFD
+    isfill = (subop[4:0] == 5'h0a) || (subop[4:0] == 5'h0b);
+    if (down) begin
+        r28 = op1 + ((str_len1 - idx - 32'd1) << shf);
+        r27 = op2 + ((str_len2 - idx - 32'd1) << shf);
+    end
+    else begin
+        r28 = op1 + (idx << shf);
+        r27 = op2 + (idx << shf);
+    end
+    queue_reg_write(5'd28, r28, 32'hffff_ffff);
+    if (isfill && (str_len1 < str_len2)) begin
+        // Stop is never set for a fill opcode, so idx == dest here.  MAME pads
+        // the destination tail elements [idx, lenop2) with R26; the down form
+        // uses op2+dest+(lenop2-j-1) for bytes and op2+(lenop2-j-1)*2 for halves.
+        str_fill_after <= 1'b1;
+        str_fi     <= str_len2 - idx;
+        str_fdelta <= down ? (32'd0 - step) : step;
+        if (down) begin
+            str_faddr <= cur_op[1] ? (op2 + ((str_len2 - idx - 32'd1) << 1))
+                                   : (op2 + dest + (str_len2 - idx - 32'd1));
+            str_fr27  <= op2 - step;
+        end
+        else begin
+            str_faddr <= op2 + (idx << shf);
+            str_fr27  <= op2 + (str_len2 << shf);
+        end
+        st <= S_STR_FILL;
+    end
+    else begin
+        queue_reg_write(5'd27, r27, 32'hffff_ffff);
+        st <= S_NEXT;
     end
 endtask
 
@@ -3514,18 +3747,15 @@ function automatic [31:0] rot_res(input [31:0] v, input [7:0] cnt, input [1:0] d
     else if (!c[7])  rot_res = ((x << sh) | (x >> (w - sh))) & mask;
     else             rot_res = ((x >> sh) | (x << (w - sh))) & mask;
 endfunction
-function automatic [31:0] rotc_res(input [31:0] v, input [7:0] cnt, input [1:0] d);
-    rotc_res = rot_res(v, cnt, d); // TODO exact rotate-through-carry
-endfunction
-
 // ---------------------------------------------------------------------------
 // multiply/divide iterative engine
 // ---------------------------------------------------------------------------
 task automatic md_step;
     if (cur_op[5] == 1'b0 && (cur_op == 8'h81 || cur_op == 8'h83 || cur_op == 8'h85 ||
         cur_op == 8'h91 || cur_op == 8'h93 || cur_op == 8'h95)) begin
-        // multiply: shift-add
-        if (mdacc[0]) mdacc[63:32] <= mdacc[63:32] + mdop;
+        // multiply: shift-add.  One full nonblocking assignment folds the
+        // conditional partial-product add into the right shift; a separate
+        // mdacc[63:32] write would be overwritten by this and was removed.
         mdacc <= {1'b0, (mdacc[0] ? mdacc[63:32] + mdop : mdacc[63:32]), mdacc[31:1]};
     end
     else begin
@@ -3588,6 +3818,409 @@ task automatic md_finish;
     end
     default: ;
     endcase
+endtask
+
+// ===========================================================================
+//  Single-precision (binary32) FP group (0x5C/0x5F).  Behavioral contract is
+//  MAME op2.hxx/op5.hxx, which use host `float` — round-to-nearest-even, with
+//  gradual underflow (subnormals) and IEEE special values.  No System 32 game
+//  is known to execute these; the unit replaces the former reserved-op trap.
+// ===========================================================================
+function automatic fp_valid(input [7:0] op, input [4:0] sub);
+    if (op == 8'h5f) fp_valid = (sub == 5'h00) || (sub == 5'h01);       // CVTWS/CVTSW
+    else fp_valid = (sub == 5'h00) || (sub == 5'h08) || (sub == 5'h09)  // CMPF/MOVFS/NEGFS
+                 || (sub == 5'h0a) || (sub == 5'h10) || (sub == 5'h18)  // ABSFS/SCLFS/ADDFS
+                 || (sub == 5'h19) || (sub == 5'h1a) || (sub == 5'h1b); // SUBFS/MULFS/DIVFS
+endfunction
+// op1 size: SCLFS takes a 16-bit integer scale (dim 1); everything else word.
+function automatic [1:0] fp_dim1(input [7:0] op, input [4:0] sub);
+    fp_dim1 = (op == 8'h5c && sub == 5'h10) ? 2'd1 : 2'd2;
+endfunction
+// op2 role: CMPF reads a value; MOVFS/CVTWS/CVTSW write-only; rest are RMW.
+function automatic fp_op2_value(input [7:0] op, input [4:0] sub);
+    fp_op2_value = (op == 8'h5c) && (sub == 5'h00);                     // CMPF
+endfunction
+function automatic fp_op2_rmw(input [7:0] op, input [4:0] sub);
+    fp_op2_rmw = (op == 8'h5c) && ((sub == 5'h09) || (sub == 5'h0a) ||  // NEGFS/ABSFS
+                 (sub == 5'h10) || (sub == 5'h18) || (sub == 5'h19) ||  // SCLFS/ADDFS/SUBFS
+                 (sub == 5'h1a) || (sub == 5'h1b));                     // MULFS/DIVFS
+endfunction
+
+function automatic fp_isnan(input [31:0] x);
+    fp_isnan = (x[30:23] == 8'hff) && (x[22:0] != 0);
+endfunction
+function automatic fp_isinf(input [31:0] x);
+    fp_isinf = (x[30:23] == 8'hff) && (x[22:0] == 0);
+endfunction
+function automatic fp_iszero(input [31:0] x);
+    fp_iszero = (x[30:0] == 31'd0);
+endfunction
+
+// leading-zero count of a 28-bit value (28 if all zero) — bounded, synthesizable
+function automatic [4:0] fp_clz28(input [27:0] v);
+    integer i; logic done;
+    fp_clz28 = 5'd28; done = 1'b0;
+    for (i = 27; i >= 0; i = i - 1)
+        if (!done && v[i]) begin fp_clz28 = 5'(27 - i); done = 1'b1; end
+endfunction
+
+// Unpack a binary32 into {sign, exp[15:0], mant[23:0]}: exponent unbiased, the
+// 24-bit mantissa left-normalized so bit23=1 (subnormals too); zero -> mant=0.
+// Returned as one word so pure functions (fp_add/fp_mul/...) can call it.
+function automatic [40:0] fp_unpack(input [31:0] x);
+    logic s; logic signed [15:0] e; logic [23:0] m;
+    logic [7:0] ef; logic [22:0] mf; logic [4:0] lz;
+    s = x[31]; ef = x[30:23]; mf = x[22:0];
+    if (ef == 8'd0) begin
+        if (mf == 23'd0) begin e = 16'sd0; m = 24'd0; end
+        else begin
+            // shift {0,mf} left so its leading 1 reaches bit 23.  clz28({5'd0,mf})
+            // counts zeros above bit 22, which is (shift + 4); subtract 4.
+            lz = fp_clz28({5'd0, mf}) - 5'd4;
+            m  = {1'b0, mf} << lz;
+            e  = -16'sd126 - $signed({11'd0, lz});
+        end
+    end
+    else begin
+        m = {1'b1, mf};
+        e = $signed({8'd0, ef}) - 16'sd127;
+    end
+    fp_unpack = {s, e, m};
+endfunction
+
+// Normalize+round a significand to binary32 (round-to-nearest-even).
+//   sg[26]=leading integer bit, sg[25:3]=23-bit fraction, sg[2:0]=guard/round/
+//   sticky.  E = unbiased exponent of bit 26.  Handles overflow->inf and
+//   gradual underflow (subnormal denormalization).
+function automatic [31:0] fp_pack(input logic sign, input logic signed [15:0] E,
+                                  input logic [26:0] sg);
+    logic signed [15:0] e;
+    logic [24:0] m;
+    logic g, r, s, rup, lost;
+    logic [15:0] sh;
+    logic [26:0] shd;
+    logic [31:0] res;
+    e = E;
+    if (sg[26:3] == 24'd0 && sg[2:0] == 3'd0) res = {sign, 31'd0};
+    else if (e > 16'sd127) res = {sign, 8'hff, 23'd0};
+    else if (e >= -16'sd126) begin
+        m = {1'b0, sg[26:3]};
+        g = sg[2]; r = sg[1]; s = sg[0];
+        rup = g & (r | s | m[0]);
+        m = m + (rup ? 25'd1 : 25'd0);
+        if (m[24]) begin m = m >> 1; e = e + 16'sd1; end
+        if (e > 16'sd127) res = {sign, 8'hff, 23'd0};
+        else res = {sign, (e[7:0] + 8'd127), m[22:0]};
+    end
+    else begin
+        sh  = 16'((-16'sd126) - e);              // positive denormal shift
+        shd = (sh >= 16'd27) ? 27'd0 : (sg >> sh);
+        lost = (sh >= 16'd27) ? (sg != 27'd0)
+                              : ((sg & ((27'd1 << sh) - 27'd1)) != 27'd0);
+        m = {1'b0, shd[26:3]};
+        g = shd[2]; r = shd[1]; s = shd[0] | lost;
+        rup = g & (r | s | m[0]);
+        m = m + (rup ? 25'd1 : 25'd0);
+        res = {sign, (m[23] ? 8'd1 : 8'd0), m[22:0]};   // m[23] -> smallest normal
+    end
+    fp_pack = res;
+endfunction
+
+// x + y  (binary32).  SUBFS passes y with its sign flipped.
+function automatic [31:0] fp_add(input [31:0] x, input [31:0] y);
+    logic sx, sy, sr; logic signed [15:0] ex, ey, er, d;
+    logic [23:0] mx, my;
+    logic [26:0] bx, by, sm, res27; logic [27:0] sum;
+    logic sticky; logic [4:0] lz; logic [31:0] out;
+    if (fp_isnan(x) || fp_isnan(y)) out = 32'h7fc00000;
+    else if (fp_isinf(x) && fp_isinf(y))
+        out = (x[31] == y[31]) ? x : 32'h7fc00000;     // inf-inf = NaN
+    else if (fp_isinf(x)) out = x;
+    else if (fp_isinf(y)) out = y;
+    else begin
+        {sx, ex, mx} = fp_unpack(x);
+        {sy, ey, my} = fp_unpack(y);
+        if (mx == 0 && my == 0) out = {sx & sy, 31'd0};        // (+/-0)+(+/-0)
+        else if (mx == 0) out = y;
+        else if (my == 0) out = x;
+        else begin
+            // order so (ex,mx) is the larger magnitude
+            if ((ey > ex) || (ey == ex && my > mx)) begin
+                {sx, sy} = {sy, sx}; {ex, ey} = {ey, ex}; {mx, my} = {my, mx};
+            end
+            bx = {mx, 3'b000};
+            d  = ex - ey;
+            if (d >= 16'sd27) begin by = 27'd0; sticky = (my != 0); end
+            else begin
+                by     = {my, 3'b000} >> d;
+                sticky = (({my, 3'b000} & ((27'd1 << d) - 27'd1)) != 27'd0);
+            end
+            by[0] = by[0] | sticky;
+            if (sx == sy) begin
+                sum = {1'b0, bx} + {1'b0, by};
+                sr  = sx;
+                if (sum[27]) begin er = ex + 16'sd1; res27 = sum[27:1]; res27[0] = res27[0] | sum[0]; end
+                else         begin er = ex;          res27 = sum[26:0]; end
+                out = fp_pack(sr, er, res27);
+            end
+            else begin
+                res27 = bx - by;                        // bx >= by (x is larger)
+                sr = sx;
+                if (res27 == 27'd0) out = 32'd0;        // exact cancellation -> +0
+                else begin
+                    // shift the leading 1 back to bit 26; fp_clz28({0,res27})
+                    // returns 27-p for a leading 1 at bit p, so shift = that - 1.
+                    lz = fp_clz28({1'b0, res27}) - 5'd1;
+                    er = ex - $signed({11'd0, lz});
+                    out = fp_pack(sr, er, res27 << lz);
+                end
+            end
+        end
+    end
+    fp_add = out;
+endfunction
+
+// x * y  (binary32)
+function automatic [31:0] fp_mul(input [31:0] x, input [31:0] y);
+    logic sx, sy, sr; logic signed [15:0] ex, ey, er;
+    logic [23:0] mx, my; logic [47:0] p; logic [26:0] sg; logic [31:0] out;
+    sr = x[31] ^ y[31];
+    if (fp_isnan(x) || fp_isnan(y)) out = 32'h7fc00000;
+    else if (fp_isinf(x) || fp_isinf(y)) begin
+        if (fp_iszero(x) || fp_iszero(y)) out = 32'h7fc00000;   // inf*0 = NaN
+        else out = {sr, 8'hff, 23'd0};
+    end
+    else if (fp_iszero(x) || fp_iszero(y)) out = {sr, 31'd0};
+    else begin
+        {sx, ex, mx} = fp_unpack(x);
+        {sy, ey, my} = fp_unpack(y);
+        p = mx * my;                       // 48-bit, leading 1 at bit 47 or 46
+        if (p[47]) begin
+            er = ex + ey + 16'sd1;
+            sg = {p[47:24], p[23], p[22], (|p[21:0])};
+        end
+        else begin
+            er = ex + ey;
+            sg = {p[46:23], p[22], p[21], (|p[20:0])};
+        end
+        out = fp_pack(sr, er, sg);
+    end
+    fp_mul = out;
+endfunction
+
+// scale x by 2^n (SCLFS); exact power-of-two adjust of the exponent
+function automatic [31:0] fp_scale(input [31:0] x, input signed [15:0] n);
+    logic s; logic signed [15:0] e; logic [23:0] m; logic [31:0] out;
+    if (fp_isnan(x) || fp_isinf(x) || fp_iszero(x)) out = x;
+    else begin
+        {s, e, m} = fp_unpack(x);
+        // value = 1.m * 2^e; scaled exponent e+n; mantissa is 24-bit at bit23
+        out = fp_pack(s, e + n, {m, 3'b000});
+    end
+    fp_scale = out;
+endfunction
+
+// int32 -> float32 (CVTWS), round-to-nearest-even
+function automatic [31:0] cvt_w_s(input [31:0] iv);
+    logic sign; logic [31:0] mag; logic [4:0] lz; logic [5:0] p;
+    logic signed [15:0] e; logic [26:0] sg;
+    logic [5:0] sh; logic [31:0] shifted; logic lost; logic done; integer i;
+    if (iv == 32'd0) cvt_w_s = 32'd0;
+    else begin
+        sign = iv[31];
+        mag  = sign ? (~iv + 32'd1) : iv;
+        lz = 5'd0; done = 1'b0;
+        for (i = 31; i >= 0; i = i - 1)
+            if (!done && mag[i]) begin lz = 5'(31 - i); done = 1'b1; end
+        p = 6'd31 - {1'b0, lz};                         // position of leading 1
+        e = $signed({10'd0, p});                        // exponent = p
+        if (p <= 6'd26)
+            sg = 27'(mag << (6'd26 - p));               // exact, guard bits 0
+        else begin
+            sh = p - 6'd26;
+            shifted = mag >> sh;
+            lost = ((mag & ((32'd1 << sh) - 32'd1)) != 32'd0);
+            sg = {shifted[26:3], shifted[2], shifted[1], shifted[0] | lost};
+        end
+        cvt_w_s = fp_pack(sign, e, sg);
+    end
+endfunction
+
+// float32 -> int32 (CVTSW) with RDI rounding mode (TKCW&7):
+//   0 round-half-away-from-zero, 1 floor, 2 ceil, else truncate toward zero.
+task automatic cvt_s_w(input [31:0] x, input [2:0] mode,
+                       output logic [31:0] iv, output logic ov);
+    logic s; logic signed [15:0] e; logic [23:0] m;
+    logic [63:0] big; logic [31:0] intp; logic frac_nz; logic [31:0] fracbits;
+    logic roundup; logic signed [15:0] sh;
+    iv = 32'd0; ov = 1'b0;
+    if (fp_isnan(x) || fp_isinf(x)) begin iv = 32'h8000_0000; ov = 1'b1; end
+    else if (fp_iszero(x)) iv = 32'd0;
+    else begin
+        {s, e, m} = fp_unpack(x);        // value = m * 2^(e-23), m in [2^23,2^24)
+        if (e < 16'sd0) begin
+            // |value| < 1 : integer part 0, fraction = whole value
+            intp = 32'd0; frac_nz = 1'b1;
+            // magnitude < 1 -> rounding may make it 0 or +/-1
+            roundup = 1'b0;
+            case (mode)
+                3'd0: roundup = (e == -16'sd1);            // >=0.5 rounds away
+                3'd1: roundup = s;                          // floor: -x -> -1
+                3'd2: roundup = ~s;                         // ceil: +x -> +1
+                default: roundup = 1'b0;                    // trunc -> 0
+            endcase
+            intp = roundup ? 32'd1 : 32'd0;
+            iv = s ? (~intp + 32'd1) : intp;
+        end
+        else if (e >= 16'sd31) begin
+            iv = 32'h8000_0000; ov = 1'b1;                  // out of int32 range
+        end
+        else begin
+            sh = 16'sd23 - e;                               // fraction bit count
+            if (sh <= 0) begin intp = m << (-sh); fracbits = 32'd0; frac_nz = 1'b0; end
+            else begin
+                intp = 32'({24'd0, m} >> sh);
+                fracbits = ({8'd0, m} << (16'sd32 - sh));   // fractional bits in high part
+                frac_nz = (fracbits != 32'd0);
+            end
+            roundup = 1'b0;
+            case (mode)
+                3'd0: roundup = fracbits[31];               // half-away: top frac bit
+                3'd1: roundup = s & frac_nz;                // floor
+                3'd2: roundup = (~s) & frac_nz;             // ceil
+                default: roundup = 1'b0;                    // trunc
+            endcase
+            intp = intp + (roundup ? 32'd1 : 32'd0);
+            iv = s ? (~intp + 32'd1) : intp;
+            ov = (~s & iv[31]) | (s & ~iv[31] & (iv != 0));
+        end
+    end
+endtask
+
+// ordered less-than for two non-NaN binary32 values (a < b)
+function automatic fp_lt(input [31:0] a, input [31:0] b);
+    logic za, zb;
+    za = fp_iszero(a); zb = fp_iszero(b);
+    if (za && zb) fp_lt = 1'b0;                  // +/-0 equal
+    else if (a[31] != b[31]) fp_lt = a[31] & ~(za & zb); // neg < pos
+    else if (a[31] == 1'b0) fp_lt = (a[30:0] < b[30:0]); // both +: bit compare
+    else fp_lt = (a[30:0] > b[30:0]);            // both -: reversed
+endfunction
+function automatic fp_eq(input [31:0] a, input [31:0] b);
+    if (fp_iszero(a) && fp_iszero(b)) fp_eq = 1'b1;
+    else fp_eq = (a == b);
+endfunction
+
+// FDIV setup (DIVFS: result = x/y, x=op2=fp_b, y=op1=fp_a).  Handles specials
+// and, for finite operands, seeds the restoring divider.
+task automatic fp_div_start(input [31:0] x, input [31:0] y);
+    logic sx, sy; logic signed [15:0] ex, ey; logic [23:0] mx, my; logic [31:0] out;
+    logic done;
+    done = 1'b1; out = 32'd0;
+    if (fp_isnan(x) || fp_isnan(y)) out = 32'h7fc00000;
+    else if (fp_isinf(x) && fp_isinf(y)) out = 32'h7fc00000;
+    else if (fp_isinf(x)) out = {x[31]^y[31], 8'hff, 23'd0};
+    else if (fp_isinf(y)) out = {x[31]^y[31], 31'd0};
+    else if (fp_iszero(y)) out = fp_iszero(x) ? 32'h7fc00000
+                                              : {x[31]^y[31], 8'hff, 23'd0};
+    else if (fp_iszero(x)) out = {x[31]^y[31], 31'd0};
+    else done = 1'b0;
+    if (done) begin
+        fp_res <= out;
+        f_ov <= 1'b0; f_cy <= 1'b0; f_s <= out[31]; f_z <= (out == 32'd0);
+        st <= S_FP_WB;
+    end
+    else begin
+        {sx, ex, mx} = fp_unpack(x);
+        {sy, ey, my} = fp_unpack(y);
+        fdiv_sign <= sx ^ sy;
+        fdiv_exp  <= ex - ey;
+        fdiv_den  <= my;
+        fdiv_rem  <= {26'd0, mx};
+        fdiv_qacc <= 27'd0;
+        fdiv_cnt  <= 6'd26;                  // 27 quotient bits
+        st <= S_FP_DIV;
+    end
+endtask
+// Assemble the FDIV quotient (27 bits, MSB=integer bit) into binary32.
+function automatic [31:0] fdiv_finish(input [26:0] q, input [49:0] rem);
+    logic [23:0] mant; logic g, r, s; logic signed [15:0] e;
+    if (q[26]) begin                        // quotient in [1,2)
+        mant = q[26:3]; g = q[2]; r = q[1]; s = q[0] | (rem != 0);
+        e = fdiv_exp;
+    end
+    else begin                              // quotient in [0.5,1): shift up one
+        mant = q[25:2]; g = q[1]; r = q[0]; s = (rem != 0);
+        e = fdiv_exp - 16'sd1;
+    end
+    fdiv_finish = fp_pack(fdiv_sign, e, {mant, g, r, s});
+endfunction
+
+task automatic fp_arith_flags(input [31:0] r);
+    f_ov <= 1'b0; f_cy <= 1'b0; f_s <= r[31]; f_z <= (r == 32'd0);
+endtask
+task automatic fp_finish_write;   // route result in fp_res to op2
+    st <= S_FP_WB;
+endtask
+
+task automatic fp_exec;
+    logic [31:0] r; logic [31:0] iv; logic ov;
+    if (cur_op == 8'h5f) begin
+        if (subop[4:0] == 5'h00) begin              // CVTWS int->float
+            r = cvt_w_s(fp_a);
+            f_ov <= 1'b0;
+            f_cy <= fp_a[31] & (fp_a != 32'd0);     // val < 0
+            f_s  <= r[31];
+            f_z  <= (fp_a == 32'd0);                // val == 0 iff int == 0
+            fp_res <= r; fp_finish_write();
+        end
+        else begin                                  // CVTSW float->int
+            cvt_s_w(fp_a, tkcw[2:0], iv, ov);
+            f_s  <= iv[31];
+            f_ov <= ov;
+            f_z  <= (iv == 32'd0);
+            fp_res <= iv; fp_finish_write();
+        end
+    end
+    else begin                                       // 0x5c group
+        case (subop[4:0])
+        5'h00: begin                                 // CMPF: appf = f(op2)-f(op1)
+            logic un;
+            un = fp_isnan(fp_a) | fp_isnan(fp_b);
+            f_z  <= un ? 1'b0 : fp_eq(fp_b, fp_a);
+            f_s  <= un ? 1'b0 : fp_lt(fp_b, fp_a);
+            f_ov <= 1'b0; f_cy <= 1'b0;
+            st <= S_NEXT;                             // no writeback
+        end
+        5'h08: begin r = fp_a; fp_res <= r; fp_finish_write(); end   // MOVFS (no flags)
+        5'h09: begin                                 // NEGFS
+            r = fp_a ^ 32'h8000_0000;
+            f_ov <= 1'b0;
+            f_cy <= r[31] & !fp_isnan(r) & ((fp_a & 32'h7fffffff) != 0);
+            f_s  <= r[31];
+            f_z  <= (fp_a & 32'h7fffffff) == 0;
+            fp_res <= r; fp_finish_write();
+        end
+        5'h0a: begin                                 // ABSFS
+            logic neg;
+            neg = fp_a[31] & ((fp_a & 32'h7fffffff) != 0) & !fp_isnan(fp_a);
+            r = neg ? (fp_a ^ 32'h8000_0000) : fp_a;
+            f_ov <= 1'b0; f_cy <= 1'b0;
+            f_s  <= r[31];
+            f_z  <= (fp_a & 32'h7fffffff) == 0;
+            fp_res <= r; fp_finish_write();
+        end
+        5'h10: begin                                 // SCLFS: op1=int16 scale, op2=float
+            r = fp_scale(fp_b, $signed(fp_a[15:0]));
+            fp_arith_flags(r); fp_res <= r; fp_finish_write();
+        end
+        5'h18: begin r = fp_add(fp_b, fp_a);                  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // ADDFS
+        5'h19: begin r = fp_add(fp_b, fp_a ^ 32'h8000_0000);  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // SUBFS
+        5'h1a: begin r = fp_mul(fp_b, fp_a);                  fp_arith_flags(r); fp_res <= r; fp_finish_write(); end // MULFS
+        5'h1b: fp_div_start(fp_b, fp_a);             // DIVFS (iterative)
+        default: st <= S_NEXT;
+        endcase
+    end
 endtask
 
 endmodule
