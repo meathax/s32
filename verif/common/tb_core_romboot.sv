@@ -452,12 +452,37 @@ end
 
 // frame capture: with +DUMPAT=<frame#> (+DUMPN=<count>, default 1) write
 // active-video pixels of those frames as PPM files (dump<frame>.ppm in cwd)
-integer dump_at, dump_n, dump_fd = 0, dump_x, dump_y;
+integer dump_at, dump_n, dump_fd = 0, dump_x, dump_y, dump_every;
 reg dumping = 0;
 initial begin
     if (!$value$plusargs("DUMPAT=%d", dump_at)) dump_at = -1;
     if (!$value$plusargs("DUMPN=%d", dump_n)) dump_n = 1;
+    // +DUMPEVERY=<n>: dump every n-th frame (stride) — maps the attract cycle
+    if (!$value$plusargs("DUMPEVERY=%d", dump_every)) dump_every = 1;
 end
+
+// +DUMPSPRAT=<frame>: dump the V60-written sprite command RAM (0x400000, the
+// display list) to sim_spriteram.hex so it can be diffed against MAME's list.
+integer sprdump_at, sprdump_fd, sprdump_i;
+initial if (!$value$plusargs("DUMPSPRAT=%d", sprdump_at)) sprdump_at = -1;
+integer sprdump_cur = 0;
+always @(posedge clk_sys) begin
+    if (vb & ~vb_d2) sprdump_cur = sprdump_cur + 1;
+    vb_d2 <= vb;
+    // Dump mid-visible-frame (vcnt~150), after the V60's vblank-IRQ handler has
+    // finished rewriting the sprite list and the engine is rendering it — the
+    // vblank-edge snapshot caught the list mid-rewrite (empty/partial).
+    if (sprdump_at >= 0 && sprdump_cur == sprdump_at && !sprdump_done
+        && core.vcnt == 9'd150) begin
+        sprdump_done = 1'b1;
+        sprdump_fd = $fopen("sim_spriteram.hex", "w");
+        for (sprdump_i = 0; sprdump_i < 65536; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.sprite_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[sprdump] wrote sim_spriteram.hex at frame %0d", sprdump_cur);
+    end
+end
+reg vb_d2 = 0, sprdump_done = 0;
 reg vb_d, hb_d;
 integer cur_frame = 0;
 always @(posedge clk_sys) begin
@@ -475,7 +500,9 @@ always @(posedge clk_sys) begin
             dumping = 0;
             $display("[dump] wrote frame %0d", cur_frame-1);
         end
-        if (dump_at >= 0 && cur_frame >= dump_at && cur_frame < dump_at + dump_n) begin
+        if (dump_at >= 0 && cur_frame >= dump_at &&
+            ((cur_frame - dump_at) % dump_every == 0) &&
+            ((cur_frame - dump_at) / dump_every < dump_n)) begin
             dump_fd = $fopen($sformatf("dump%0d.ppm", cur_frame), "w");
             // 52*8=416 wide, 224 high fixed header (PPM allows trailing slack)
             $fwrite(dump_fd, "P3\n416 224\n255\n");
@@ -626,10 +653,15 @@ always @(posedge clk_sys) if (ce_cpu) begin
     end
 end
 
-// derail trap: PC escaping the 24-bit bus space is always a wrong jump
+// derail trap: PC escaping the 24-bit bus space is always a wrong jump.
+// Gate on !rst and on having booted into real code first: the V60 reset vector
+// is 0xFFFFFFF0 (top byte 0xFF), which a 2-state simulator (Verilator) would
+// otherwise flag as a derail during reset.  ModelSim's X-pessimism hid this.
 reg derailed = 0;
-always @(posedge clk_sys) if (ce_cpu) begin
-    if (!derailed && core.v60.dbg_pc[31:24] != 8'h00) begin
+reg booted = 0;
+always @(posedge clk_sys) if (ce_cpu && !rst) begin
+    if (core.v60.dbg_pc[31:24] == 8'h00) booted <= 1'b1;
+    if (booted && !derailed && core.v60.dbg_pc[31:24] != 8'h00) begin
         derailed = 1;
         $display("[DERAIL] pc=%08x sp=%08x sbr=%08x psw=%08x", core.v60.dbg_pc,
             core.v60.r[31], core.v60.sbr, core.v60.psw);
@@ -938,6 +970,24 @@ initial begin
             core.mode_416, rdreq_cnt, kick_cnt, fbw_y, fbr_y_l,
             spr_cmd_cnt, srom_req_cnt, spr_opq_cnt, coin_rd_cnt, start_rd_cnt,
             p1a_rd_cnt);
+        // coin-credit gate flags (V60 work RAM; word=A[15:1], addrs from the
+        // MAME disassembly of the 0x600A7 credit routine):
+        //   credits 0x20AC81, test-mode 0x20B1D0, free-play 0x20AC7A,
+        //   coin raw 0x20AC40 / old 0x20AC41 / release-edge 0x20AC43
+        $display("   coin: cr(ac81)=%02x test(b1d0)=%02x fp(ac7a)=%02x raw40=%02x old41=%02x reledge43=%02x",
+            core.work_ram.mem['h5640][15:8], core.work_ram.mem['h58e8][7:0],
+            core.work_ram.mem['h563d][7:0], core.work_ram.mem['h5620][7:0],
+            core.work_ram.mem['h5620][15:8], core.work_ram.mem['h5621][15:8]);
+        // char-select object-spawn probe (work RAM 0x2005a0.. block). MAME shows
+        // this all-zero at attract and populated (word 0x2d0 hi=0x84 etc.) once
+        // the PLAYER SELECT character object is created. objsig = OR of the block
+        // so any nonzero proves the game spawned the character-select object.
+        $display("   objblk: w2d0=%04x w2d3=%04x w2d8=%04x w2e8=%04x objsig=%0d",
+            core.work_ram.mem['h2d0], core.work_ram.mem['h2d3],
+            core.work_ram.mem['h2d8], core.work_ram.mem['h2e8],
+            (|core.work_ram.mem['h2d0]) | (|core.work_ram.mem['h2d3]) |
+            (|core.work_ram.mem['h2d8]) | (|core.work_ram.mem['h2e8]) |
+            (|core.work_ram.mem['h2e0]) | (|core.work_ram.mem['h2e9]));
         $display("   snd: rom=%0d op=%0d bank=%0d/%0d(%03x) fm=%0d/%0d rf=%0d/%0d irqctl=%0d audio=%0d/%0d x=%0d",
             snd_rom_reqs, snd_opcodes, snd_bank_lo, snd_bank_hi,
             core.sound.sound_bank, snd_fm1, snd_fm2, snd_rfreg, snd_rfram,

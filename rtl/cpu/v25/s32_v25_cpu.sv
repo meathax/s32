@@ -369,6 +369,50 @@ s32_v25_mailbox_dpram mb_ram (
 assign rdata = dpram_v60_q;
 
 // -------------------------------------------------------------------------
+// V25 on-chip internal data area (NEC V25 register banks + SFRs).
+//
+// A real V25 keeps 256 bytes of internal RAM (the 8 register banks / working
+// scratch) plus its special-function registers in an IDB-relative window.  At
+// reset IDB=0xFF, placing the area at 0xFFE00-0xFFFFF: RAM at 0xFFE00-0xFFEFF
+// (gated by RAMEN=PRC[6]) and SFRs at 0xFFF00-0xFFFFF.  ga2/arabfgt keep
+// IDB=0xFF.  The s80x86 is a plain 8086 with none of this, so the ga2/arabfgt
+// protection code — which uses the internal RAM as its working memory — read
+// 0xFFFF back from every scratch access, corrupting enemy AI, dynamic sprite
+// lists and post-effect object management while the wake handshake (which lives
+// in registers + the mailbox) still succeeded.  Decode/behaviour ported from
+// wickerwaka's V35 core (refcores/.../rtl/v35/v35.sv).
+//
+// Only DATA accesses are internal; instruction fetches (incl. the reset vector
+// at 0xFFFF0) still read external ROM, exactly as the V25 prefetch does.
+//
+// Byte lanes: even offsets ride data_wdata[7:0] (bytesel[0]); odd offsets ride
+// data_wdata[15:8] (bytesel[1]).  PRC (0xEB) and IDB (0xFF) are odd offsets, so
+// they are always reached through the high lane.  RAM/SFR stores are split into
+// even/odd byte-lane arrays so each is a single-read-port inference.
+reg  [7:0] v25_idb;                  // Internal Data Base (reset 0xFF)
+reg  [7:0] v25_prc;                  // Processor Control  (reset 0x4E, RAMEN=1)
+wire       v25_ramen  = v25_prc[6];
+reg  [7:0] v25_iram_lo [0:127];      // internal RAM, even bytes
+reg  [7:0] v25_iram_hi [0:127];      // internal RAM, odd bytes
+reg  [7:0] v25_sfr_lo  [0:127];      // SFR read-back store, even offsets
+reg  [7:0] v25_sfr_hi  [0:127];      // SFR read-back store, odd offsets (ex PRC/IDB)
+reg [15:0] v25_int_q;                // registered internal read data
+
+wire        data_int_area = (data_addr[19:9] == {v25_idb, 3'b111});
+wire        data_int_ram  = data_int_area & ~data_addr[8] & v25_ramen;
+wire        data_int_sfr  = data_int_area &  data_addr[8];
+wire  [6:0] int_word      = data_addr[7:1];      // word index within the area
+wire  [7:0] int_off_hi    = {int_word, 1'b1};    // odd byte offset
+
+`ifdef SIMULATION
+integer v25_ii;
+initial for (v25_ii = 0; v25_ii < 128; v25_ii = v25_ii + 1) begin
+    v25_iram_lo[v25_ii] = 8'h00; v25_iram_hi[v25_ii] = 8'h00;
+    v25_sfr_lo[v25_ii]  = 8'h00; v25_sfr_hi[v25_ii]  = 8'h00;
+end
+`endif
+
+// -------------------------------------------------------------------------
 // Single-target CPU bus arbiter. External ROM responses are retained across
 // fractional CE gaps; the synchronous mailbox keeps its settling cycle.
 // Data transactions take priority so prefetch cannot starve load/store.
@@ -378,7 +422,8 @@ localparam [3:0]
     BUS_I_ROM_WAIT = 4'd1,
     BUS_D_ROM_WAIT = 4'd3,
     BUS_D_DP_WAIT  = 4'd5,
-    BUS_D_DP_ACK   = 4'd6;
+    BUS_D_DP_ACK   = 4'd6,
+    BUS_D_INT_WAIT = 4'd7;   // V25 on-chip internal RAM / SFR registered read
 
 reg [3:0] bus_state;
 reg [15:0] instr_rdata_r;
@@ -413,6 +458,9 @@ always @(posedge clk_v25 or posedge rst_v25) begin
         debug_last_io_addr      <= 16'd0;
         debug_unmapped_seen     <= 1'b0;
         debug_last_unmapped_addr <= 20'd0;
+        v25_prc                 <= 8'h4e;   // RAMEN=1 from reset
+        v25_idb                 <= 8'hff;   // internal area at 0xFFE00-0xFFFFF
+        v25_int_q               <= 16'h0000;
     end else begin
         // Requests and BRAM enables are one clk_v25 pulse. CPU acknowledgements
         // change only on V25 CE edges and remain visible throughout CE gaps.
@@ -453,6 +501,40 @@ always @(posedge clk_v25 or posedge rst_v25) begin
                             dpram_cpu_rden    <= ~data_we;
                             dpram_cpu_wren    <= data_we;
                             bus_state         <= BUS_D_DP_WAIT;
+                        end else if (data_int_ram || data_int_sfr) begin
+                            // V25 on-chip internal RAM / SFRs — the real fix for
+                            // the ga2/arabfgt runtime-protection corruption.
+                            if (data_we) begin
+                                if (data_int_ram) begin
+                                    if (data_bytesel[0])
+                                        v25_iram_lo[int_word] <= data_wdata[7:0];
+                                    if (data_bytesel[1])
+                                        v25_iram_hi[int_word] <= data_wdata[15:8];
+                                end else begin
+                                    // SFR store; PRC (0xEB) / IDB (0xFF) are odd
+                                    // offsets, captured on the high lane.
+                                    if (data_bytesel[0])
+                                        v25_sfr_lo[int_word] <= data_wdata[7:0];
+                                    if (data_bytesel[1]) begin
+                                        if      (int_off_hi == 8'heb) v25_prc <= data_wdata[15:8];
+                                        else if (int_off_hi == 8'hff) v25_idb <= data_wdata[15:8];
+                                        else v25_sfr_hi[int_word] <= data_wdata[15:8];
+                                    end
+                                end
+                                data_ack <= 1'b1;          // writes complete now
+                            end else begin
+                                if (data_int_ram)
+                                    v25_int_q <= {v25_iram_hi[int_word],
+                                                  v25_iram_lo[int_word]};
+                                else
+                                    v25_int_q <= {
+                                        (int_off_hi == 8'heb) ? v25_prc :
+                                        (int_off_hi == 8'hff) ? v25_idb :
+                                                                v25_sfr_hi[int_word],
+                                        v25_sfr_lo[int_word]
+                                    };
+                                bus_state <= BUS_D_INT_WAIT;
+                            end
                         end else if (data_is_rom) begin
                             // The V25 internal data area (IDB=0xFF at reset)
                             // overlays 0xFFE00-0xFFFFF inside this window and
@@ -523,6 +605,12 @@ always @(posedge clk_v25 or posedge rst_v25) begin
                 BUS_D_DP_WAIT: bus_state <= BUS_D_DP_ACK;
                 BUS_D_DP_ACK: begin
                     data_rdata_r <= dpram_cpu_q;
+                    data_ack     <= 1'b1;
+                    bus_state    <= BUS_IDLE;
+                end
+
+                BUS_D_INT_WAIT: begin
+                    data_rdata_r <= v25_int_q;   // internal RAM / SFR read data
                     data_ack     <= 1'b1;
                     bus_state    <= BUS_IDLE;
                 end

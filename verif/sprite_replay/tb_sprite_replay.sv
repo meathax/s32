@@ -82,7 +82,7 @@ s32_sprite dut (
     .fb_busy(fb_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf),
     .fb_er_y(fb_er_y), .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf), .mode_416()
+    .disp_buf(disp_buf)
 );
 
 integer errors = 0;

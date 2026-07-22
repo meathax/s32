@@ -26,12 +26,21 @@ module s32_io5296 (
     output reg        cnt0, cnt1, cnt2
 );
 
-// registers 0-7 = ports A-H, 8 = ?, E = CNT, F = direction
+// registers 0-7 = ports A-H, 8-B = 'S''E''G''A' signature, C/E = CNT,
+// D/F = direction, 10-1F = unused (read 0xff).  Matches MAME 315_5296.cpp
+// read()/write() (D:\Arcade\AI\MAMESOURCE\...\315_5296.cpp).  System 32 wires
+// A/B/C/E/F as inputs and D/G/H as outputs; the games program DIR to match, so
+// the fixed port-direction hardcode below is equivalent to MAME's DIR-gated
+// port 0-7 access for these boards (a documented-benign device-model divergence
+// kept to avoid changing the proven boot behaviour of the output ports).
 reg [7:0] dir;
+reg [7:0] cnt_reg;   // full CNT byte for readback (cnt2/1/0 mirror the low bits)
 always @(posedge clk) begin
     if (rst) begin
         out_pd <= 8'h00; out_pg <= 8'h00; out_ph <= 8'h00;
         {cnt2, cnt1, cnt0} <= 3'b000;
+        cnt_reg <= 8'h00;   // MAME device_reset: m_cnt = 0
+        dir     <= 8'h00;   // MAME device_reset: m_dir = 0
     end
     else if (cs && we) begin
         // register = full 5-bit index (A[5:1]); 315-5296 is byte-lane, 2-byte
@@ -40,7 +49,7 @@ always @(posedge clk) begin
             5'h3: out_pd <= wdata;
             5'h6: out_pg <= wdata;
             5'h7: out_ph <= wdata;
-            5'he: {cnt2, cnt1, cnt0} <= wdata[2:0];
+            5'he: begin {cnt2, cnt1, cnt0} <= wdata[2:0]; cnt_reg <= wdata; end
             5'hf: dir <= wdata;
             default: ;
         endcase
@@ -54,7 +63,13 @@ always @(posedge clk) begin
         5'h5: rdata <= in_pf;
         5'h6: rdata <= out_pg;
         5'h7: rdata <= out_ph;
-        default: rdata <= 8'hff;
+        5'h8: rdata <= 8'h53;   // 'S'
+        5'h9: rdata <= 8'h45;   // 'E'
+        5'ha: rdata <= 8'h47;   // 'G'
+        5'hb: rdata <= 8'h41;   // 'A'
+        5'hc, 5'he: rdata <= cnt_reg;
+        5'hd, 5'hf: rdata <= dir;
+        default: rdata <= 8'hff;   // 0x10-0x1F: unused, read 0xff
     endcase
 end
 

@@ -283,24 +283,38 @@ initial begin
         $fatal(1);
     end
 
-    // MAME's GA2 firmware trace performs no port I/O cycles and never leaves
-    // the two mapped memory windows ON THE BUS — but it does program one
-    // on-chip SFR during boot (byte write 0xFFFEB = PRC, internal to the real
-    // V25 and to MAME's v25 device, surfaced on the io diagnostic band by
-    // this model since audit R25).  Accept exactly that access (either byte
-    // encoding of the 0xFFFEA/B pair); treat any other
-    // io event, or any unmapped/IRAM-page event, as a decode/control-flow
-    // failure rather than merely printing it after an otherwise passing run.
-    if (debug_unmapped_seen ||
-        (debug_io_seen && debug_last_io_addr != 16'hffea
-                       && debug_last_io_addr != 16'hffeb)) begin
-        $display("V25_FIRMWARE FAIL: unexpected bus access io_seen=%0d last_io=%04x unmapped=%0d last_mem=%05x",
-                 debug_io_seen, debug_last_io_addr,
-                 debug_unmapped_seen, debug_last_unmapped_addr);
+    // Dump the full 2 KiB mailbox surface (V60 low-byte view) so it can be
+    // diffed byte-for-byte against MAME's captured ga2 protection table.  Placed
+    // before the diagnostic-band assertions so it runs regardless of them.
+    begin : mbox_dump
+        integer df, doff;
+        reg [7:0] dv;
+        df = $fopen("scratch/our_mbox.hex", "w");
+        for (doff = 0; doff < 2048; doff = doff + 1) begin
+            v60_read_byte(doff * 2, dv);
+            $fwrite(df, "%02x", dv);
+            if (doff % 32 == 31) $fwrite(df, "\n");
+        end
+        $fclose(df);
+        $display("V25_FIRMWARE mailbox dumped to scratch/our_mbox.hex");
+    end
+
+    // The V25 on-chip internal data area (256 B register-bank RAM at
+    // 0xFFE00-0xFFEFF + SFRs at 0xFFF00-0xFFFFF) is now implemented in
+    // s32_v25_cpu.sv, so the ga2 boot's PRC write (byte 0xFFFEB) and any
+    // register-bank/scratch accesses are serviced internally and no longer
+    // surface on the diagnostic bands.  A clean boot therefore shows NO io-band
+    // event and NO unmapped/IRAM event.  (Before the overlay this same firmware
+    // flagged PRC on the io band and would have flagged the IRAM band on
+    // hardware — see audit R25.)  MAME's GA2 trace performs no port I/O either.
+    if (debug_unmapped_seen) begin
+        $display("V25_FIRMWARE FAIL: unmapped/IRAM access after internal-area overlay last_mem=%05x",
+                 debug_last_unmapped_addr);
         $fatal(1);
     end
-    if (!debug_io_seen) begin
-        $display("V25_FIRMWARE FAIL: the known ga2 SFR write (0xFFFEB/PRC) was not flagged on the io band");
+    if (debug_io_seen) begin
+        $display("V25_FIRMWARE FAIL: unexpected port-I/O access io last_io=%04x (internal SFRs should be handled on-chip)",
+                 debug_last_io_addr);
         $fatal(1);
     end
 
