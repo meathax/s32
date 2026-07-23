@@ -46,6 +46,9 @@ module tb_core_lint;
 `ifdef S32_HOLO_ONLY
         if (core.GAME_ONLY !== 1'b1) $fatal(1, "Holosseum release pruning not enabled");
         $display("CORE HOLO PROFILE LINT PASS");
+`elsif S32_JPARK_ONLY
+        if (core.GAME_ONLY !== 1'b1) $fatal(1, "Jurassic Park release pruning not enabled");
+        $display("CORE JPARK PROFILE LINT PASS");
 `else
         $display("CORE S32-ONLY LINT PASS");
 `endif

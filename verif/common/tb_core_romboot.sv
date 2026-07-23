@@ -506,6 +506,13 @@ always @(posedge clk_sys) begin
             $fwrite(sprdump_fd, "%04x\n", core.vram.video_ram.mem[sprdump_i]);
         $fclose(sprdump_fd);
         $display("[vramdump] wrote sim_vram.hex at frame %0d", sprdump_cur);
+        // Palette shadow (16384 entries) so sprite/tilemap palettes can be
+        // diffed vs MAME paletteram (e.g. the ga2 PLAYER-SELECT text at 0x450).
+        sprdump_fd = $fopen("sim_pal.hex", "w");
+        for (sprdump_i = 0; sprdump_i < 16'h4000; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.pal0.sim_shadow[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[paldump] wrote sim_pal.hex at frame %0d", sprdump_cur);
     end
     // Multi-frame work-RAM snapshots to locate the FIRST frame of divergence vs
     // MAME (attract pre-coin @250, mid-sequence @400, just-entered-select @500).
@@ -567,11 +574,36 @@ always @(posedge clk_ram) if (regtrace &&
         core.v60.dbg_pc,
         (core.vram.cpu_addr[0] ? 8'h02 : 8'h00));
 reg vb_d, hb_d;
+// +OVLOG=1: dump tilemap line-render overrun + sprite-fb underrun counters per frame
+integer ovlog;
+initial if (!$value$plusargs("OVLOG=%d", ovlog)) ovlog = 0;
+// +SPRLOG=1: per-frame sprite-render telemetry (pixels written, FSM state at
+// frame boundary = did the render finish?, and the displayed buffer). Diagnoses
+// the arabfgt period-2 sprite flicker (render truncation / buffer divergence).
+integer sprlog;
+initial if (!$value$plusargs("SPRLOG=%d", sprlog)) sprlog = 0;
+reg [31:0] spr_px_cnt, spr_px_latch;
+reg [31:0] spr_draw_seen;            // fb_wr_start pulses this frame (# runs)
+always @(posedge clk_ram) begin
+    if (core.sprite.fb_wr_valid) spr_px_cnt <= spr_px_cnt + 1'd1;
+    if (core.sprite.fb_wr_start) spr_draw_seen <= spr_draw_seen + 1'd1;
+end
 integer cur_frame = 0;
 always @(posedge clk_sys) begin
     vb_d <= vb;
     if (vb & ~vb_d) begin              // end of visible field
         cur_frame = cur_frame + 1;
+        // +OVLOG=1: per-frame tilemap line-overrun + sprite-fb underrun telemetry
+        if (ovlog) $display("[ov] f=%0d tile_overrun sticky=%b cnt=%0d  fb_underrun sticky=%b cnt=%0d",
+            cur_frame, core.tm_line_overrun_sticky, core.tm_line_overrun_count,
+            core.fb_rd_underrun_sticky, core.fb_rd_underrun_count);
+        // +SPRLOG: sprite render telemetry. rs = FSM state at frame boundary
+        // (0=R_IDLE means render finished; 5..23 = still walking list = overran).
+        if (sprlog) $display("[spr] f=%0d disp_buf=%0d rs=%0d px=%0d runs=%0d",
+            cur_frame, core.sprite.disp_buf, core.sprite.rs, spr_px_cnt, spr_draw_seen);
+        spr_px_latch <= spr_px_cnt;
+        spr_px_cnt   <= 0;
+        spr_draw_seen <= 0;
         if (dumping) begin
             // pad short frames so the PPM is always complete
             while (dump_y < 224) begin
@@ -1159,6 +1191,44 @@ initial begin
 `endif
     $display("ROMBOOT DONE");
     $finish;
+end
+
+// ---------------------------------------------------------------------------
+// +PCHIST=<frame> [+PCHISTLEN=<n>]: over a window, measure the vblank PERIOD
+// (clk_sys cycles between vs edges — is video timing stable?) and build a V60
+// PC histogram (is the V60 spinning in a wait-loop, or doing real work?).
+// ---------------------------------------------------------------------------
+integer pchist_at, pchist_len;
+integer pc_hist [int];
+integer pc_samples = 0;
+integer vbl_cyc = 0;
+reg     pchist_done = 0;
+reg     vs_pe;
+initial begin
+    if (!$value$plusargs("PCHIST=%d", pchist_at)) pchist_at = -1;
+    if (!$value$plusargs("PCHISTLEN=%d", pchist_len)) pchist_len = 40;
+end
+always @(posedge clk_sys) begin
+    vbl_cyc <= vbl_cyc + 1;
+    vs_pe <= vs;
+    if (vs & ~vs_pe) begin
+        if (pchist_at >= 0 && cur_frame >= pchist_at && cur_frame < pchist_at + pchist_len)
+            $display("[vblper] fr=%0d vblank_period_cycles=%0d", cur_frame, vbl_cyc);
+        vbl_cyc <= 0;
+    end
+    if (ce_cpu && pchist_at >= 0 && cur_frame >= pchist_at && cur_frame < pchist_at + pchist_len) begin
+        pc_hist[core.v60.dbg_pc] = pc_hist[core.v60.dbg_pc] + 1;
+        pc_samples = pc_samples + 1;
+    end
+    if (pchist_at >= 0 && !pchist_done && cur_frame >= pchist_at + pchist_len && pc_samples > 0) begin
+        pchist_done <= 1'b1;
+        $display("[pchist] %0d samples over frames %0d..%0d — hot PCs (>1%%):",
+                 pc_samples, pchist_at, pchist_at + pchist_len - 1);
+        foreach (pc_hist[k])
+            if (pc_hist[k] * 100 > pc_samples)
+                $display("[pchist] pc=%08x count=%0d pct=%0d", k, pc_hist[k],
+                         (pc_hist[k] * 100) / pc_samples);
+    end
 end
 
 endmodule

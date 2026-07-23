@@ -46,8 +46,10 @@ wire        fbe_req, fbe_ack;
 wire [1:0]  fbe_buf;
 wire [7:0]  fbe_y;
 wire [1:0]  disp_buf;
+wire [1:0]  scan_buf;
 wire        rendering;
 
+reg present = 0;
 reg vblank = 0;
 reg [7:0] ctl_addr = 0;
 reg [7:0] ctl_wdata = 0;
@@ -57,7 +59,7 @@ reg       ctl_we = 0;
 s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
     .clk(clk), .rst(rst), .is_multi32(1'b0),
     .srom_bank_mask(2'b11),
-    .vblank(vblank), .rendering(rendering),
+    .present(present), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
     .debug_last_desc(), .debug_last_draw_desc(),
     .debug_activity(), .debug_state(), .debug_counts(),
@@ -71,7 +73,7 @@ s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
     .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
-    .fb_er_ack(fbe_ack), .disp_buf(disp_buf)
+    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf)
 );
 
 // Non-backpressured DDR so passes complete quickly.
@@ -99,19 +101,45 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) fb (
     .rd_x(9'd0), .rd_pix()
 );
 
-// Count rendering rising edges and disp_buf changes globally.
+// Count logical controller swaps and physical scan-buffer publishes globally.
+// A published buffer may change only during vblank, and no erase/render command
+// may ever target the physical buffer currently feeding scanout.
 integer render_edges = 0;
 integer swap_edges = 0;
+integer scan_edges = 0;
+integer errors = 0;
+reg used_third_buffer = 0;
 reg rendering_d = 0;
 reg [1:0] disp_buf_d = 0;
+reg [1:0] scan_buf_d = 0;
+reg present_sample_d = 0;
 always @(posedge clk) begin
     rendering_d <= rendering;
     disp_buf_d  <= disp_buf;
-    if (rendering && !rendering_d) render_edges = render_edges + 1;
-    if (disp_buf !== disp_buf_d)   swap_edges   = swap_edges + 1;
+    scan_buf_d  <= scan_buf;
+    present_sample_d <= present;
+    if (!rst && rendering && !rendering_d) render_edges = render_edges + 1;
+    if (!rst && disp_buf !== disp_buf_d)   swap_edges   = swap_edges + 1;
+    // Nonblocking DUT updates are observed by this monitor on the following
+    // edge, so retain the previous start-of-vblank sample for attribution.
+    if (!rst && !$isunknown(scan_buf) && !$isunknown(scan_buf_d) &&
+        scan_buf !== scan_buf_d) begin
+        scan_edges = scan_edges + 1;
+        if (!(present || present_sample_d)) begin
+            errors = errors + 1;
+            $display("  FAIL scan buffer changed outside vblank: %0d -> %0d",
+                     scan_buf_d, scan_buf);
+        end
+    end
+    if (!rst && fbe_req && fbe_buf == 2'd2)
+        used_third_buffer <= 1'b1;
+    if (!rst && (fbe_req || fbw_start) &&
+        ((fbe_req ? fbe_buf : fbw_buf) == scan_buf)) begin
+        errors = errors + 1;
+        $display("  FAIL framebuffer write/erase targets scanned buffer %0d",
+                 scan_buf);
+    end
 end
-
-integer errors = 0;
 
 task write_ctl(input [2:0] a, input [7:0] d);
     @(posedge clk); ctl_we <= 1'b1; ctl_addr <= {5'd0, a}; ctl_wdata <= d;
@@ -119,11 +147,21 @@ task write_ctl(input [2:0] a, input [7:0] d);
 endtask
 
 // Drive one vblank pulse `width` clk cycles wide, then let the pass settle.
-task pulse_and_settle(input integer width);
+task pulse_frame(input integer width);
     integer i;
-    @(posedge clk); vblank <= 1'b1;
+    // Start of vblank publishes the prior completed frame. End of vblank
+    // independently launches the delayed controller update/render pass.
+    @(posedge clk); present <= 1'b1;
+    for (i = 0; i < width; i = i + 1) @(posedge clk);
+    present <= 1'b0;
+    repeat (4) @(posedge clk);
+    vblank <= 1'b1;
     for (i = 0; i < width; i = i + 1) @(posedge clk);
     vblank <= 1'b0;
+endtask
+
+task pulse_and_settle(input integer width);
+    pulse_frame(width);
     // wait for the pass to run and the framebuffer to drain
     wait (rendering === 1'b1);
     wait (rendering === 1'b0);
@@ -132,7 +170,7 @@ task pulse_and_settle(input integer width);
 endtask
 
 integer si;
-integer base_render, base_swap;
+integer base_render, base_swap, base_scan;
 initial begin
     for (si = 0; si < 16384; si = si + 1) sram[si] = 16'hc000; // all END
 
@@ -147,6 +185,7 @@ initial begin
     // ---- Realistic 2-cycle (clk_ram) wide pulse: must produce ONE pass. ----
     base_render = render_edges;
     base_swap   = swap_edges;
+    base_scan   = scan_edges;
     pulse_and_settle(2);
     if (render_edges - base_render !== 1) begin
         errors = errors + 1;
@@ -158,11 +197,16 @@ initial begin
         $display("  FAIL 2-wide vblank produced %0d buffer swaps (want 1)",
                  swap_edges - base_swap);
     end
+    if (scan_edges - base_scan !== 0) begin
+        errors = errors + 1;
+        $display("  FAIL first frame published an incomplete buffer");
+    end
 
     // ---- Three more 2-wide frames: strictly one pass + one swap each. ----
     for (si = 0; si < 3; si = si + 1) begin
         base_render = render_edges;
         base_swap   = swap_edges;
+        base_scan   = scan_edges;
         pulse_and_settle(2);
         if (render_edges - base_render !== 1) begin
             errors = errors + 1;
@@ -174,11 +218,17 @@ initial begin
             $display("  FAIL frame %0d: %0d swaps (want 1)",
                      si, swap_edges - base_swap);
         end
+        if (scan_edges - base_scan !== 1) begin
+            errors = errors + 1;
+            $display("  FAIL frame %0d: %0d scan publishes (want 1)",
+                     si, scan_edges - base_scan);
+        end
     end
 
     // ---- 1-cycle pulse must still yield exactly one pass (no regression). ----
     base_render = render_edges;
     base_swap   = swap_edges;
+    base_scan   = scan_edges;
     pulse_and_settle(1);
     if (render_edges - base_render !== 1) begin
         errors = errors + 1;
@@ -189,6 +239,34 @@ initial begin
         errors = errors + 1;
         $display("  FAIL 1-wide vblank produced %0d buffer swaps (want 1)",
                  swap_edges - base_swap);
+    end
+    if (scan_edges - base_scan !== 1) begin
+        errors = errors + 1;
+        $display("  FAIL 1-wide vblank produced %0d scan publishes (want 1)",
+                 scan_edges - base_scan);
+    end
+
+    // ---- Overrun path: a second frame event while erase/render is busy. ----
+    // The completed first frame must remain queued, so the pending pass uses
+    // physical buffer 2 rather than touching scanout or the queued buffer.
+    used_third_buffer = 1'b0;
+    base_render = render_edges;
+    base_swap = swap_edges;
+    pulse_frame(2);
+    wait (fbe_req === 1'b1);
+    pulse_frame(2);
+    wait (render_edges - base_render == 2);
+    wait (rendering === 1'b0);
+    wait (fbw_busy === 1'b0);
+    repeat (40) @(posedge clk);
+    if (swap_edges - base_swap !== 2) begin
+        errors = errors + 1;
+        $display("  FAIL overrun path produced %0d swaps (want 2)",
+                 swap_edges - base_swap);
+    end
+    if (!used_third_buffer) begin
+        errors = errors + 1;
+        $display("  FAIL overrun path did not rotate through buffer 2");
     end
 
     if (errors == 0) $display("SPRITE VBLANK PASS");

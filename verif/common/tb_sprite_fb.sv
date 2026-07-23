@@ -43,13 +43,14 @@ wire        fbe_req, fbe_ack;
 wire [1:0]  fbe_buf;
 wire [7:0]  fbe_y;
 wire [1:0]  disp_buf;
+wire [1:0]  scan_buf;
 wire        rendering;
 
 reg vblank = 0;
 s32_sprite sprite (
     .clk(clk), .rst(rst), .is_multi32(1'b0),
     .srom_bank_mask(2'b11),
-    .vblank(vblank), .rendering(rendering),
+    .present(vblank), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
     .debug_last_desc(), .debug_last_draw_desc(),
     .debug_activity(), .debug_state(), .debug_counts(),
@@ -63,7 +64,7 @@ s32_sprite sprite (
     .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
-    .fb_er_ack(fbe_ack), .disp_buf(disp_buf)
+    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf)
 );
 
 // MiSTer DDR interface.
@@ -196,11 +197,12 @@ initial begin
     rst <= 1'b0;
     repeat (4) @(posedge clk);
 
-    // Initial display buffer 0 swaps to 1, so frame 1 renders into buffer 0;
-    // frame 2 renders into buffer 1, then the pair alternates.
-    run_frame(2'd0);
+    // Physical scanout remains on buffer 0 until the first completed frame is
+    // published at the next vblank. Rendering therefore starts in buffer 1,
+    // then alternates with buffer 0 in the normal no-overrun case.
     run_frame(2'd1);
     run_frame(2'd0);
+    run_frame(2'd1);
 
     if (write_accepts < (3 * 224 * 128)) begin
         errors = errors + 1;

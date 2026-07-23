@@ -13,7 +13,7 @@ set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
 set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top
 set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
 
-set_global_assignment -name LAST_QUARTUS_VERSION "17.1.0 Lite Edition"
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.0 Standard Edition"
 
 set_global_assignment -name GENERATE_RBF_FILE ON
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
@@ -64,13 +64,12 @@ set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
 # mixer and sizes work RAM to the board-correct 64 KiB so SegaS32.rbf fits the
 # Cyclone V memory budget.  A future Multi 32 revision must omit this macro.
 set_global_assignment -name VERILOG_MACRO "S32_SYSTEM32_ONLY=1"
-# Current release target: Holosseum on the regular single-screen System 32
-# board.  It needs neither the V25 nor the variant protection/analog/dual-PCB
-# blocks, leaving maximum Cyclone V headroom for the V60 and video path.
-set_global_assignment -name VERILOG_MACRO "S32_HOLO_ONLY=1"
+# Jurassic Park profile: retain the MSM6253 ADC/gun path while pruning the
+# unrelated trackball, generic protection and dual-PCB hardware.
+set_global_assignment -name VERILOG_MACRO "S32_JPARK_ONLY=1"
 # files.qip retains the real-V25 source for compatibility builds. Its upstream
 # Flags module requires this compile-time choice even when S32_REAL_V25 is off;
-# defining it does not instantiate V25 hardware in the Holosseum profile.
+# defining it alone does not instantiate V25 hardware.
 set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
 
 # --- Real V25 opt-in (V25-game compatibility builds) --------------------------
@@ -82,15 +81,17 @@ set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
 # round-trips the wake mailbox to the V60 in-core).  This is the candidate fix
 # for the V25 games' missing character-select sprites, which the HLE's static
 # tables cannot supply dynamically.
-set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+# Jurassic Park does not use the protected-game V25.  Leave the real V25 out
+# of this profile to preserve fitter and timing headroom; GA2/Arabian Fight
+# require their own S32_REAL_V25-qualified build.
+# set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
 #
-# PROFILE NOTE: S32_SYSTEM32_ONLY + S32_HOLO_ONLY build a Holosseum-optimized core
-# that COMPILES OUT the trackball/ADC read decode (s32_core sel_ioex under
-# GAME_ONLY) and the Multi 32 path (is_multi32 forced 0).  On this profile sonic
-# cannot read its trackball and Multi 32 games (orunners) stay in service mode --
-# by design.  To exercise those games build a UNIVERSAL core by commenting out
-# BOTH S32_SYSTEM32_ONLY and S32_HOLO_ONLY (GAME_ONLY=0, is_multi32 follows the
-# MRA); it is larger, so re-check fit + timing.
+# PROFILE NOTE: S32_SYSTEM32_ONLY + a game-only macro compile out trackball,
+# generic protection and dual-PCB hardware while retaining the MSM6253 ADC used
+# by Jurassic Park.  Multi 32 is forced off.  To exercise Sonic or Multi 32,
+# build a UNIVERSAL core by commenting out both S32_SYSTEM32_ONLY and the active
+# game-only macro (GAME_ONLY=0, is_multi32 follows the MRA); it is substantially
+# larger, so re-check fit and timing.
 
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 

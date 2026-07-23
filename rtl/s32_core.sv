@@ -147,6 +147,8 @@ module s32_core #(
 localparam GAME_ONLY = 1'b1;
 `elsif S32_HOLO_ONLY
 localparam GAME_ONLY = 1'b1;
+`elsif S32_JPARK_ONLY
+localparam GAME_ONLY = 1'b1;
 `else
 localparam GAME_ONLY = 1'b0;
 `endif
@@ -506,15 +508,16 @@ assign sdr_p1_addr = SDR_TILES_BASE[24:3] + {3'b000, tile_rom_addr};
 // sprite engine
 wire [7:0] sprctl_q;
 wire [1:0] disp_buf;
+wire [1:0] spr_scan_buf;
 s32_sprite sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
     // Old MRAs predate bank metadata and therefore retain the original
     // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.
     .srom_bank_mask(board.sprite_bank_valid ? board.sprite_bank_mask : 2'b11),
-    // MAME schedules sprite erase/swap/render just after VBLANK ends, not at
-    // its leading edge.  GA2 builds its next command list during VBLANK, so
-    // launching at vbl_start can consume the list before the IRQ-side update.
-    .vblank(vbl_end), .rendering(debug_sprite_rendering),
+    // Publish completed physical frames at VBLANK start, before the line-0
+    // prefetch. MAME schedules logical erase/swap/render just after VBLANK
+    // ends; GA2 builds its next list during VBLANK, so that trigger stays late.
+    .present(vbl_start), .vblank(vbl_end), .rendering(debug_sprite_rendering),
     .debug_first_rom_desc(debug_sprite_desc),
     .debug_first_rom_valid(debug_sprite_desc_valid),
     .debug_last_desc(debug_sprite_last_desc),
@@ -534,7 +537,7 @@ s32_sprite sprite (
     .fb_wr_shadow(fb_wr_shadow), .fb_busy(fb_wr_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf), .fb_er_y(fb_er_y),
     .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf)
+    .disp_buf(disp_buf), .scan_buf(spr_scan_buf)
 );
 assign sdr_p2_addr[24] = 1'b1;   // sprites region base 0x1000000
 
@@ -594,7 +597,10 @@ always @(posedge clk_ram) begin
         end
         else if (!fb_rd_ack && fb_rd_kick) begin
             fb_rd_req_r <= 1'b1;
-            fb_rd_buf_r <= {1'b0, disp_buf[0]};
+            // The CPU-visible logical selector changes with MAME's delayed
+            // sprite-controller update. Scanout uses the separately published
+            // physical buffer, which changes only at a complete frame boundary.
+            fb_rd_buf_r <= spr_scan_buf;
             // CRT lines are 0..261. Truncating line 261 before adding produced
             // line 6 instead of the next frame's line 0.
             if (vcnt == 9'd261)
@@ -904,8 +910,8 @@ wire [7:0]  v25_q;
 
 generate
     if (GAME_ONLY) begin : g_game_no_other_protection
-        // GA2 uses the V25 mailbox below.  Generic HLE, Burning Rival and
-        // Air Rescue DSP protection are unreachable in the dedicated MRA.
+        // Dedicated game profiles use only their selected board path.  Generic
+        // HLE, Burning Rival and Air Rescue DSP protection are unreachable.
         assign pr_req = 1'b0;
         assign pr_we = 1'b0;
         assign pr_addr = 16'h0000;
@@ -947,8 +953,9 @@ endgenerate
 
 generate
     if (GAME_ONLY) begin : g_no_dualpcb
-        // GA2 is a single-board System 32 title.  Keeping this runtime-dead
-        // 4KB array cost 32,784 registers in Quartus 17 because its original
+        // Dedicated profiles target single-board System 32 titles.  Keeping
+        // this runtime-dead 4KB array cost 32,784 registers in Quartus 17
+        // because its original
         // read/write shape did not infer block RAM.
         assign dual_q = 16'h0000;
     end

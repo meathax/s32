@@ -132,6 +132,7 @@ localparam CONF_STR = {
     "O[6],Screen (Multi32),A,B;",
     "O[7],Service Mode,Off,On;",
     "O[12],Pause,Off,On;",
+    "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
     "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var,V25;",
     "-;",
     "R[0],Reset;",
@@ -461,11 +462,74 @@ function automatic [7:0] p_dig(input [31:0] j);
     p_dig = ~{j[1], j[0], j[3], j[2], 1'b0, j[6], j[5], j[4]};
 endfunction
 
+// --- Analog-stick gun aiming (alien3/jpark) --------------------------------
+// The gun channels are MAME IPT_AD_STICK_X/Y: absolute, offset-binary, resting
+// at 0x80 (full left/up=0x00, full right/down=0xff).  MiSTer's left analog
+// stick feeds them directly (P1 = stick 0, P2 = stick 1).  Three conditioning
+// stages sit between the raw stick and the MSM6253:
+//   1. per-axis invert, OSD-selectable (alien3 wants XY; steering games want
+//      Off, so this is a toggle rather than a fixed polarity);
+//   2. a small centred deadzone that removes the resting jitter of a noisy
+//      analog stick without shifting the 0x80 rest point;
+//   3. a light first-order IIR to tame the remaining sample-to-sample jitter
+//      that reads as over-sensitivity, while keeping the full 0x00..0xff throw
+//      so the in-game gun-cal screen can still reach the screen edges.
+// Deadzone/smoothing are always on and benefit every analog game; only the
+// invert is game-specific and therefore user-controlled.
+wire aim_inv_x = status[13];
+wire aim_inv_y = status[14];
+localparam signed [8:0] AIM_DZ = 9'sd6;   // deadzone half-width (LSB about 0x80)
+
+// signed stick -> offset binary (center 0x80), with centred optional inversion
+function automatic [7:0] aim_axis(input [7:0] raw, input inv);
+    logic [7:0] v;
+    v = raw ^ 8'h80;
+    aim_axis = inv ? (8'h00 - v) : v;     // mirror about 0x80 (0x80 stays 0x80)
+endfunction
+
+// continuous (subtractive) deadzone about center 0x80
+function automatic [7:0] aim_deadzone(input [7:0] v);
+    logic signed [8:0] d;
+    d = $signed({1'b0, v}) - 9'sd128;
+    if (d <= AIM_DZ && d >= -AIM_DZ) aim_deadzone = 8'h80;
+    else if (d > 0)                  aim_deadzone = 8'd128 + (d - AIM_DZ);
+    else                             aim_deadzone = 8'd128 + (d + AIM_DZ);
+endfunction
+
+wire [7:0] aim_in [0:3];
+assign aim_in[0] = aim_axis(joystick_l_analog_0[7:0],  aim_inv_x); // P1 gun X
+assign aim_in[1] = aim_axis(joystick_l_analog_0[15:8], aim_inv_y); // P1 gun Y
+assign aim_in[2] = aim_axis(joystick_l_analog_1[7:0],  aim_inv_x); // P2 gun X
+assign aim_in[3] = aim_axis(joystick_l_analog_1[15:8], aim_inv_y); // P2 gun Y
+
+// ~1 kHz IIR smoothing tick (48.324 MHz / 2^16 ~ 737 Hz)
+reg  [7:0] aim_sm [0:3];
+reg [15:0] aim_div = 16'd0;
+wire       aim_tick = (aim_div == 16'd0);
+integer    aim_i;
+always @(posedge clk_sys) begin
+    aim_div <= aim_div + 1'b1;
+    for (aim_i = 0; aim_i < 4; aim_i = aim_i + 1) begin
+        logic [7:0]        tgt;
+        logic signed [9:0] err;
+        tgt = aim_deadzone(aim_in[aim_i]);
+        if (reset)          aim_sm[aim_i] <= 8'h80;
+        else if (aim_tick) begin
+            err = $signed({2'b00, tgt}) - $signed({2'b00, aim_sm[aim_i]});
+            // Snap the final few LSB to the target. A plain err>>>2 floors on
+            // negative errors, so approaching from a deflected value stalls a
+            // few codes short and the aim never re-centres exactly on 0x80.
+            if (err >= -10'sd3 && err <= 10'sd3) aim_sm[aim_i] <= tgt;
+            else                                 aim_sm[aim_i] <= aim_sm[aim_i] + (err >>> 2);
+        end
+    end
+end
+
 wire [7:0] adc_ch [0:7];
-assign adc_ch[0] = joystick_l_analog_0[7:0]   ^ 8'h80;
-assign adc_ch[1] = joystick_l_analog_0[15:8]  ^ 8'h80;
-assign adc_ch[2] = joystick_l_analog_1[7:0]   ^ 8'h80;
-assign adc_ch[3] = joystick_l_analog_1[15:8]  ^ 8'h80;
+assign adc_ch[0] = aim_sm[0];   // P1 gun X (ANALOG1)
+assign adc_ch[1] = aim_sm[1];   // P1 gun Y (ANALOG2)
+assign adc_ch[2] = aim_sm[2];   // P2 gun X (ANALOG3)
+assign adc_ch[3] = aim_sm[3];   // P2 gun Y (ANALOG4)
 assign adc_ch[4] = {paddle_0};
 assign adc_ch[5] = {paddle_1};
 assign adc_ch[6] = 8'h80;

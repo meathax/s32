@@ -117,7 +117,7 @@ s32_sprite_write_debug cpu_write_debug (
 s32_sprite #(.POST_VBLANK_CYCLES(4)) dut (
     .clk(clk), .rst(rst), .is_multi32(is_multi32),
     .srom_bank_mask(srom_bank_mask),
-    .vblank(vblank), .rendering(dbg_rendering),
+    .present(vblank), .vblank(vblank), .rendering(dbg_rendering),
     .debug_first_rom_desc(dbg_first_desc),
     .debug_first_rom_valid(dbg_first_valid),
     .debug_last_desc(dbg_last_desc),
@@ -133,7 +133,7 @@ s32_sprite #(.POST_VBLANK_CYCLES(4)) dut (
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(1'b0),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
-    .disp_buf()
+    .disp_buf(), .scan_buf()
 );
 
 // write one list entry (8 words at entry*8)

@@ -19,6 +19,7 @@ module s32_sprite #(
     input       [1:0] srom_bank_mask,
 
     // frame control
+    input             present,      // start-of-vblank pulse: publish completed frame
     input             vblank,       // end-of-vblank pulse (1 clk_sys wide =
                                     // 2 clk_ram samples; edge-detected below)
     output reg        rendering,
@@ -68,7 +69,8 @@ module s32_sprite #(
     output reg  [7:0] fb_er_y,
     input             fb_er_ack,
 
-    output reg  [1:0] disp_buf      // which buffer pair the mixer reads
+    output reg  [1:0] disp_buf,     // game-visible logical A/B selector
+    output reg  [1:0] scan_buf      // physical buffer the mixer reads
 );
 
 // control registers
@@ -77,16 +79,42 @@ reg [7:0] ctl_latched [0:7];
 reg       render_count;             // MAME m_sprite_render_count (0/1)
 reg       render_after_erase;       // combined command: render after hidden erase
 reg       erase_after_swap;         // combined command: swap before destructive clear
-reg       erase_buf_sel;            // buffer selected before a combined swap
+reg [1:0] erase_buf_sel;            // physical buffer selected for erase
 reg       erase_mon;                // Multi32 erase visits both monitors
+reg [1:0] work_buf;                 // physical System32 erase/render target
+reg [1:0] ready_buf;                // completed System32 frame awaiting vblank
+reg       ready_valid;
+reg       publish_on_done;          // current command includes a render pass
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
 reg        vblank_d;                // edge-detect the end-of-vblank pulse
-// The end-of-vblank pulse is one clk_sys wide; on the 2x clk_ram domain it is
+reg        present_d;               // edge-detect start-of-vblank publication
+// The video pulses are one clk_sys wide; on the 2x clk_ram domain they are
 // sampled high on two consecutive edges.  Treat only its rising edge as a new
 // frame event, or the SP-3 pending latch re-catches the same pulse and fires a
 // second full erase/swap/render pass mid-frame (the sprite-buffer tear).
 wire       vblank_rise = vblank & ~vblank_d;
+wire       present_rise = present & ~present_d;
+
+// System 32 has only one monitor, leaving physical framebuffer slots 2/3
+// unused by the original A/B mapping. Use slot 2 as a third rotating buffer:
+// choose a work target that is neither being scanned nor waiting to be
+// published. If no frame is pending there are two safe choices; preferring
+// the lowest keeps the normal 0/1 cadence and reserves slot 2 for overruns.
+function automatic [1:0] choose_work_buf(
+    input [1:0] scan,
+    input [1:0] ready,
+    input       valid
+);
+    begin
+        if (scan != 2'd0 && (!valid || ready != 2'd0))
+            choose_work_buf = 2'd0;
+        else if (scan != 2'd1 && (!valid || ready != 2'd1))
+            choose_work_buf = 2'd1;
+        else
+            choose_work_buf = 2'd2;
+    end
+endfunction
 
 always @(*) begin
     case (ctl_raddr)
@@ -266,6 +294,7 @@ always @(posedge clk) begin
     if (rst) begin
         rs <= R_IDLE; rendering <= 0;
         disp_buf <= 2'b00;
+        scan_buf <= 2'b00;
         debug_first_rom_desc <= 128'd0;
         debug_first_rom_valid <= 1'b0;
         debug_last_desc <= 128'd0;
@@ -286,8 +315,13 @@ always @(posedge clk) begin
         render_count <= 0; render_after_erase <= 0;
         erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
+        work_buf <= 2'd1;
+        ready_buf <= 2'd0;
+        ready_valid <= 1'b0;
+        publish_on_done <= 1'b0;
         vblank_pending <= 1'b0;         // audit R20 SP-3
         vblank_d <= 1'b0;
+        present_d <= 1'b0;
         jump_xoff <= 0; jump_yoff <= 0;
         // control regs power up cleared (auto swap mode) — leaving them
         // uninitialized stalls the walker in R_IDLE until the game writes them
@@ -300,6 +334,7 @@ always @(posedge clk) begin
         fb_wr_valid <= 0;
         fb_wr_end   <= 0;
         vblank_d    <= vblank;
+        present_d   <= present;
 
         // CPU control writes
         if (ctl_we) begin
@@ -308,6 +343,16 @@ always @(posedge clk) begin
         end
         if (vblank_rise) debug_activity[0] <= 1'b1;
         if (fb_busy) debug_activity[21] <= 1'b1;
+
+        // The logical controller swap intentionally remains 50 us after
+        // vblank ends, matching MAME and preserving CPU-visible status timing.
+        // Publish a completed physical buffer at vblank start, before the
+        // line-0 DDR prefetch on raster line 261. Every visible scanline then
+        // comes from one stable buffer. Multi 32 retains its two-buffer map.
+        if (present_rise && !is_multi32 && ready_valid) begin
+            scan_buf <= ready_buf;
+            ready_valid <= 1'b0;
+        end
 
         // audit R20 SP-3: a vblank pulse arriving while the FSM is still
         // erasing/rendering (not R_IDLE) is otherwise dropped, delaying that
@@ -359,12 +404,26 @@ always @(posedge clk) begin
                 rs <= R_SWAP;
             end
             else if (command[1]) begin
+                logic [1:0] erase_work;
                 render_after_erase <= 1'b0;
                 erase_after_swap <= 1'b0;
                 rendering <= 1'b0;
                 fb_er_y <= 0;
                 erase_mon <= 1'b0;
-                erase_buf_sel <= disp_buf[0];
+                if (is_multi32) begin
+                    publish_on_done <= 1'b0;
+                    erase_buf_sel <= {1'b0, disp_buf[0]};
+                end
+                else begin
+                    // Triple-buffer: a standalone erase-displayed must NOT wipe
+                    // the buffer being scanned (that flashes live scanout).
+                    // Clear a hidden work buffer and publish it at vblank so the
+                    // sprite layer blanks cleanly at a frame boundary instead.
+                    erase_work = choose_work_buf(scan_buf, ready_buf, ready_valid);
+                    work_buf       <= erase_work;
+                    erase_buf_sel  <= erase_work;
+                    publish_on_done <= 1'b1;
+                end
                 rs <= R_ERASE;
             end
             else if (command[0]) begin
@@ -376,13 +435,23 @@ always @(posedge clk) begin
         end
 
         R_SWAP: begin
+            logic [1:0] next_work;
+            next_work = choose_work_buf(scan_buf, ready_buf, ready_valid);
             debug_activity[3] <= 1'b1;
             debug_swap_count <= debug_sat_inc(debug_swap_count);
             disp_buf <= {1'b0, ~disp_buf[0]}; // bit0 is the sole A/B selector
+            publish_on_done <= 1'b1;
+            if (is_multi32)
+                scan_buf <= {1'b0, ~disp_buf[0]};
+            else begin
+                work_buf <= next_work;
+                erase_buf_sel <= next_work;
+            end
             for (int i = 0; i < 8; i++) ctl_latched[i] <= ctl[i];
             ctl[0] <= 0;
             if (erase_after_swap) begin
-                erase_buf_sel <= disp_buf[0];
+                if (is_multi32)
+                    erase_buf_sel <= {1'b0, disp_buf[0]};
                 erase_after_swap <= 1'b0;
                 render_after_erase <= 1'b1;
                 rendering <= 1'b0;
@@ -408,7 +477,8 @@ always @(posedge clk) begin
         R_ERASE: begin
             debug_activity[1] <= 1'b1;
             fb_er_req <= 1'b1;
-            fb_er_buf <= {erase_mon, erase_buf_sel};
+            fb_er_buf <= is_multi32 ? {erase_mon, erase_buf_sel[0]}
+                                    : erase_buf_sel;
             rs <= R_ERASEW;
         end
         R_ERASEW: if (fb_er_ack) begin
@@ -629,7 +699,7 @@ always @(posedge clk) begin
                                              && scry <= $signed(cout_b);
                 fb_wr_start <= 1'b1;
                 debug_activity[15] <= 1'b1;
-                fb_wr_buf <= {d_mon, ~disp_buf[0]};
+                fb_wr_buf <= is_multi32 ? {d_mon, ~disp_buf[0]} : work_buf;
                 // MAME applies latched controller flip while scanning the
                 // displayed sprite framebuffer.  Mirroring writes into the
                 // back buffer is equivalent and keeps the framebuffer read
@@ -844,6 +914,14 @@ always @(posedge clk) begin
 
         R_DONE: begin
             debug_activity[22] <= 1'b1;
+            // A later completed frame supersedes an older unpresented one.
+            // This can drop a frame after a genuine render overrun, but it can
+            // never expose a partial buffer or write into the scanned buffer.
+            if (!is_multi32 && publish_on_done) begin
+                ready_buf <= work_buf;
+                ready_valid <= 1'b1;
+            end
+            publish_on_done <= 1'b0;
             rs <= R_IDLE;
         end
         default: rs <= R_IDLE;

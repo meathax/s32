@@ -66,7 +66,7 @@ end
 s32_sprite dut (
     .clk(clk), .rst(rst), .is_multi32(1'b0),
     .srom_bank_mask(sprite_bank_mask[1:0]),
-    .vblank(vblank), .rendering(rendering),
+    .present(vblank), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
     .debug_last_desc(), .debug_last_draw_desc(),
     .debug_activity(), .debug_state(), .debug_counts(),
@@ -82,7 +82,7 @@ s32_sprite dut (
     .fb_busy(fb_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf),
     .fb_er_y(fb_er_y), .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf)
+    .disp_buf(disp_buf), .scan_buf()
 );
 
 integer errors = 0;

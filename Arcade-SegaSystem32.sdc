@@ -86,10 +86,14 @@ if {[s32_require [expr {[get_collection_size $sprite_deferred_sources] > 0 && \
 # clk_ram world -- the SDRAM p5 line fetch and the V60-side mailbox port -- are
 # handled in RTL by two-flop toggle synchronisers (s32_v25_cpu) and a true-dual-
 # port RAM, so STA must NOT time those paths.  Declaring clk_v25 asynchronous to
-# the rest false-paths them.  Present only in the S32_REAL_V25 build; guarded on
-# the derived clock existing so other profiles skip it.
-set v25_clk [get_clocks -nowarn {*|pll|pll_inst|altera_pll_i|*[3].*|divclk}]
-if {[s32_require [expr {[get_collection_size $v25_clk] == 1}] \
-        "clk_v25 PLL output clock for the asynchronous clock group"]} {
-    set_clock_groups -asynchronous -group $v25_clk
+# the rest false-paths them.  Present only in the S32_REAL_V25 build.  Detect
+# that instantiated block first: a real-V25 build still hard-fails if its PLL
+# clock is missing, while non-V25 profiles (including Jurassic Park) skip it.
+set v25_regs [get_registers -nowarn {*|s32_v25_cpu:v25|*}]
+if {[get_collection_size $v25_regs] > 0} {
+    set v25_clk [get_clocks -nowarn {*|pll|pll_inst|altera_pll_i|*[3].*|divclk}]
+    if {[s32_require [expr {[get_collection_size $v25_clk] == 1}] \
+            "clk_v25 PLL output clock for the asynchronous clock group"]} {
+        set_clock_groups -asynchronous -group $v25_clk
+    }
 }
