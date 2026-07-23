@@ -421,11 +421,14 @@ always @(posedge clk_sys) begin
     end
 end
 
-// exception / irq counters (state-entry edges)
+// exception / irq counters (state-entry edges).  Use the numeric S_EXC_PUSH1
+// value (75) rather than the hierarchical enum-item ref 7'd75,
+// which trips a Verilator EnumItemRef elaboration fault (works in ModelSim too).
+localparam [6:0] S_EXC_PUSH1_V = 7'd75;   // == s32_v60 st_t S_EXC_PUSH1
 reg exc_d, irq_d;
 always @(posedge clk_sys) begin
-    exc_d <= (core.v60.st == core.v60.S_EXC_PUSH1);
-    if ((core.v60.st == core.v60.S_EXC_PUSH1) && !exc_d) begin
+    exc_d <= (core.v60.st == S_EXC_PUSH1_V);
+    if ((core.v60.st == S_EXC_PUSH1_V) && !exc_d) begin
         if (core.v60.exc_vector >= 8'h40) n_irq = n_irq + 1;
         else n_exc = n_exc + 1;
     end
@@ -650,7 +653,7 @@ initial begin
     if (!$value$plusargs("TRAT=%d", tr_at)) tr_at = 0;
 end
 always @(posedge clk_sys) if (ce_cpu) begin
-    if (cur_frame >= tr_at && core.v60.st == core.v60.S_DECODE && core.v60.pc >= tr_lo &&
+    if (cur_frame >= tr_at && core.v60.st == 7'd3 && core.v60.pc >= tr_lo &&
         core.v60.pc < tr_hi && tr_n < 400) begin
         tr_n = tr_n + 1;
         $display("[tr] pc=%08x op=%02x r0=%08x r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x z=%b",
@@ -675,7 +678,7 @@ wire obj_dbgpc_range = ((core.v60.dbg_pc >= 32'h00130600 && core.v60.dbg_pc < 32
                         (core.v60.dbg_pc >= 32'h00132900 && core.v60.dbg_pc < 32'h001329b0));
 always @(posedge clk_sys) if (ce_cpu) begin
     if (obj_tr_at >= 0 && cur_frame >= obj_tr_at && obj_pc_range &&
-        core.v60.st == core.v60.S_DECODE && obj_i_n < obj_tr_max) begin
+        core.v60.st == 7'd3 && obj_i_n < obj_tr_max) begin
         obj_i_n = obj_i_n + 1;
         $display("[obji] f=%0d pc=%08x b=%02x%02x%02x%02x%02x%02x%02x%02x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x sp=%08x z=%b s=%b cy=%b",
             cur_frame, core.v60.pc,
@@ -740,7 +743,7 @@ end
 // log LDPR executions: which privileged register gets which value?
 integer ldpr_n = 0;
 always @(posedge clk_sys) if (ce_cpu) begin
-    if (core.v60.st == core.v60.S_EXEC && core.v60.cur_op == 8'h12 && ldpr_n < 16) begin
+    if (core.v60.st == 7'd10 && core.v60.cur_op == 8'h12 && ldpr_n < 16) begin
         ldpr_n = ldpr_n + 1;
         $display("[ldpr] pc=%08x op1=%08x op2=%08x", core.v60.dbg_pc, core.v60.op1, core.v60.op2);
     end
@@ -758,7 +761,7 @@ end
 // IRQ/exception entry detail: vector, base register, stack, fetched handler
 integer exc_log_n = 0;
 always @(posedge clk_sys) if (ce_cpu) begin
-    if (core.v60.st == core.v60.S_EXC_VEC && core.v60.bus_ack &&
+    if (core.v60.st == 7'd79 && core.v60.bus_ack &&
         (exc_log_n < 12 || core.v60.exc_vector < 8'h40)) begin
         exc_log_n = exc_log_n + 1;
         $display("[exc] vec=%02x sbr=%08x sp=%08x retpc=%08x handler=[%08x]=%08x cur_op=%02x",
@@ -918,7 +921,7 @@ end
 // fetch-buffer inspection at a trouble PC
 integer fbdbg_n = 0;
 always @(posedge clk_sys) if (ce_cpu) begin
-    if (core.v60.pc == 32'h100551 && core.v60.st == core.v60.S_DECODE && fbdbg_n < 4) begin
+    if (core.v60.pc == 32'h100551 && core.v60.st == 7'd3 && fbdbg_n < 4) begin
         fbdbg_n = fbdbg_n + 1;
         $display("[fbdbg] pc=%08x fb_base=%08x fb_valid=%0d fb=%02x %02x %02x %02x %02x %02x %02x %02x",
             core.v60.pc, core.v60.fb_base, core.v60.fb_valid,
@@ -935,14 +938,14 @@ always @(posedge clk_sys) if (ce_cpu) begin
             core.v60.ea_dim, core.v60.ea_want_addr);
     end
     if (core.v60.pc == 32'h100551 && fbdbg_n > 0 && fbdbg_n < 3) begin
-        if (core.v60.st == core.v60.S_EA_DONE)
+        if (core.v60.st == 7'd9)
             $display("[eadbg] EA_DONE tgt2=%b want=%b flag=%b ea_addr=%08x ea_out=%08x ea_len=%0d ret=%0d",
                 core.v60.ea_target2, core.v60.ea_want_addr, core.v60.ea_flag,
                 core.v60.ea_addr, core.v60.ea_out, core.v60.ea_len, core.v60.ea_ret);
-        if (core.v60.st == core.v60.S_EXEC)
+        if (core.v60.st == 7'd10)
             $display("[eadbg] EXEC op=%02x op1=%08x op2=%08x flag1=%b flag2=%b",
                 core.v60.cur_op, core.v60.op1, core.v60.op2, core.v60.flag1, core.v60.flag2);
-        if (core.v60.st == core.v60.S_WB_MEM)
+        if (core.v60.st == 7'd14)
             $display("[eadbg] WB_MEM addr(op2)=%08x data(alu_r)=%08x", core.v60.op2, core.v60.alu_r);
     end
 end

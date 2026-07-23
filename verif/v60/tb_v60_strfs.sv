@@ -69,7 +69,7 @@ task automatic run_case(input [7:0] opb, input [7:0] sub,
     cpu.len1 = 0; cpu.len2 = 0;
     cpu.fb[3] = l2[7:0];
     cpu.r[26] = {16'b0, r26};
-    cpu.bus_req = 1'b0; cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0; cpu.dbus_we = 1'b0;
     rst = 1'b0;
     wd = 0;
     while ((cpu.st !== cpu.S_NEXT) && (wd < 4000)) begin @(posedge clk); #1; wd = wd + 1; end

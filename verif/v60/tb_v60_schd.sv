@@ -88,7 +88,7 @@ begin
     cpu.str_len1 = l1;
     cpu.str_len2 = 32'd0;
     cpu.len1 = 0; cpu.len2 = 0;
-    cpu.bus_req = 1'b0; cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0; cpu.dbus_we = 1'b0;
     cpu.f_z = 1'bx;
     cpu.r[27] = 32'hdead_beef; cpu.r[28] = 32'hdead_beef;
     rst = 1'b0;

@@ -86,8 +86,8 @@ begin
     cpu.str_dst = {16'h0000, value};
     cpu.str_len1 = count;
     cpu.str_cnt = count;
-    cpu.bus_req = 1'b0;
-    cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0;
+    cpu.dbus_we = 1'b0;
     cpu.f_z = 1'b0;
     cpu.r[27] = 32'hdeadbeef;
     cpu.r[28] = 32'hdeadbeef;

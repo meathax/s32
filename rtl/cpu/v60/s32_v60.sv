@@ -29,18 +29,40 @@
 
 module s32_v60 #(
     parameter [31:0] START_PC = 32'hFFFFFFF0,   // V60/V70 reset PC (MAME m_start_pc; audit V60-21)
-    parameter        IS_V70   = 1'b0
+    parameter        IS_V70   = 1'b0,
+    // FAST_IFETCH=1: the prefetch uses the dedicated wide instruction port (if_*)
+    // served from the core's ROM icache (8 bytes/access, clk_sys latency),
+    // instead of the ce-gated 16-bit data adapter.  This is what makes the
+    // prefetch pay off on the production (gated-ce) build; the unit testbenches
+    // run ce=1 (adapter already fast) and leave it 0 so if_* can stay unconnected.
+    parameter        FAST_IFETCH = 1'b0
 )(
     input             clk,
     input             ce,            // 16.108 MHz (V60) / 20 MHz (V70) enable
     input             rst,
 
-    // logical bus (to s32_v60_bus adapter)
-    output reg        bus_req,
-    output reg        bus_we,
-    output reg [31:0] bus_addr,
-    output reg  [1:0] bus_size,      // 0=byte 1=half 2=word
-    output reg [31:0] bus_wdata,
+    // dedicated instruction-fetch port (used only when FAST_IFETCH=1): request an
+    // 8-byte line at if_addr; if_data/if_ack return it.  Left unconnected when
+    // FAST_IFETCH=0 (the internal reads are forced to 0 so no X propagates).
+    output reg        if_req,
+    output     [23:0] if_addr,       // frontier byte address; s32_core reads the
+                                     // containing 8-byte line and returns it already
+                                     // aligned so byte0 == the frontier byte (the
+                                     // >>foff shift lives there, off the CPU's tight
+                                     // execution clock domain -- timing-closure guard)
+    input      [63:0] if_data,
+    input             if_ack,
+
+    // logical bus (to s32_v60_bus adapter).  Externally one port; internally an
+    // arbiter multiplexes the CPU's DATA accesses (dbus_*, priority) and the
+    // instruction PREFETCH (pf_*) onto it.  Data path is unchanged: the 45 data
+    // sites drive dbus_* and observe `dack`, which is the bus ack gated to the
+    // data owner so a prefetch ack is never mistaken for a data completion.
+    output            bus_req,
+    output            bus_we,
+    output     [31:0] bus_addr,
+    output      [1:0] bus_size,      // 0=byte 1=half 2=word
+    output     [31:0] bus_wdata,
     input      [31:0] bus_rdata,
     input             bus_ack,
 
@@ -87,11 +109,65 @@ reg halted;
 assign dbg_halted = halted;
 
 // ---------------------------------------------------------------------------
+// Data/prefetch bus arbiter.  The CPU's DATA accesses drive dbus_* and observe
+// `dack`; the instruction prefetcher drives pf_* and observes `pf_ack`.  A
+// single owner is granted per transaction with DATA priority, held until the
+// adapter's ack, so a data request never starves and a prefetch ack is never
+// mistaken for a data completion.  The mux is combinational, so a data access
+// reaches the adapter with zero added latency (== the old direct drive).
+reg        dbus_req, dbus_we;
+reg [31:0] dbus_addr, dbus_wdata;
+reg  [1:0] dbus_size;
+reg        pf_req;               // instruction-prefetch bus request
+reg [31:0] pf_addr;
+localparam [1:0] OWN_NONE = 2'd0, OWN_D = 2'd1, OWN_PF = 2'd2;
+reg  [1:0] bus_owner;
+reg        bus_req_d;   // bus_req delayed one ce: gates a fresh grant so bus_req
+                        // always shows a 0->1 edge between transactions (the
+                        // adapter starts on that edge).  Without it a prefetch->
+                        // data owner switch keeps bus_req high and deadlocks.
+wire sel_d  = (bus_owner == OWN_D)  || (bus_owner == OWN_NONE && dbus_req && !bus_req_d);
+wire sel_pf = (bus_owner == OWN_PF) || (bus_owner == OWN_NONE && !dbus_req && pf_req && !bus_req_d);
+assign bus_req   = sel_d ? dbus_req   : (sel_pf ? pf_req : 1'b0);
+assign bus_we    = sel_d ? dbus_we    : 1'b0;      // prefetch is read-only
+assign bus_addr  = sel_d ? dbus_addr  : pf_addr;
+assign bus_size  = sel_d ? dbus_size  : 2'd2;      // prefetch is 32-bit
+assign bus_wdata = sel_d ? dbus_wdata : 32'd0;
+wire dack   = bus_ack && (bus_owner == OWN_D);
+wire pf_ack = bus_ack && (bus_owner == OWN_PF);
+
+// ---------------------------------------------------------------------------
+// Instruction Prefetch Unit (PFU).  The real µPD70616 has a 16-byte prefetch
+// queue the PFU loads "during idle bus periods", reducing fetch latency to zero
+// on a hit (Programmer's Ref Manual p.1-18; docs/v60-authenticity-from-manual.md).
+// We model it: a single 32-bit fetch in flight on pf_*, filling fb[] ahead of
+// the decode-visible fb_valid while the EXU executes.  A rebased or shifted
+// window discards a stale ack via an epoch tag; the data port keeps priority.
+// ---------------------------------------------------------------------------
+reg        pf_busy;           // 0 = idle, 1 = awaiting pf_ack (pf_addr drives the bus)
+reg  [3:0] pf_epoch;          // bumped on every window rebase/flush
+reg  [3:0] pf_iss_epoch;      // epoch captured when the in-flight fetch issued
+reg        pf_suppress;       // 1 while in an fb_prev-cached loop: skip lookahead
+localparam [4:0] PF_HIGH = 5'd20;   // lookahead fill target (bytes ahead of PC)
+// dedicated fast-fetch port: line address of the in-flight prefetch; ack/data
+// forced to 0 when FAST_IFETCH=0 so an unconnected if_* input cannot inject X.
+assign      if_addr   = pf_addr[23:0];   // full byte address; s32_core aligns by [2:0]
+wire        if_ack_i  = FAST_IFETCH ? if_ack  : 1'b0;
+wire [63:0] if_data_i = FAST_IFETCH ? if_data : 64'b0;
+wire        fetch_ack = FAST_IFETCH ? if_ack_i : pf_ack;  // ack from the active port
+
+// ---------------------------------------------------------------------------
 // fetch buffer: 16 bytes from PC, filled before each decode
 // ---------------------------------------------------------------------------
 reg [7:0]  fb[0:23];        // 24 bytes: worst-case instruction is 20 bytes
 reg [31:0] fb_base;          // PC the buffer window starts at
-reg [4:0]  fb_valid;         // valid byte count (0..24)
+reg [4:0]  fb_valid;         // valid byte count decode may read (0..24)
+// fb_wr: fetch/write frontier — the count of bytes already fetched into the
+// window (address of next byte to fetch = fb_base + fb_wr).  Decoupled from
+// fb_valid (the read limit) so a concurrent prefetcher can advance the fetch
+// frontier without disturbing what decode consumes (P1 scaffolding; today it
+// tracks fb_valid exactly, so behavior is bit-identical).
+reg [4:0]  fb_wr;
 reg [7:0]  fb_prev[0:23];   // previous sequential window for tight loops
 reg [31:0] fb_prev_base;
 reg [4:0]  fb_prev_valid;
@@ -580,15 +656,33 @@ reg nmi_r, nmi_seen;
 always @(posedge clk) begin
 if (rst) begin
     st <= S_RESET;
-    bus_req <= 0; bus_we <= 0; irq_ack <= 0;
-    bus_addr <= 0; bus_size <= 0; bus_wdata <= 0;
+    dbus_req <= 0; dbus_we <= 0; irq_ack <= 0;
+    dbus_addr <= 0; dbus_size <= 0; dbus_wdata <= 0;
     halted <= 0;
     dbg_pc <= START_PC;
     nmi_seen <= 0;
     nmi_r <= 0;
     xdiv_active <= 0;
+    bus_owner <= OWN_NONE;
+    bus_req_d <= 0;
+    pf_req <= 0;
+    if_req <= 0;
+    pf_busy <= 0;
+    pf_epoch <= 0;
+    pf_iss_epoch <= 0;
+    pf_suppress <= 0;
 end
 else if (ce) begin
+    // bus ownership: grant per-transaction, data priority, hold until ack.  A
+    // grant requires the bus to have been idle last cycle (!bus_req_d) so every
+    // transaction begins with a clean 0->1 edge on bus_req.
+    bus_req_d <= bus_req;
+    if (bus_owner == OWN_NONE && !bus_req_d) begin
+        if (dbus_req)    bus_owner <= OWN_D;
+        else if (pf_req) bus_owner <= OWN_PF;
+    end
+    else if (bus_ack) bus_owner <= OWN_NONE;
+
     rf_we0 = 1'b0;
     rf_we1 = 1'b0;
     rf_waddr0 = 5'd0;
@@ -621,6 +715,7 @@ else if (ce) begin
         halted <= 0;
         fb_base <= START_PC;
         fb_valid <= 0;
+        fb_wr <= 0;
         fb_prev_base <= START_PC;
         fb_prev_valid <= 0;
         fb_realigning <= 0;
@@ -641,7 +736,12 @@ else if (ce) begin
             logic [31:0] delta;
             delta = pc - fb_base;
             if (delta < {27'b0, fb_valid}) begin
-                // consume min(delta,4) bytes this cycle
+                // consume min(delta,4) bytes this cycle.  NOTE: kept at 4 bytes/cycle
+                // (not widened to 8) as a timing-closure guard -- the core clock closes
+                // at only ~0.054ns setup slack, and a wider (9:1 vs 5:1) realign mux on
+                // the fb[] register inputs risks eating that margin.  The extra realign
+                // tick on 5-8 byte instructions costs ~0.5 cyc/instr, well worth the
+                // combinational headroom.  Revisit only with a real STA report.
                 logic [2:0] s;
                 s = (delta >= 4) ? 3'd4 : delta[2:0];
                 if (!fb_realigning) begin
@@ -653,40 +753,47 @@ else if (ce) begin
                     if (i + s < 24) fb[i] <= fb[i + s];
                 fb_base  <= fb_base + {29'b0, s};
                 fb_valid <= fb_valid - {2'b0, s};
+                fb_wr    <= fb_wr - {2'b0, s};   // frontier shifts down with the window
                 fb_realigning <= (delta > 4);
             end
             else begin
                 fb_realigning <= 0;
+                // window rebased (branch out of window / loop-cache restore):
+                // void any prefetch already in flight for the old window.
+                pf_epoch <= pf_epoch + 4'd1;
                 if (fb_prev_valid != 0 && pc == fb_prev_base) begin
                     for (int i = 0; i < 24; i++) fb[i] <= fb_prev[i];
                     fb_valid <= fb_prev_valid;
+                    fb_wr    <= fb_prev_valid;   // restored window: frontier = restored count
                     fb_base  <= fb_prev_base;
+                    pf_suppress <= 1'b1;         // loop-cache hit: let the cache serve it
                 end
                 else begin
                     fb_valid <= 0;
+                    fb_wr    <= 0;
                     fb_base  <= pc;
                     fb_prev_valid <= 0;
+                    pf_suppress <= 1'b0;         // real branch out: resume lookahead
                 end
             end
         end
-        else if (fb_valid >= fb_need) begin
-            fb_realigning <= 0;
-            st <= st_after_fill;
-        end
         else begin
-            bus_req  <= 1'b1;
-            bus_we   <= 1'b0;
-            bus_size <= 2'd2;
-            bus_addr <= pc + {27'b0, fb_valid};
-            st <= S_FILLW;
+            // window aligned (fb_base==pc): dispatch once the PFU has fetched
+            // enough bytes, else wait here while the prefetch fills the window.
+            fb_realigning <= 0;
+            if (fb_valid >= fb_need)
+                st <= st_after_fill;
         end
     end
-    S_FILLW: if (bus_ack) begin
-        bus_req <= 0;
+    // S_FILLW is retained for the enum but no longer reached: instruction fetch
+    // is performed asynchronously by the PFU (see the prefetch block below).
+    S_FILLW: if (dack) begin
+        dbus_req <= 0;
         for (int i = 0; i < 24; i++)
-            if (i >= fb_valid && i < fb_valid + 4)
-                fb[i] <= bus_rdata[(i - fb_valid)*8 +: 8];
-        fb_valid <= (fb_valid > 5'd20) ? 5'd24 : fb_valid + 5'd4;
+            if (i >= fb_wr && i < fb_wr + 4)
+                fb[i] <= bus_rdata[(i - fb_wr)*8 +: 8];
+        fb_valid <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
+        fb_wr    <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
         st <= S_FILL;
     end
 
@@ -780,9 +887,9 @@ else if (ce) begin
         8'h48: begin
             logic [15:0] bd16;
             bd16 = fb16(1);
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= pc + 3;
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= pc + 3;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             wb_val <= pc + {{16{bd16[15]}}, bd16};
             st <= S_JSR1;
@@ -1054,11 +1161,11 @@ else if (ce) begin
         8'h49: begin instflags <= fb[1]; cls <= C_F12; st <= S_IF2; end // CALL
         8'hcc: begin // DISPOSE: SP = FP (R30), pop FP
             queue_reg_write(5'd31, r[30], 32'hffff_ffff);
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[30];
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[30];
             st <= S_DISP1;
         end
         8'hca: begin // RSR (A9): pop PC ONLY (MAME opRSR: PC=[SP]; SP+=4)
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[31];
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[31];
             st <= S_RSR;
         end
         8'hcb: begin // TRAPFL
@@ -1183,8 +1290,8 @@ else if (ce) begin
             end
             3'd4, 3'd5, 3'd6: begin // Displacement Indirect (deferred)
                 d1t = disp_of(ea_ofs+1, modtop - 3'd4);
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= rf_rdata_a + d1t;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_a + d1t;
                 ea_len  <= 5'd1 + disp_len(modtop - 3'd4);
                 st <= S_EA_IND;
             end
@@ -1223,23 +1330,23 @@ else if (ce) begin
                 end
                 5'h18, 5'h19, 5'h1a: begin // PC displacement indirect
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
-                    bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                    bus_addr <= pc + d1t;
+                    dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                    dbus_addr <= pc + d1t;
                     ea_len  <= 5'd1 + disp_len(modreg[1:0]);
                     st <= S_EA_IND;
                 end
                 5'h1b: begin        // direct address deferred
                     d1t = fb32(ea_ofs+1);
-                    bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                    bus_addr <= d1t;
+                    dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                    dbus_addr <= d1t;
                     ea_len  <= 5'd5;
                     st <= S_EA_IND;
                 end
                 5'h1c, 5'h1d, 5'h1e: begin // PC double displacement
                     d1t = disp_of(ea_ofs+1, modreg[1:0]);
                     d2t = disp_of(ea_ofs+1+disp_len(modreg[1:0]), modreg[1:0]);
-                    bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                    bus_addr <= pc + d1t;
+                    dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                    dbus_addr <= pc + d1t;
                     ea_addr <= d2t;      // second disp follows first
                     ea_len  <= 5'd1 + {disp_len(modreg[1:0]), 1'b0}; // 1 + 2*len
                     st <= S_EA_IND2;
@@ -1256,8 +1363,8 @@ else if (ce) begin
             3'd0, 3'd1, 3'd2: begin // Double displacement: [[reg+d1]+d2]
                 d1t = disp_of(ea_ofs+1, modtop[1:0]);
                 d2t = disp_of(ea_ofs+1+disp_len(modtop[1:0]), modtop[1:0]);
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= rf_rdata_a + d1t;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_a + d1t;
                 ea_addr  <= d2t;
                 ea_len   <= 5'd1 + {disp_len(modtop[1:0]), 1'b0};
                 st <= S_EA_IND2;
@@ -1298,8 +1405,8 @@ else if (ce) begin
                 end
                 3'd4, 3'd5, 3'd6: begin // Displacement indirect indexed
                     d1t = disp_of(ea_ofs+2, modval2[6:5]);
-                    bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                    bus_addr <= rf_rdata_b + d1t;
+                    dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                    dbus_addr <= rf_rdata_b + d1t;
                     ea_addr <= (rf_rdata_a << ea_dim);  // index added after deref
                     ea_len  <= 5'd2 + disp_len(modval2[6:5]);
                     st <= S_EA_IND2;
@@ -1323,16 +1430,16 @@ else if (ce) begin
                     end
                     4'h8, 4'h9, 4'ha: begin
                         d1t = disp_of(ea_ofs+2, modval2[1:0]);
-                        bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                        bus_addr <= pc + d1t;
+                        dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                        dbus_addr <= pc + d1t;
                         ea_addr <= (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd2 + disp_len(modval2[1:0]);
                         st <= S_EA_IND2;
                     end
                     4'hb: begin
                         d1t = fb32(ea_ofs+2);
-                        bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                        bus_addr <= d1t;
+                        dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                        dbus_addr <= d1t;
                         ea_addr <= (rf_rdata_a << ea_dim);
                         ea_len  <= 5'd6;
                         st <= S_EA_IND2;
@@ -1352,26 +1459,26 @@ else if (ce) begin
     end
 
     // deferred pointer fetched -> address is pointer (+0)
-    S_EA_IND: if (bus_ack) begin
-        bus_req <= 0;
+    S_EA_IND: if (dack) begin
+        dbus_req <= 0;
         ea_addr <= bus_rdata;
         st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
     end
     // deferred pointer fetched -> address = pointer + saved offset (double disp / indexed deferred)
-    S_EA_IND2: if (bus_ack) begin
-        bus_req <= 0;
+    S_EA_IND2: if (dack) begin
+        dbus_req <= 0;
         ea_addr <= bus_rdata + ea_addr;
         st <= ea_want_addr ? S_EA_DONE : S_EA_VAL;
     end
     // load value at ea_addr
     S_EA_VAL: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0;
-            bus_size <= ea_dim;
-            bus_addr <= ea_addr;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0;
+            dbus_size <= ea_dim;
+            dbus_addr <= ea_addr;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             ea_out <= dimext(bus_rdata, ea_dim);
             st <= S_EA_DONE;
         end
@@ -1425,13 +1532,13 @@ else if (ce) begin
         end
     end
     S_OP2_LD: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0;
-            bus_size <= f12_dim2(cur_op);
-            bus_addr <= op2;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0;
+            dbus_size <= f12_dim2(cur_op);
+            dbus_addr <= op2;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             op2val   <= dimext(bus_rdata, f12_dim2(cur_op));
             op2val_v <= 1'b1;
             st <= S_EXEC;
@@ -1521,11 +1628,11 @@ else if (ce) begin
 
     // generic memory RMW: read op2 -> modify per rmw_kind -> write back
     S_RMW_RD: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= rmw_dim; bus_addr <= op2;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= rmw_dim; dbus_addr <= op2;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             alu_r <= bus_rdata;
             st <= S_RMW_EX;
         end
@@ -1563,25 +1670,25 @@ else if (ce) begin
 
     // XCH reg<->mem: read mem, write reg value to mem, mem value to reg
     S_XCH1: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= rmw_dim; bus_addr <= xch_addr;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= rmw_dim; dbus_addr <= xch_addr;
         end
-        else if (bus_ack) begin
+        else if (dack) begin
             // drop the request for one cycle — the bus adapter starts a new
             // transaction on a c_req RISING EDGE; re-asserting back-to-back
             // deadlocked ga2's XCH.W lock idiom (found by real-ROM boot)
-            bus_req <= 0;
+            dbus_req <= 0;
             setreg(wb_val[4:0], bus_rdata, rmw_dim);   // mem -> reg
             st <= S_XCH2;
         end
     end
     S_XCH2: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= rmw_dim;
-            bus_addr <= xch_addr; bus_wdata <= alu_r;  // reg -> mem
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= rmw_dim;
+            dbus_addr <= xch_addr; dbus_wdata <= alu_r;  // reg -> mem
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_NEXT;
         end
     end
@@ -1590,11 +1697,11 @@ else if (ce) begin
     // op2val), set up the restoring divide, and mark the result for memory
     // writeback (audit V60-9).
     S_DIVXM_RH: begin
-        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op2 + 32'd4; end
-        else if (bus_ack) begin
+        if (!dbus_req) begin dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= op2 + 32'd4; end
+        else if (dack) begin
             logic [63:0] num, mag_num;
             logic [31:0] mag_den;
-            bus_req <= 0;
+            dbus_req <= 0;
             num = {bus_rdata, op2val};   // {high, low}
             if (cur_op == 8'ha6) begin   // DIVX (signed)
                 mag_num = num[63] ? (~num + 1'b1) : num;
@@ -1622,13 +1729,13 @@ else if (ce) begin
     // write the destination qword low/high.  Register ends are handled directly
     // in the exec; only memory ends use these states.
     S_MOVD_RL: begin
-        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op1; end
-        else if (bus_ack) begin bus_req <= 0; movd_lo <= bus_rdata; st <= S_MOVD_RH; end
+        if (!dbus_req) begin dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= op1; end
+        else if (dack) begin dbus_req <= 0; movd_lo <= bus_rdata; st <= S_MOVD_RH; end
     end
     S_MOVD_RH: begin
-        if (!bus_req) begin bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op1 + 32'd4; end
-        else if (bus_ack) begin
-            bus_req <= 0; movd_hi <= bus_rdata;
+        if (!dbus_req) begin dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= op1 + 32'd4; end
+        else if (dack) begin
+            dbus_req <= 0; movd_hi <= bus_rdata;
             if (flag2) begin
                 queue_reg_write(op2[4:0],        movd_lo,    32'hffffffff);
                 queue_reg_write(op2[4:0] + 5'd1, bus_rdata,  32'hffffffff);
@@ -1638,24 +1745,24 @@ else if (ce) begin
         end
     end
     S_MOVD_WL: begin
-        if (!bus_req) begin bus_req <= 1; bus_we <= 1; bus_size <= 2'd2; bus_addr <= op2; bus_wdata <= movd_lo; end
-        else if (bus_ack) begin bus_req <= 0; bus_we <= 0; st <= S_MOVD_WH; end
+        if (!dbus_req) begin dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2; dbus_addr <= op2; dbus_wdata <= movd_lo; end
+        else if (dack) begin dbus_req <= 0; dbus_we <= 0; st <= S_MOVD_WH; end
     end
     S_MOVD_WH: begin
-        if (!bus_req) begin bus_req <= 1; bus_we <= 1; bus_size <= 2'd2; bus_addr <= op2 + 32'd4; bus_wdata <= movd_hi; end
-        else if (bus_ack) begin bus_req <= 0; bus_we <= 0; st <= S_NEXT; end
+        if (!dbus_req) begin dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2; dbus_addr <= op2 + 32'd4; dbus_wdata <= movd_hi; end
+        else if (dack) begin dbus_req <= 0; dbus_we <= 0; st <= S_NEXT; end
     end
 
     // memory writeback of wb_val to op2 address (dim = f12_dim2)
     S_WB_MEM: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1;
-            bus_size <= (rmw_kind != 3'd7) ? rmw_dim : f12_dim2(cur_op);
-            bus_addr <= op2;
-            bus_wdata <= wb_val;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1;
+            dbus_size <= (rmw_kind != 3'd7) ? rmw_dim : f12_dim2(cur_op);
+            dbus_addr <= op2;
+            dbus_wdata <= wb_val;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_NEXT;
         end
     end
@@ -1668,48 +1775,48 @@ else if (ce) begin
 
     // ------------------------------------------------------------------
     // JSR/BSR: return pushed, jump
-    S_JSR1: if (bus_ack) begin
-        bus_req <= 0; bus_we <= 0;
+    S_JSR1: if (dack) begin
+        dbus_req <= 0; dbus_we <= 0;
         pc <= wb_val;
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
 
     // CALL (A6): AP push completes here, then push return PC and jump.
     S_CALL1: begin
-        if (bus_ack) begin               // AP push done
+        if (dack) begin               // AP push done
             // one-cycle request gap: the adapter needs a c_req rising edge
-            bus_req <= 0; bus_we <= 0;
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_CALL1b;
         end
     end
     S_CALL1b: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= wb_val;          // return PC
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= wb_val;          // return PC
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         end
-        else if (bus_ack) begin           // return-PC push done
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin           // return-PC push done
+            dbus_req <= 0; dbus_we <= 0;
             pc <= alu_r;                  // target
             st <= S_FILL; st_after_fill <= S_DECODE;
         end
     end
 
     // RET (A5): pop PC, then restore AP (R30), then skip frame (SP += operand)
-    S_RET1: if (bus_ack) begin
-        bus_req <= 0;
+    S_RET1: if (dack) begin
+        dbus_req <= 0;
         pc <= bus_rdata;
         queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         st <= S_RET2;
     end
     S_RET2: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= r[31];
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= r[31];
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             queue_reg_write(5'd29, bus_rdata, 32'hffff_ffff); // AP (R29)
             queue_reg_write(5'd31, r[31] + 4 + wb_val, 32'hffff_ffff);
             st <= S_FILL; st_after_fill <= S_DECODE;
@@ -1717,18 +1824,18 @@ else if (ce) begin
     end
 
     // RETIU/RETIS/RSR: pop PC then PSW
-    S_RETI1: if (bus_ack) begin
-        bus_req <= 0;
+    S_RETI1: if (dack) begin
+        dbus_req <= 0;
         wb_val <= bus_rdata;   // new PC
         st <= S_RETI2;
     end
     S_RETI2: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= r[31] + 4;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= r[31] + 4;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             st <= S_RETI3;
             alu_r <= bus_rdata;  // new PSW
         end
@@ -1743,8 +1850,8 @@ else if (ce) begin
     end
 
     // DISPOSE: FP fetched
-    S_DISP1: if (bus_ack) begin
-        bus_req <= 0;
+    S_DISP1: if (dack) begin
+        dbus_req <= 0;
         queue_reg_write(5'd30, bus_rdata, 32'hffff_ffff); // FP = R30
         queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         pc <= pc + 1;
@@ -1752,8 +1859,8 @@ else if (ce) begin
     end
 
     // RSR (A9): pop PC only, SP += 4
-    S_RSR: if (bus_ack) begin
-        bus_req <= 0;
+    S_RSR: if (dack) begin
+        dbus_req <= 0;
         pc <= bus_rdata;
         queue_reg_write(5'd31, r[31] + 4, 32'hffff_ffff);
         st <= S_FILL; st_after_fill <= S_DECODE;
@@ -1765,37 +1872,37 @@ else if (ce) begin
             // done check handled in loop below
         end
         if (op1 == 0) st <= S_NEXT;
-        else if (!bus_req) begin
+        else if (!dbus_req) begin
             // push highest set register first (MAME pushes from r31 down? actual: PUSHM pushes ascending list to stack)
             // idx = lowest set bit; push in increasing register order
             logic [4:0] idx;
             idx = pushm_index(op1);
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
             // Mask bit 31 pushes PSW, not r31 (audit R20 V60-11): the old code
             // pushed the SP value there and PSW save/restore was lost.
-            bus_wdata <= (idx == 5'd31) ? psw : rf_rdata_a;
+            dbus_wdata <= (idx == 5'd31) ? psw : rf_rdata_a;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             reg_ptr <= idx;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             op1[reg_ptr] <= 1'b0;
         end
     end
     S_POPM: begin
         if (op1 == 0) st <= S_NEXT;
-        else if (!bus_req) begin
+        else if (!dbus_req) begin
             logic [4:0] idx;
             idx = 5'd0;
             for (int i = 31; i >= 0; i--) if (op1[i]) idx = i[4:0];
             // pop lowest-numbered... (POPM restores in reverse of PUSHM)
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= r[31];
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= r[31];
             reg_ptr <= idx;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             // Mask bit 31 pops into the PSW low half, not r31 (audit R20 V60-11);
             // the high half (incl. IS/EL) is preserved, so no stack switch and no
             // conflict with the SP increment below.
@@ -1810,15 +1917,15 @@ else if (ce) begin
 
     // TASI: read byte at addr, set flags, write 0xFF
     S_TASI1: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd0; bus_addr <= op1;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd0; dbus_addr <= op1;
         end
-        else if (bus_ack) begin
+        else if (dack) begin
             // TASI sets flags as SUBB(old, 0xFF, 0) before writing 0xFF (MAME
             // opTASI).  The old code had Z=(old!=0), inverted CY, S from `old`
             // instead of old+1, and never set OV (audit R20 V60-12).
             logic [7:0] old, res8;
-            bus_req <= 0;
+            dbus_req <= 0;
             old  = bus_rdata[7:0];
             res8 = old - 8'hff;               // == old + 1
             f_z  <= (res8 == 8'h00);          // old == 0xFF
@@ -1829,19 +1936,19 @@ else if (ce) begin
         end
     end
     S_TASI2: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd0;
-            bus_addr <= op1; bus_wdata <= 32'hff;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd0;
+            dbus_addr <= op1; dbus_wdata <= 32'hff;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_NEXT;
         end
     end
 
     // PREPARE: push FP, FP=SP, SP-=imm
-    S_PREP1: if (bus_ack) begin
-        bus_req <= 0; bus_we <= 0;
+    S_PREP1: if (dack) begin
+        dbus_req <= 0; dbus_we <= 0;
         queue_reg_write(5'd30, r[31] - 4, 32'hffff_ffff); // FP = R30
         queue_reg_write(5'd31, r[31] - 4 - op1, 32'hffff_ffff);
         st <= S_NEXT;
@@ -1978,13 +2085,13 @@ else if (ce) begin
             end
             else movc_finish(32'd0);   // zero-length MOVC/MOVCF tail registers
         end
-        else if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0;
-            bus_size <= cur_op[1] ? 2'd1 : 2'd0;  // 0x58=byte, 0x5a=half
-            bus_addr <= str_src;
+        else if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0;
+            dbus_size <= cur_op[1] ? 2'd1 : 2'd0;  // 0x58=byte, 0x5a=half
+            dbus_addr <= str_src;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             alu_r <= bus_rdata;
             case (subop[4:0])
             5'h08, 5'h09, 5'h0a, 5'h0b, 5'h0c: st <= S_STR_WR; // MOVC*
@@ -2016,23 +2123,23 @@ else if (ce) begin
         end
     end
     S_STR_WR: begin
-        if (!bus_req) begin
+        if (!dbus_req) begin
             case (subop[4:0])
             5'h00, 5'h01, 5'h02: begin // CMPC second read (dest element)
-                bus_req <= 1; bus_we <= 0;
-                bus_size <= cur_op[1] ? 2'd1 : 2'd0;
-                bus_addr <= str_dst;
+                dbus_req <= 1; dbus_we <= 0;
+                dbus_size <= cur_op[1] ? 2'd1 : 2'd0;
+                dbus_addr <= str_dst;
             end
             default: begin             // MOVC write
-                bus_req <= 1; bus_we <= 1;
-                bus_size <= cur_op[1] ? 2'd1 : 2'd0;
-                bus_addr <= str_dst;
-                bus_wdata <= alu_r;
+                dbus_req <= 1; dbus_we <= 1;
+                dbus_size <= cur_op[1] ? 2'd1 : 2'd0;
+                dbus_addr <= str_dst;
+                dbus_wdata <= alu_r;
             end
             endcase
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             if (subop[4:0] <= 5'h02) begin
                 // CMPC (MAME opCMPSTR): compare source(op1) vs dest(op2).  On the
                 // first difference S = (source > dest); R28/R27 hold len+index*step
@@ -2092,14 +2199,14 @@ else if (ce) begin
             end
             else st <= S_STR_RD;                     // CMPCF: run the compare now
         end
-        else if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1;
-            bus_size <= cur_op[1] ? 2'd1 : 2'd0;
-            bus_addr <= str_faddr;
-            bus_wdata <= r[26];
+        else if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1;
+            dbus_size <= cur_op[1] ? 2'd1 : 2'd0;
+            dbus_addr <= str_faddr;
+            dbus_wdata <= r[26];
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             str_faddr <= str_faddr + str_fdelta;
             str_fi    <= str_fi - 32'd1;
             st <= S_STR_FILL;
@@ -2133,11 +2240,11 @@ else if (ce) begin
         else st <= S_DEC_EX;                       // CVTD*: write-only dest
     end
     S_DEC_RD: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd0; bus_addr <= op2;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd0; dbus_addr <= op2;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             dec_cur <= bus_rdata[7:0];
             st <= S_DEC_EX;
         end
@@ -2208,14 +2315,14 @@ else if (ce) begin
         endcase
     end
     S_DEC_WR: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1;
-            bus_size <= (subop[4:0] == 5'h10) ? 2'd1 : 2'd0;
-            bus_addr <= op2;
-            bus_wdata <= {16'b0, dec_res};
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1;
+            dbus_size <= (subop[4:0] == 5'h10) ? 2'd1 : 2'd0;
+            dbus_addr <= op2;
+            dbus_wdata <= {16'b0, dec_res};
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_NEXT;
         end
     end
@@ -2243,11 +2350,11 @@ else if (ce) begin
         end
         else if (fp_op2_rmw(cur_op, subop[4:0])) begin   // NEG/ABS/SCLF/ADD/SUB/MUL/DIV
             if (flag2) begin fp_b <= rf_rdata_b; st <= S_FP_EXEC; end
-            else if (!bus_req) begin
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= op2;
+            else if (!dbus_req) begin
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= op2;
             end
-            else if (bus_ack) begin
-                bus_req <= 0; fp_b <= bus_rdata; st <= S_FP_EXEC;
+            else if (dack) begin
+                dbus_req <= 0; fp_b <= bus_rdata; st <= S_FP_EXEC;
             end
         end
         else st <= S_FP_EXEC;                            // MOVFS/CVTWS/CVTSW: write-only
@@ -2281,12 +2388,12 @@ else if (ce) begin
             queue_reg_write(op2[4:0], fp_res, 32'hffff_ffff);
             st <= S_NEXT;
         end
-        else if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= op2; bus_wdata <= fp_res;
+        else if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= op2; dbus_wdata <= fp_res;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0; st <= S_NEXT;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0; st <= S_NEXT;
         end
     end
 
@@ -2314,8 +2421,8 @@ else if (ce) begin
             3'd4, 3'd5, 3'd6: begin // [reg + disp] deref -> base, off 0
                 logic [31:0] bdt;
                 bdt = disp_of(ea_ofs+1, modtop - 3'd4);
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= rf_rdata_a + bdt;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_a + bdt;
                 bam_off <= 32'd0;
                 bam_fill_len(5'd1 + disp_len(modtop - 3'd4));
                 st <= S_BAM_IND;
@@ -2333,8 +2440,8 @@ else if (ce) begin
                 5'h17: begin        // direct address deferred
                     logic [31:0] bdt;
                     bdt = fb32(ea_ofs+1);
-                    bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                    bus_addr <= bdt;
+                    dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                    dbus_addr <= bdt;
                     bam_off <= 32'd0;
                     bam_fill_len(5'd5);
                     st <= S_BAM_IND;
@@ -2352,8 +2459,8 @@ else if (ce) begin
                 logic [31:0] bdt, bdt2;
                 bdt  = disp_of(ea_ofs+1, modtop[1:0]);
                 bdt2 = disp_of(ea_ofs+1+disp_len(modtop[1:0]), modtop[1:0]);
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= rf_rdata_a + bdt;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= rf_rdata_a + bdt;
                 bam_off  <= bdt2;
                 bam_fill_len(5'd1 + {disp_len(modtop[1:0]), 1'b0});
                 st <= S_BAM_IND;
@@ -2397,19 +2504,19 @@ else if (ce) begin
             endcase
         end
     end
-    S_BAM_IND: if (bus_ack) begin
-        bus_req <= 0;
+    S_BAM_IND: if (dack) begin
+        dbus_req <= 0;
         bam_base <= bus_rdata;
         st <= bam_next();
     end
     // bit-field VALUE form (BAM1): dword at base + off/8, fold off to &7
     S_BAM_VAL: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= bam_base + bitdiv8(bam_off);
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= bam_base + bitdiv8(bam_off);
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             bit_val <= bus_rdata;
             bam_off <= {29'b0, bam_off[2:0]};
             st <= S_BF_EXT1;
@@ -2447,12 +2554,12 @@ else if (ce) begin
             total_len <= 5'd3 + len1 + len2;
             st <= S_NEXT;
         end
-        else if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= op2; bus_wdata <= res;
+        else if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= op2; dbus_wdata <= res;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             total_len <= 5'd3 + len1 + len2;
             st <= S_NEXT;
         end
@@ -2477,12 +2584,12 @@ else if (ce) begin
         st <= S_BF_INSRD;
     end
     S_BF_INSRD: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= str_dst;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= str_dst;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             bit_val <= bus_rdata;
             st <= S_BF_INSWR;
         end
@@ -2493,12 +2600,12 @@ else if (ce) begin
         v = subop[0] ? (op1 >> (6'd32 - {1'b0, bit_len[4:0]})) : op1;  // L pre-shifts
         neww = (bit_val & ~(mask << bam_off[2:0]))
              | ((v & mask) << bam_off[2:0]);
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= str_dst; bus_wdata <= neww;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= str_dst; dbus_wdata <= neww;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             st <= S_NEXT;
         end
     end
@@ -2522,12 +2629,12 @@ else if (ce) begin
         else st <= S_BS_SCHRD;
     end
     S_BS_SCHRD: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd0;
-            bus_addr <= str_src;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd0;
+            dbus_addr <= str_src;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             bs_sdata <= bus_rdata[7:0];
             st <= S_BS_SCHB;
         end
@@ -2603,12 +2710,12 @@ else if (ce) begin
             bs_soff <= subop[0] ? 3'd7 : 3'd0;
             bs_adv_done <= 1'b1;
         end
-        else if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd0;
-            bus_addr <= str_src;
+        else if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd0;
+            dbus_addr <= str_src;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             bs_sdata <= bus_rdata[7:0];
             bs_adv_done <= 1'b0;
             if (bs_ph == 2'd2) begin bs_ph <= 2'd0; st <= S_BS_MOVB; end
@@ -2617,12 +2724,12 @@ else if (ce) begin
     end
     S_BS_MOVD: begin
         // load destination byte (RMW base)
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd0;
-            bus_addr <= str_dst;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd0;
+            dbus_addr <= str_dst;
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             bs_ddata <= bus_rdata[7:0];
             st <= S_BS_MOVB;
         end
@@ -2656,13 +2763,13 @@ else if (ce) begin
         // wrapped, S_BS_MOVF writes and (bit_len==1) ends without reload
     end
     S_BS_MOVF: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd0;
-            bus_addr <= str_dst;
-            bus_wdata <= {24'b0, bs_ddata};
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd0;
+            dbus_addr <= str_dst;
+            dbus_wdata <= {24'b0, bs_ddata};
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             if (bit_len == 0) st <= S_NEXT;          // string done
             else begin
                 // advance dst to the next byte and reload it (src too when
@@ -2705,14 +2812,14 @@ else if (ce) begin
     // are enabled L0SP..L3SP fields, and phases 5..35 are R0..R30.
     S_TASK_LD_NEXT: begin
         if (task_phase == 0) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= task_addr;
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= task_addr;
             st <= S_TASK_LD_ACK;
         end
         else if (task_phase <= 4) begin
             if (sycw[7 + task_phase]) begin
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= task_addr;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= task_addr;
                 st <= S_TASK_LD_ACK;
             end
             else task_phase <= task_phase + 1'd1;
@@ -2724,16 +2831,16 @@ else if (ce) begin
         end
         else if (task_phase <= 35) begin
             if (task_mask[task_phase - 5]) begin
-                bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-                bus_addr <= task_addr;
+                dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+                dbus_addr <= task_addr;
                 st <= S_TASK_LD_ACK;
             end
             else task_phase <= task_phase + 1'd1;
         end
         else st <= S_NEXT;
     end
-    S_TASK_LD_ACK: if (bus_ack) begin
-        bus_req <= 0;
+    S_TASK_LD_ACK: if (dack) begin
+        dbus_req <= 0;
         case (task_phase)
             0: tkcw <= bus_rdata;
             1: l0sp <= bus_rdata;
@@ -2752,17 +2859,17 @@ else if (ce) begin
             // v60SaveStack() after setting IS: r31 now names the interrupt
             // stack selected by write_psw() in the execute cycle.
             isp <= r[31];
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= task_addr; bus_wdata <= tkcw;
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= task_addr; dbus_wdata <= tkcw;
             st <= S_TASK_ST_ACK;
         end
         else if (task_phase <= 4) begin
             if (sycw[7 + task_phase]) begin
-                bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-                bus_addr <= task_addr;
+                dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+                dbus_addr <= task_addr;
                 case (task_phase)
-                    1: bus_wdata <= l0sp; 2: bus_wdata <= l1sp;
-                    3: bus_wdata <= l2sp; default: bus_wdata <= l3sp;
+                    1: dbus_wdata <= l0sp; 2: dbus_wdata <= l1sp;
+                    3: dbus_wdata <= l2sp; default: dbus_wdata <= l3sp;
                 endcase
                 st <= S_TASK_ST_ACK;
             end
@@ -2770,16 +2877,16 @@ else if (ce) begin
         end
         else if (task_phase <= 35) begin
             if (task_mask[task_phase - 5]) begin
-                bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-                bus_addr <= task_addr; bus_wdata <= rf_rdata_a;
+                dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+                dbus_addr <= task_addr; dbus_wdata <= rf_rdata_a;
                 st <= S_TASK_ST_ACK;
             end
             else task_phase <= task_phase + 1'd1;
         end
         else st <= S_NEXT;
     end
-    S_TASK_ST_ACK: if (bus_ack) begin
-        bus_req <= 0; bus_we <= 0;
+    S_TASK_ST_ACK: if (dack) begin
+        dbus_req <= 0; dbus_we <= 0;
         task_addr <= task_addr + 4;
         task_phase <= task_phase + 1'd1;
         st <= S_TASK_ST_NEXT;
@@ -2804,72 +2911,72 @@ else if (ce) begin
                             : exc_has_code ? S_EXC_CODE : S_EXC_PUSH2;
     end
     S_EXC_EXTRA: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= exc_extra;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= exc_extra;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_CODE;
         end
     end
     S_EXC_CODE: begin         // push code+size word (trap-class only)
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= exc_code;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= exc_code;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_PUSH2;
         end
     end
     S_EXC_PUSH2: begin        // push old PSW
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= exc_pushval;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= exc_pushval;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_JMP;   // reused as "push PC" state
         end
     end
     S_EXC_JMP: begin          // push return PC (A2: PC+len for TRAP)
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-            bus_addr <= r[31] - 4;
-            bus_wdata <= exc_retpc;
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+            dbus_addr <= r[31] - 4;
+            dbus_wdata <= exc_retpc;
         end
-        else if (bus_ack) begin
-            bus_req <= 0; bus_we <= 0;
+        else if (dack) begin
+            dbus_req <= 0; dbus_we <= 0;
             queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
             st <= S_EXC_VEC;
         end
     end
     S_EXC_VEC: begin
-        if (!bus_req) begin
-            bus_req <= 1; bus_we <= 0; bus_size <= 2'd2;
-            bus_addr <= (sbr & ~32'hfff) + {22'b0, exc_vector, 2'b00};
+        if (!dbus_req) begin
+            dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
+            dbus_addr <= (sbr & ~32'hfff) + {22'b0, exc_vector, 2'b00};
         end
-        else if (bus_ack) begin
-            bus_req <= 0;
+        else if (dack) begin
+            dbus_req <= 0;
             pc <= bus_rdata;
             st <= S_FILL; st_after_fill <= S_DECODE;
         end
     end
 
     // PUSH/POP bus completion
-    S_PUSH: if (bus_ack) begin
-        bus_req <= 0; bus_we <= 0;
+    S_PUSH: if (dack) begin
+        dbus_req <= 0; dbus_we <= 0;
         st <= S_NEXT;
     end
-    S_POP: if (bus_ack) begin
-        bus_req <= 0;
+    S_POP: if (dack) begin
+        dbus_req <= 0;
         if (flag1) begin
             queue_reg_write(op1[4:0], bus_rdata, 32'hffff_ffff);
             st <= S_NEXT;
@@ -2900,22 +3007,87 @@ else if (ce) begin
     default: st <= S_RESET;
     endcase
 
+    // ---- Instruction Prefetch Unit (PFU) ------------------------------------
+    // Concurrent with the main FSM: keep the fetch window full by issuing 32-bit
+    // reads on the pf_* port (data has bus priority) while the window is aligned
+    // and has room.  A single fetch is in flight at a time.  On ack the four
+    // bytes are appended above the frontier fb_wr, UNLESS the window was rebased
+    // meanwhile (epoch mismatch), the frontier address moved (branch), or the
+    // main FSM is shifting/rebasing the window this very cycle (S_FILL realign) --
+    // in those cases the bytes are discarded and the frontier is simply refetched.
+    if (!pf_busy) begin
+        // Issue while the window is aligned and either the current instruction
+        // still lacks bytes (fb_wr < fb_need -- correctness, never starves) or we
+        // want lookahead up to PF_HIGH.  Lookahead is skipped inside an
+        // fb_prev-cached loop (pf_suppress): the loop cache already serves those
+        // bytes with zero bus traffic, so prefetching them just thrashes SDRAM.
+        // fb_wr<=20 keeps the append within the 24-byte window.
+        if (fb_base == pc && !fb_realigning && fb_wr <= 5'd20
+            && (fb_wr < fb_need || (fb_wr < PF_HIGH && !pf_suppress))) begin
+            pf_addr      <= fb_base + {27'b0, fb_wr};
+            pf_iss_epoch <= pf_epoch;
+            pf_busy      <= 1'b1;
+            if (FAST_IFETCH) if_req <= 1'b1;   // wide 8-byte icache line via if_addr
+            else             pf_req <= 1'b1;    // 32-bit read via the shared adapter
+        end
+    end
+    else if (fetch_ack) begin
+        pf_req  <= 1'b0;
+        if_req  <= 1'b0;
+        pf_busy <= 1'b0;
+        if (pf_iss_epoch == pf_epoch
+            && pf_addr == fb_base + {27'b0, fb_wr}
+            && !(st == S_FILL && fb_base != pc)) begin
+            if (FAST_IFETCH) begin
+                // append the 8-byte line from the frontier offset to the line end
+                // (1..8 bytes).  s32_core has ALREADY aligned if_data so byte 0 is
+                // the frontier byte (the >>foff barrel shift lives there, off this
+                // tight clock domain), so we only place bytes at the frontier fb_wr
+                // -- the same simple (i-fb_wr)*8 index the legacy 4-byte path uses.
+                // navail = bytes from the frontier to the line end (1..8).
+                logic [4:0]  foff, navail, ncom;
+                foff    = {2'b0, pf_addr[2:0]};
+                navail  = 5'd8 - foff;
+                ncom    = ((fb_wr + navail) > 5'd24) ? (5'd24 - fb_wr) : navail;
+                for (int i = 0; i < 24; i++)
+                    if (i >= fb_wr && i < fb_wr + ncom)
+                        fb[i] <= if_data_i[(i - fb_wr)*8 +: 8];
+                fb_wr    <= fb_wr + ncom;
+                fb_valid <= fb_wr + ncom;
+            end
+            else begin
+                for (int i = 0; i < 24; i++)
+                    if (i >= fb_wr && i < fb_wr + 4)
+                        fb[i] <= bus_rdata[(i - fb_wr)*8 +: 8];
+                fb_wr    <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
+                fb_valid <= (fb_wr > 5'd20) ? 5'd24 : fb_wr + 5'd4;
+            end
+        end
+    end
+
     // Self-modifying-code guard (audit R20 V60-19): a completing data write that
     // overlaps the live or retained fetch window invalidates it, so a subsequent
     // execution refetches instead of running stale bytes (e.g. a tight backward
     // loop that patches its own body, which the retained window would otherwise
-    // serve forever).  Writes and fetches occupy mutually exclusive states, so
-    // this never collides with the fetch logic's own fb_valid updates.
-    if (bus_req && bus_we && bus_ack) begin
+    // serve forever).  A data write and a prefetch ack are mutually exclusive
+    // (one bus owner), so this never races the prefetch commit above.
+    if (dbus_req && dbus_we && dack) begin
         logic [31:0] wr_end, fb_end, pv_end;
         logic [2:0]  wr_sz;
-        wr_sz  = (bus_size == 2'd0) ? 3'd1 : (bus_size == 2'd1) ? 3'd2 : 3'd4;
-        wr_end = bus_addr + {29'b0, wr_sz};
-        fb_end = fb_base + {27'b0, fb_valid};
+        wr_sz  = (dbus_size == 2'd0) ? 3'd1 : (dbus_size == 2'd1) ? 3'd2 : 3'd4;
+        wr_end = dbus_addr + {29'b0, wr_sz};
+        // Guard the full FETCHED frontier (fb_wr), not just the decode-visible
+        // count (fb_valid): prefetched-but-not-yet-decoded bytes must also be
+        // dropped if a store overwrites them (fb_wr==fb_valid pre-prefetch, so
+        // this is bit-identical today).
+        fb_end = fb_base + {27'b0, fb_wr};
         pv_end = fb_prev_base + {27'b0, fb_prev_valid};
-        if (fb_valid != 0 && bus_addr < fb_end && wr_end > fb_base)
+        if (fb_wr != 0 && dbus_addr < fb_end && wr_end > fb_base) begin
             fb_valid <= 5'd0;
-        if (fb_prev_valid != 0 && bus_addr < pv_end && wr_end > fb_prev_base)
+            fb_wr    <= 5'd0;
+            pf_epoch <= pf_epoch + 4'd1;  // void any in-flight prefetch too
+        end
+        if (fb_prev_valid != 0 && dbus_addr < pv_end && wr_end > fb_prev_base)
             fb_prev_valid <= 5'd0;
     end
 
@@ -3443,9 +3615,9 @@ task automatic exec_op;
     // ------------ CALL (0x49) — A6: push AP, AP=op2, push retPC, PC=op1 -----
     8'h49: begin
         // MAME opCALL: SP-=4; [SP]=AP; AP=op2; SP-=4; [SP]=retPC; PC=op1.
-        bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-        bus_addr <= r[31] - 4;
-        bus_wdata <= r[29];          // push AP (R29) first
+        dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+        dbus_addr <= r[31] - 4;
+        dbus_wdata <= r[29];          // push AP (R29) first
         queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         queue_reg_write(5'd29, op2, 32'hffff_ffff); // AP (R29) = op2
         wb_val <= pc + 5'd2 + len1 + len2; // return PC, pushed in S_CALL1
@@ -3539,33 +3711,33 @@ task automatic exec_op;
         st <= S_FILL; st_after_fill <= S_DECODE;
     end
     8'he8, 8'he9: begin // JSR
-        bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-        bus_addr <= r[31] - 4;
-        bus_wdata <= pc + 5'd1 + len1;
+        dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+        dbus_addr <= r[31] - 4;
+        dbus_wdata <= pc + 5'd1 + len1;
         queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         wb_val <= op1;
         st <= S_JSR1;
     end
     8'he2, 8'he3: begin // RET: adjustment in op1
         wb_val <= op1;
-        bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[31];
+        dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[31];
         st <= S_RET1;
     end
     8'hea, 8'heb, 8'hfa, 8'hfb: begin // RETIU/RETIS
         xch_addr <= op1;   // frame-destroy adjustment (added to SP at the end)
-        bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[31];
+        dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[31];
         st <= S_RETI1;
     end
     8'hee, 8'hef: begin // PUSH
-        bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-        bus_addr <= r[31] - 4;
-        bus_wdata <= op1;
+        dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+        dbus_addr <= r[31] - 4;
+        dbus_wdata <= op1;
         queue_reg_write(5'd31, r[31] - 4, 32'hffff_ffff);
         total_len <= 5'd1 + len1;
         st <= S_PUSH;
     end
     8'he6, 8'he7: begin // POP: op1 = dest addr/reg
-        bus_req <= 1; bus_we <= 0; bus_size <= 2'd2; bus_addr <= r[31];
+        dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2; dbus_addr <= r[31];
         total_len <= 5'd1 + len1;
         st <= S_POP;
     end
@@ -3582,9 +3754,9 @@ task automatic exec_op;
         st <= S_TASI1;
     end
     8'hde, 8'hdf: begin // PREPARE: push FP (R30); FP=SP; SP -= imm
-        bus_req <= 1; bus_we <= 1; bus_size <= 2'd2;
-        bus_addr <= r[31] - 4;
-        bus_wdata <= r[30];
+        dbus_req <= 1; dbus_we <= 1; dbus_size <= 2'd2;
+        dbus_addr <= r[31] - 4;
+        dbus_wdata <= r[30];
         total_len <= 5'd1 + len1;
         st <= S_PREP1;
     end

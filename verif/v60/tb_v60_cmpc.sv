@@ -74,7 +74,7 @@ begin
     cpu.str_len1 = l1;
     cpu.str_len2 = l2;
     cpu.str_cnt  = (l1 < l2) ? l1 : l2;
-    cpu.bus_req = 1'b0; cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0; cpu.dbus_we = 1'b0;
     cpu.f_z = 1'bx; cpu.f_s = 1'bx;
     cpu.r[27] = 32'hdeadbeef; cpu.r[28] = 32'hdeadbeef;
     rst = 1'b0;

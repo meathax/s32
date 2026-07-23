@@ -178,8 +178,25 @@ wire [7:0]  irq_vector;
 wire [31:0] v60_debug_pc;
 wire        v60_debug_halted;
 
-s32_v60 #(.START_PC(32'hFFFFFFF0)) v60 (   // MAME reset PC (audit R20 V60-21)
+// dedicated wide instruction-fetch port (FAST_IFETCH): the prefetch reads whole
+// 8-byte ROM icache lines here at clk_sys latency, bypassing the ce-gated 16-bit
+// data adapter that otherwise bottlenecks fetch bandwidth.
+wire        if_req;
+wire [23:0] if_addr;                 // frontier byte address (low 3 bits = intra-line
+                                    // offset used to pre-align the returned line)
+reg  [63:0] if_data;
+reg         if_served;              // held while a fetch result is presented
+wire        if_ack = if_served;     // held (not pulsed) so the ce-gated CPU never
+                                    // misses it between its enable ticks
+
+// FAST_IFETCH defaults on; override at build time (+define+FAST_IFETCH_EN=1'b0)
+// to A/B-test the wide fetch path against the legacy ce-gated adapter fetch.
+`ifndef FAST_IFETCH_EN
+ `define FAST_IFETCH_EN 1'b1
+`endif
+s32_v60 #(.START_PC(32'hFFFFFFF0), .FAST_IFETCH(`FAST_IFETCH_EN)) v60 (   // MAME reset PC (audit R20 V60-21)
     .clk(clk_sys), .ce(ce_cpu), .rst(rst),
+    .if_req(if_req), .if_addr(if_addr), .if_data(if_data), .if_ack(if_ack),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr), .bus_size(c_size),
     .bus_wdata(c_wdata), .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(irq_n), .irq_vector(irq_vector), .irq_ack(),
@@ -1121,52 +1138,103 @@ wire        ic_hit     = icache_valid[ic_line] && (icache_tag[ic_line] == ic_tag
 wire [63:0] ic_ldata   = icache_data[ic_line];
 wire [15:0] ic_word    = ic_ldata[{rom_byte_a[2:1], 4'b0000} +: 16];
 
+// Instruction-fetch lookup (whole 8-byte line).  Same romhi mirroring as data.
+wire        if_romhi   = (if_addr[23:20] == 4'hF);
+wire [20:0] if_byte_a  = if_romhi ? {1'b0, if_addr[19:3], 3'b000} : {if_addr[20:3], 3'b000};
+wire [4:0]  if_line_ix = if_byte_a[7:3];
+wire [12:0] if_tag_ix  = if_byte_a[20:8];
+wire        if_hit     = icache_valid[if_line_ix] && (icache_tag[if_line_ix] == if_tag_ix);
+// Pre-align the fetched line so byte 0 is the frontier byte (if_addr[2:0] = offset
+// within the 8-byte line).  Doing the >>foff barrel shift HERE, on the icache read
+// path, keeps it off the V60's tight execution clock domain (timing-closure guard).
+wire [63:0] if_hit_data = icache_data[if_line_ix] >> {if_addr[2:0], 3'b000};
+
 reg  [1:0]  fill_word;
 reg         rom_filling;
 reg         rom_ready;               // pulses when requested word available
 reg  [15:0] rom_word_r;
+// latched fill target: with two clients (data ROM read + instruction fetch) the
+// live A/if_addr can change mid-fill, so the fill FSM uses its own latched line.
+reg  [4:0]  fill_line;
+reg  [12:0] fill_tag;
+reg  [17:0] fill_wbase;              // 8-byte line address (byte_a[20:3])
+reg         fill_isfetch;
+reg  [1:0]  fill_dsel;               // data-read word select (byte_a[2:1])
+reg  [2:0]  fill_foff;               // fetch intra-line offset (if_addr[2:0]) to align
 
 always @(posedge clk_sys) begin
     if (rst) begin
         rom_req_r <= 0; rom_filling <= 0; rom_ready <= 0;
         icache_valid <= 32'h0;
+        if_served <= 1'b0;
     end
     else begin
         rom_req_r <= 0;
         rom_ready <= 0;
-        // !ack_r: once the transaction is acked the V60 bus can hold m_req up
-        // to one ce_cpu period; without the qualifier the lookup re-armed and
-        // pulsed rom_ready against the already-served address every other
-        // clock.  Harmless today only because ce_cpu spacing guarantees the
-        // stale pulse dies before the next request — gate it explicitly.
-        if (m_req && !m_we && (sel_rom || sel_romhi) && !rom_filling &&
-            !rom_ready && !ack_r) begin
+        // re-arm the fetch port once the CPU drops if_req (having consumed if_ack)
+        if (!if_req) if_served <= 1'b0;
+
+        if (rom_filling) begin
+            if (sdr_p0_ack) begin
+                icache_data[fill_line][{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
+                if (fill_word == 2'd3) begin
+                    rom_filling <= 0;
+                    icache_tag[fill_line]   <= fill_tag;
+                    icache_valid[fill_line] <= 1'b1;
+                    if (fill_isfetch) begin
+                        // return the line (word 3 is on sdr_p0_dout now), pre-aligned
+                        // by the latched offset so byte 0 is the frontier byte.
+                        if_data   <= ({sdr_p0_dout, icache_data[fill_line][47:0]})
+                                     >> {fill_foff, 3'b000};
+                        if_served <= 1'b1;
+                    end
+                    else begin
+                        rom_word_r <= (fill_dsel == 2'd3) ? sdr_p0_dout
+                                     : icache_data[fill_line][{fill_dsel, 4'b0000} +: 16];
+                        rom_ready  <= 1'b1;
+                    end
+                end
+                else begin
+                    fill_word  <= fill_word + 1'd1;
+                    rom_req_r  <= 1'b1;
+                    rom_addr_r <= {3'b000, fill_wbase, fill_word + 2'd1};
+                end
+            end
+        end
+        // instruction fetch has priority (it is the common ROM access)
+        else if (if_req && !if_served) begin
+            if (if_hit) begin
+                if_data   <= if_hit_data;      // already aligned to the frontier byte
+                if_served <= 1'b1;
+            end
+            else begin
+                rom_filling  <= 1'b1;
+                fill_isfetch <= 1'b1;
+                fill_foff    <= if_addr[2:0];  // remember offset to align on completion
+                fill_line    <= if_line_ix;
+                fill_tag     <= if_tag_ix;
+                fill_wbase   <= if_byte_a[20:3];
+                fill_word    <= 0;
+                rom_req_r    <= 1'b1;
+                rom_addr_r   <= {3'b000, if_byte_a[20:3], 2'b00};
+            end
+        end
+        // data ROM read (rare: constants/tables in ROM).  See !ack_r note above.
+        else if (m_req && !m_we && (sel_rom || sel_romhi) && !rom_ready && !ack_r) begin
             if (ic_hit) begin
                 rom_word_r <= ic_word;
                 rom_ready  <= 1'b1;
             end
             else begin
-                rom_filling <= 1'b1;
-                fill_word   <= 0;
-                rom_req_r   <= 1'b1;
-                rom_addr_r  <= {3'b000, rom_byte_a[20:3], 2'b00};
-            end
-        end
-        else if (rom_filling && sdr_p0_ack) begin
-            icache_data[ic_line][{fill_word, 4'b0000} +: 16] <= sdr_p0_dout;
-            if (fill_word == 2'd3) begin
-                rom_filling <= 0;
-                icache_tag[ic_line]   <= ic_tag;
-                icache_valid[ic_line] <= 1'b1;
-                // serve the requested word directly
-                rom_word_r <= (rom_byte_a[2:1] == 2'd3) ? sdr_p0_dout
-                             : icache_data[ic_line][{rom_byte_a[2:1], 4'b0000} +: 16];
-                rom_ready  <= 1'b1;
-            end
-            else begin
-                fill_word  <= fill_word + 1'd1;
-                rom_req_r  <= 1'b1;
-                rom_addr_r <= {3'b000, rom_byte_a[20:3], 2'b00} + {20'b0, fill_word + 2'd1};
+                rom_filling  <= 1'b1;
+                fill_isfetch <= 1'b0;
+                fill_line    <= ic_line;
+                fill_tag     <= ic_tag;
+                fill_wbase   <= rom_byte_a[20:3];
+                fill_dsel    <= rom_byte_a[2:1];
+                fill_word    <= 0;
+                rom_req_r    <= 1'b1;
+                rom_addr_r   <= {3'b000, rom_byte_a[20:3], 2'b00};
             end
         end
     end

@@ -77,7 +77,7 @@ initial begin
     cpu.str_len1 = 4;
     cpu.len1 = 0; cpu.len2 = 0;    // register/EA extension lengths = 0
     cpu.fb[3] = 8'd4;              // len2 byte (small immediate) at ofs 3+0+0
-    cpu.bus_req = 1'b0; cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0; cpu.dbus_we = 1'b0;
     rst = 1'b0;
 
     wd = 0;

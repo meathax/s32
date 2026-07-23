@@ -46,7 +46,7 @@ task automatic run_fp(input [7:0] op, input [7:0] sub, input [31:0] a, input [31
     cpu.op2 = 32'd5; cpu.fp_op2_reg = 1'b1;
     cpu.tkcw = {29'b0, mode};
     cpu.len1 = 0; cpu.len2 = 0;
-    cpu.bus_req = 1'b0; cpu.bus_we = 1'b0;
+    cpu.dbus_req = 1'b0; cpu.dbus_we = 1'b0;
     rst = 1'b0;
     wd = 0;
     while ((cpu.st !== cpu.S_NEXT) && (wd < 200)) begin @(posedge clk); #1; wd = wd + 1; end
