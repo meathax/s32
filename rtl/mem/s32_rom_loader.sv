@@ -146,6 +146,7 @@ always @(posedge clk) begin
                         desc_r.sprite_bank_valid <= desc_bytes[3][7];
                         desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
                         desc_r.flip_y            <= desc_bytes[1][1];
+                        desc_r.gun_aim           <= desc_bytes[1][2];
                     end
                 end
                 else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin

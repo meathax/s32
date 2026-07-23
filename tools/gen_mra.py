@@ -35,21 +35,22 @@ STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
 
 # board descriptor per parent (DESIGN.md §3.4):
 #   b0: flags {multi32,v25,v25table,adc,track,ppi,dsp_hle,cd_stub}
-#   b1: bit0=dual_pcb, bit1=vertical orientation flip
+#   b1: bit0=dual_pcb, bit1=vertical orientation flip, bit2=positional-gun
+#       analog default-invert (alien3/jpark)
 #   b2: prot_sel
 #   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
 PROT = dict(NONE=0, SONIC=1, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
 def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0, dsp=0, cd=0,
-         dual=0, flip_y=0, prot=0):
+         dual=0, flip_y=0, prot=0, gun=0):
     b0 = (multi32 | v25 << 1 | v25table << 2 | adc << 3 | track << 4 |
           ppi << 5 | dsp << 6 | cd << 7)
-    d = bytes([b0, dual | (flip_y << 1), prot]) + bytes(61)
+    d = bytes([b0, dual | (flip_y << 1) | (gun << 2), prot]) + bytes(61)
     return d
 
 GAMES = {
     # parent: (descriptor, per-set list built from clones automatically)
     "arescue":  desc(adc=1, dsp=1, dual=1),
-    "alien3":   desc(adc=1),
+    "alien3":   desc(adc=1, gun=1),
     "arabfgt":  desc(v25=1, v25table=1, ppi=1),
     "brival":   desc(ppi=1, prot=PROT["BRIVAL"]),
     "darkedge": desc(ppi=1, prot=PROT["DARKEDGE"]),
@@ -58,7 +59,7 @@ GAMES = {
     "f1lap":    desc(adc=1, prot=PROT["F1LAP"]),
     "ga2":      desc(v25=1, v25table=0, ppi=1),
     "holo":     desc(flip_y=1),
-    "jpark":    desc(adc=1),
+    "jpark":    desc(adc=1, gun=1),
     "kokoroj":  desc(cd=1),
     "kokoroj2": desc(cd=1),
     "radm":     desc(adc=1),

@@ -476,8 +476,11 @@ endfunction
 //      so the in-game gun-cal screen can still reach the screen edges.
 // Deadzone/smoothing are always on and benefit every analog game; only the
 // invert is game-specific and therefore user-controlled.
-wire aim_inv_x = status[13];
-wire aim_inv_y = status[14];
+// Gun games (alien3/jpark) carry gun_aim=1 in the board descriptor and default
+// to inverted aim (the correct orientation for a MiSTer stick); the OSD toggle
+// then flips relative to that default so it still overrides per player taste.
+wire aim_inv_x = status[13] ^ board_desc.gun_aim;
+wire aim_inv_y = status[14] ^ board_desc.gun_aim;
 localparam signed [8:0] AIM_DZ = 9'sd6;   // deadzone half-width (LSB about 0x80)
 
 // signed stick -> offset binary (center 0x80), with centred optional inversion

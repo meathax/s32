@@ -37,6 +37,7 @@ package s32_pkg;
         logic       sprite_bank_valid;
         logic [1:0] sprite_bank_mask; // 0/1/3 for 4/8/16 MiB respectively
         logic       flip_y;         // cabinet/game orientation (holo)
+        logic       gun_aim;        // positional-gun analog default-invert (alien3/jpark)
     } board_desc_t;
 
     // HLE protection selects (prot_sel)

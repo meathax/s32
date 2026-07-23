@@ -1200,7 +1200,10 @@ end
 // ---------------------------------------------------------------------------
 integer pchist_at, pchist_len;
 integer pc_hist [int];
+integer st_hist [int];
 integer pc_samples = 0;
+integer instr_count = 0;
+integer st_prev = 0;
 integer vbl_cyc = 0;
 reg     pchist_done = 0;
 reg     vs_pe;
@@ -1218,16 +1221,27 @@ always @(posedge clk_sys) begin
     end
     if (ce_cpu && pchist_at >= 0 && cur_frame >= pchist_at && cur_frame < pchist_at + pchist_len) begin
         pc_hist[core.v60.dbg_pc] = pc_hist[core.v60.dbg_pc] + 1;
+        st_hist[core.v60.st] = st_hist[core.v60.st] + 1;
         pc_samples = pc_samples + 1;
+        // count instructions = FSM entering S_DECODE (one per fetched opcode)
+        if (core.v60.st == 3 /*S_DECODE*/ && st_prev != 3) instr_count = instr_count + 1;
+        st_prev = core.v60.st;
     end
     if (pchist_at >= 0 && !pchist_done && cur_frame >= pchist_at + pchist_len && pc_samples > 0) begin
         pchist_done <= 1'b1;
-        $display("[pchist] %0d samples over frames %0d..%0d — hot PCs (>1%%):",
-                 pc_samples, pchist_at, pchist_at + pchist_len - 1);
+        $display("[pchist] %0d ce_cpu cycles, %0d instrs over frames %0d..%0d => %0d.%02d cyc/instr",
+                 pc_samples, instr_count, pchist_at, pchist_at + pchist_len - 1,
+                 instr_count ? pc_samples/instr_count : 0,
+                 instr_count ? (100*pc_samples/instr_count)%100 : 0);
         foreach (pc_hist[k])
             if (pc_hist[k] * 100 > pc_samples)
                 $display("[pchist] pc=%08x count=%0d pct=%0d", k, pc_hist[k],
                          (pc_hist[k] * 100) / pc_samples);
+        $display("[sthist] FSM state cycle distribution (>1%%):");
+        foreach (st_hist[k])
+            if (st_hist[k] * 100 > pc_samples)
+                $display("[sthist] st=%0d count=%0d pct=%0d", k, st_hist[k],
+                         (st_hist[k] * 100) / pc_samples);
     end
 end
 
