@@ -499,6 +499,13 @@ always @(posedge clk_sys) begin
             $fwrite(sprdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
         $fclose(sprdump_fd);
         $display("[wramdump] wrote sim_wram.hex at frame %0d", sprdump_cur);
+        // Also dump the full tilemap VRAM (0x10000 words) so the NBG name
+        // tables can be diffed against MAME's videoram at the same screen.
+        sprdump_fd = $fopen("sim_vram.hex", "w");
+        for (sprdump_i = 0; sprdump_i < 17'h10000; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.vram.video_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[vramdump] wrote sim_vram.hex at frame %0d", sprdump_cur);
     end
     // Multi-frame work-RAM snapshots to locate the FIRST frame of divergence vs
     // MAME (attract pre-coin @250, mid-sequence @400, just-entered-select @500).
@@ -548,6 +555,17 @@ integer sprdump_last = -1;
 integer loff_force;
 always @(posedge clk_sys) if ($value$plusargs("LOFF=%h", loff_force))
     force core.tilemap.r1ff8e = {10'b0, loff_force[5:0]};
+
+// +REGTRACE: log every CPU write to $1FF00 (word 0xff80) and $1FF02 (0xff81)
+// with frame + value, to see if/when the game disables the bitmap (r1ff02[5]).
+integer regtrace;
+initial if (!$value$plusargs("REGTRACE=%d", regtrace)) regtrace = 0;
+always @(posedge clk_ram) if (regtrace &&
+        core.vram.cpu_we && (core.vram.cpu_addr == 16'hff80 || core.vram.cpu_addr == 16'hff81))
+    $display("[regw] f=%0d addr=%04x data=%04x be=%b pc=%08x -> r1ff%02x",
+        cur_frame, core.vram.cpu_addr, core.vram.cpu_wdata, core.vram.cpu_be,
+        core.v60.dbg_pc,
+        (core.vram.cpu_addr[0] ? 8'h02 : 8'h00));
 reg vb_d, hb_d;
 integer cur_frame = 0;
 always @(posedge clk_sys) begin

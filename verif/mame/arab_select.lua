@@ -15,6 +15,11 @@ _G.drive = emu.add_machine_frame_notifier(function()
     local f = io.open("/mnt/d/Arcade/AI/s32/scratch/mame_arab_select_spr.hex","w")
     for a = 0x400000, 0x41fffe, 2 do f:write(string.format("%04x\n", msp:read_u16(a))) end
     f:close()
+    -- full tilemap VRAM (videoram at maincpu 0x300000, 0x10000 words) so the
+    -- NBG name tables can be diffed vs our core's sim_vram.hex
+    local v = io.open("/mnt/d/Arcade/AI/s32/scratch/mame_arab_select_vram.hex","w")
+    for a = 0x300000, 0x31fffe, 2 do v:write(string.format("%04x\n", msp:read_u16(a))) end
+    v:close()
     -- tilemap page registers (videoram $1FF40.. at maincpu 0x31FF40)
     print(string.format("[arab_pages] F40=%04x F42=%04x F44=%04x F46=%04x F5c=%04x F00=%04x",
       msp:read_u16(0x31FF40), msp:read_u16(0x31FF42), msp:read_u16(0x31FF44),

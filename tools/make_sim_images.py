@@ -132,6 +132,21 @@ def build_stream(mra_path, romdir):
             stream += part_bytes(el, romdir)
         elif el.tag == "interleave":
             stream += interleave(el, romdir)
+    # MiSTer applies patches after assembling the complete index-0 download
+    # stream. Offsets include the 0x40-byte board descriptor. Jurassic Park
+    # relies on this protection bypass to leave its protected idle loop.
+    for el in rom0.findall("patch"):
+        offset_text = el.get("offset")
+        assert offset_text is not None, "MRA patch is missing an offset"
+        offset = int(offset_text, 0)
+        patch = binascii.unhexlify("".join((el.text or "").split()))
+        assert patch, f"MRA patch at {offset:#x} is empty"
+        end = offset + len(patch)
+        assert end <= len(stream), (
+            f"MRA patch {offset:#x}..{end - 1:#x} exceeds stream "
+            f"size {len(stream):#x}"
+        )
+        stream[offset:end] = patch
     return bytes(stream)
 
 def emit_hex(path, data, width_bytes):
