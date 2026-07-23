@@ -472,6 +472,18 @@ always @(posedge clk_sys) begin
     // Dump mid-visible-frame (vcnt~150), after the V60's vblank-IRQ handler has
     // finished rewriting the sprite list and the engine is rendering it — the
     // vblank-edge snapshot caught the list mid-rewrite (empty/partial).
+    // consecutive-frame sprite-list capture: dump sprite RAM at sprdump_at,
+    // +1, +2 to sim_spr_<frame>.hex so per-frame coordinate oscillation
+    // ("sprites dancing back and forth") can be diffed.
+    if (sprdump_at >= 0 && sprdump_cur >= sprdump_at && sprdump_cur <= sprdump_at+2
+        && core.vcnt == 9'd150 && sprdump_last != sprdump_cur) begin
+        sprdump_last = sprdump_cur;
+        sprdump_fd = $fopen($sformatf("sim_spr_%0d.hex", sprdump_cur), "w");
+        for (sprdump_i = 0; sprdump_i < 65536; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.sprite_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[sprdump] wrote sim_spr_%0d.hex", sprdump_cur);
+    end
     if (sprdump_at >= 0 && sprdump_cur == sprdump_at && !sprdump_done
         && core.vcnt == 9'd150) begin
         sprdump_done = 1'b1;
@@ -529,6 +541,13 @@ always @(posedge clk_sys) begin
     end
 end
 reg vb_d2 = 0, sprdump_done = 0;
+integer sprdump_last = -1;
+
+// +LOFF=<hex>: force tm_layer_off to isolate which layer draws the arabfgt
+// select "swirl". bits {5:BITMAP,4:NBG3,3:NBG2,2:NBG1,1:NBG0,0:TEXT} (1=off).
+integer loff_force;
+always @(posedge clk_sys) if ($value$plusargs("LOFF=%h", loff_force))
+    force core.tilemap.r1ff8e = {10'b0, loff_force[5:0]};
 reg vb_d, hb_d;
 integer cur_frame = 0;
 always @(posedge clk_sys) begin
@@ -1066,6 +1085,13 @@ initial begin
             snd_rom_reqs, snd_opcodes, snd_bank_lo, snd_bank_hi,
             core.sound.sound_bank, snd_fm1, snd_fm2, snd_rfreg, snd_rfram,
             snd_irqctl, audio_l, audio_r, snd_audio_x);
+        // NBG0/1 zoom+scroll probe (arabfgt select-screen swirl investigation)
+        $display("   tmap: nbg0 zx=%04x zy=%04x sx=%04x sy=%04x | nbg1 zx=%04x zy=%04x sx=%04x sy=%04x",
+            core.tm_zoomx[0], core.tm_zoomy[0], core.tm_scrollx[0], core.tm_scrolly[0],
+            core.tm_zoomx[1], core.tm_zoomy[1], core.tm_scrollx[1], core.tm_scrolly[1]);
+        $display("   tpage: F40=%04x F42=%04x F44=%04x F46=%04x F5c=%04x r00=%04x",
+            core.tm_pages[0], core.tm_pages[1], core.tm_pages[2], core.tm_pages[3],
+            core.tilemap.r1ff5c, core.tm_r1ff00);
         rdreq_cnt = 0; kick_cnt = 0; spr_cmd_cnt = 0; srom_req_cnt = 0; spr_opq_cnt = 0;
         p1a_rd_cnt = 0; coin_rd_cnt = 0; start_rd_cnt = 0;
     end
