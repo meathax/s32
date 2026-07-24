@@ -131,6 +131,7 @@ localparam CONF_STR = {
     "-;",
     "O[6],Screen (Multi32),A,B;",
     "O[7],Service Mode,Off,On;",
+    "O[16:15],CPU Turbo,Normal,x2,x3,x4;",
     "O[12],Pause,Off,On;",
     "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
     "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var,V25;",
@@ -183,6 +184,16 @@ reg ce_cpu, ce_z80, ce_fm, ce_pcm;
 reg [15:0] acc_cpu, acc_z80, acc_fm, acc_pcm;
 wire is_multi32 = board_desc.multi32;
 wire pause = status[12];
+// CPU Turbo (O[16:15]): scale ONLY the V60/V70 clock-enable x1..x4 to relieve
+// heavy-scene slowdown (e.g. the ga2 waterfall). Audio (z80/fm/pcm), video, the
+// interrupt-controller timers (which count in clk_sys, not ce_cpu), and the V25
+// keep their authentic rates -- so normal, vblank-paced game speed is UNCHANGED;
+// turbo only helps where the V60 was overrunning the frame budget. The NCO
+// increment is capped at 65535 (= clk_sys rate, ~3x) so it cannot overflow.
+wire [1:0]  cpu_turbo   = status[16:15];             // 0=Normal,1=x2,2=x3,3=x4
+wire [2:0]  cpu_mult    = {1'b0, cpu_turbo} + 3'd1;  // 1..4
+wire [20:0] cpu_ce_full = (is_multi32 ? 21'd27122 : 21'd21845) * cpu_mult;
+wire [15:0] cpu_ce_inc  = (cpu_ce_full > 21'd65535) ? 16'd65535 : cpu_ce_full[15:0];
 always @(posedge clk_sys) begin
     logic [16:0] s;
     if (reset) begin
@@ -193,8 +204,8 @@ always @(posedge clk_sys) begin
         ce_cpu <= 1'b0; ce_z80 <= 1'b0; ce_pcm <= 1'b0;
     end
     else begin
-        // cpu: 16.108/48.324 = 1/3 (V60) ; 20/48.324 (V70)
-        s = acc_cpu + (is_multi32 ? 16'd27122 : 16'd21845);  // /65536 fractions
+        // cpu: 16.108/48.324 = 1/3 (V60) ; 20/48.324 (V70), scaled by CPU Turbo
+        s = acc_cpu + {1'b0, cpu_ce_inc};  // base increment * turbo mult (capped)
         ce_cpu <= s[16];
         acc_cpu <= s[15:0];
         // z80: 8.054/48.324 = 1/6 ; 8.0/48.324
