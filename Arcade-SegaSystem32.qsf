@@ -29,22 +29,22 @@ set_global_assignment -name TIMEQUEST_MULTICORNER_ANALYSIS ON
 set_global_assignment -name OPTIMIZE_POWER_DURING_FITTING OFF
 set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
 set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
-# The game-only System 32 profile preserves headroom for the 96 MHz
-# render/SDRAM and 148 MHz scaler paths.
-set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+# The Golden Axe II profile is area-dense; prioritize a legal Cyclone V
+# placement while retaining the clock paths needed by the game core.
+set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE AREA"
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
-set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 2.0
 set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
 set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
-set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
+set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION OFF
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
-set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF
+set_global_assignment -name OPTIMIZATION_TECHNIQUE AREA
 set_global_assignment -name MUX_RESTRUCTURE ON
 set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
 set_global_assignment -name AUTO_DELAY_CHAINS_FOR_HIGH_FANOUT_INPUT_PINS ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA OFF
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA ON
 set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP ON
 set_global_assignment -name SYNTH_GATED_CLOCK_CONVERSION ON
 set_global_assignment -name PRE_MAPPING_RESYNTHESIS ON
@@ -54,7 +54,7 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 8
+set_global_assignment -name SEED 1
 # Bound the parallel fitter inside the Docker container: unbounded thread
 # detection has produced early quartus_fit crashes (293007) on this host.
 set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
@@ -64,9 +64,9 @@ set_global_assignment -name NUM_PARALLEL_PROCESSORS 8
 # mixer and sizes work RAM to the board-correct 64 KiB so SegaS32.rbf fits the
 # Cyclone V memory budget.  A future Multi 32 revision must omit this macro.
 set_global_assignment -name VERILOG_MACRO "S32_SYSTEM32_ONLY=1"
-# Jurassic Park profile: retain the MSM6253 ADC/gun path while pruning the
-# unrelated trackball, generic protection and dual-PCB hardware.
-set_global_assignment -name VERILOG_MACRO "S32_JPARK_ONLY=1"
+# Golden Axe II profile: retain the protected-game V25 path while pruning the
+# unrelated analog, trackball, generic-protection, and dual-PCB hardware.
+set_global_assignment -name VERILOG_MACRO "S32_GA2_ONLY=1"
 # files.qip retains the real-V25 source for compatibility builds. Its upstream
 # Flags module requires this compile-time choice even when S32_REAL_V25 is off;
 # defining it alone does not instantiate V25 hardware.
@@ -81,14 +81,12 @@ set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
 # round-trips the wake mailbox to the V60 in-core).  This is the candidate fix
 # for the V25 games' missing character-select sprites, which the HLE's static
 # tables cannot supply dynamically.
-# Jurassic Park does not use the protected-game V25.  Leave the real V25 out
-# of this profile to preserve fitter and timing headroom; GA2/Arabian Fight
-# require their own S32_REAL_V25-qualified build.
-# set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+# Golden Axe II uses the cycle-accurate V25 for its protection and mailbox path.
+set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
 #
-# PROFILE NOTE: S32_SYSTEM32_ONLY + a game-only macro compile out trackball,
-# generic protection and dual-PCB hardware while retaining the MSM6253 ADC used
-# by Jurassic Park.  Multi 32 is forced off.  To exercise Sonic or Multi 32,
+# PROFILE NOTE: S32_SYSTEM32_ONLY + S32_GA2_ONLY compiles out trackball, ADC,
+# generic protection, and dual-PCB hardware while retaining the real V25 used by
+# Golden Axe II. Multi 32 is forced off. To exercise Sonic or Multi 32,
 # build a UNIVERSAL core by commenting out both S32_SYSTEM32_ONLY and the active
 # game-only macro (GAME_ONLY=0, is_multi32 follows the MRA); it is substantially
 # larger, so re-check fit and timing.
