@@ -1206,6 +1206,11 @@ integer pc_hist [int];
 integer st_hist [int];
 integer pc_samples = 0;
 integer instr_count = 0;
+// WORK-only CPI: excludes the ga2 attract frame-sync spin loop (test1 #0,flag at
+// 0x133505 / bne at 0x13350b) so the per-frame WORK throughput can be compared to
+// the authentic V60 band (~4.6-8 cyc/instr; IPSJ 1990 paper: 3.5 MIPS@16MHz peak).
+integer work_cyc = 0;
+integer work_instr = 0;
 integer st_prev = 0;
 integer vbl_cyc = 0;
 reg     pchist_done = 0;
@@ -1228,6 +1233,11 @@ always @(posedge clk_sys) begin
         pc_samples = pc_samples + 1;
         // count instructions = FSM entering S_DECODE (one per fetched opcode)
         if (core.v60.st == 3 /*S_DECODE*/ && st_prev != 3) instr_count = instr_count + 1;
+        // WORK-only tally: same cycles/instrs but excluding the idle frame-sync spin
+        if (core.v60.dbg_pc != 32'h0013_3505 && core.v60.dbg_pc != 32'h0013_350b) begin
+            work_cyc = work_cyc + 1;
+            if (core.v60.st == 3 && st_prev != 3) work_instr = work_instr + 1;
+        end
         st_prev = core.v60.st;
     end
     if (pchist_at >= 0 && !pchist_done && cur_frame >= pchist_at + pchist_len && pc_samples > 0) begin
@@ -1236,6 +1246,10 @@ always @(posedge clk_sys) begin
                  pc_samples, instr_count, pchist_at, pchist_at + pchist_len - 1,
                  instr_count ? pc_samples/instr_count : 0,
                  instr_count ? (100*pc_samples/instr_count)%100 : 0);
+        $display("[pchist] WORK-only (excl idle spin 0x133505/0x13350b): %0d cyc, %0d instrs => %0d.%02d cyc/instr  (authentic V60 band ~4.6-8)",
+                 work_cyc, work_instr,
+                 work_instr ? work_cyc/work_instr : 0,
+                 work_instr ? (100*work_cyc/work_instr)%100 : 0);
         foreach (pc_hist[k])
             if (pc_hist[k] * 100 > pc_samples)
                 $display("[pchist] pc=%08x count=%0d pct=%0d", k, pc_hist[k],

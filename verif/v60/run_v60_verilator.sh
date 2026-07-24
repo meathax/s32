@@ -17,6 +17,7 @@ declare -A TB=(
   [tb_v60_fetch]="FETCH PERF PASS"
   [tb_v60_smc]="V60 SMC PASS"
   [tb_v60_long_ea]="LONG EA PASS"
+  [tb_v60_fetch_wide]="V60 FETCH WIDE PASS"
   [tb_v60_bus_lanes]="V60 BUS LANES PASS"
   [tb_v60_divx]="DIVX PASS"
   [tb_v60_divxmem]="V60 DIVXMEM PASS"
@@ -44,7 +45,7 @@ declare -A TB=(
 # (EnumItemRef can't deref back to an Enum). Route those through Icarus.
 ICARUS_ONLY="tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp"
 
-ORDER="tb_v60_smoke tb_v60_directed tb_v60_fetch tb_v60_smc tb_v60_long_ea tb_v60_bus_lanes tb_v60_divx tb_v60_divxmem tb_v60_flags tb_v60_incdecmem tb_v60_rotate tb_v60_shaov tb_v60_xch tb_v60_audit tb_v60_bits tb_v60_decimal tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp tb_v60_fpdecode tb_v60_spidman_xchh tb_v60_spidman_window tb_v60_spidman_gate"
+ORDER="tb_v60_smoke tb_v60_directed tb_v60_fetch tb_v60_smc tb_v60_long_ea tb_v60_fetch_wide tb_v60_bus_lanes tb_v60_divx tb_v60_divxmem tb_v60_flags tb_v60_incdecmem tb_v60_rotate tb_v60_shaov tb_v60_xch tb_v60_audit tb_v60_bits tb_v60_decimal tb_v60_search tb_v60_cmpc tb_v60_movcd tb_v60_schd tb_v60_strfs tb_v60_fp tb_v60_fpdecode tb_v60_spidman_xchh tb_v60_spidman_window tb_v60_spidman_gate"
 
 is_icarus() { case " $ICARUS_ONLY " in *" $1 "*) return 0;; *) return 1;; esac; }
 
