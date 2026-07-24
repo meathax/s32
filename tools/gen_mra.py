@@ -75,6 +75,21 @@ GAMES = {
     "scross":   desc(multi32=1, adc=1),
     "titlef":   desc(multi32=1),
 }
+
+# Per-game button labels/defaults are part of the MRA contract, not the board
+# descriptor. Keep them here so regenerating tracked MRAs preserves the
+# remapping UI metadata as well as the ROM stream.
+BUTTONS = {
+    "ga2": (
+        "Attack,Jump,Magic,-,-,-,Start,Coin,Test",
+        "A,B,X,-,-,-,Start,Select,R",
+    ),
+    "spidman": (
+        "Attack,Jump,-,-,-,-,Start,Coin,Test",
+        "A,B,-,-,-,-,Start,Select,R",
+    ),
+}
+
 UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
@@ -253,6 +268,13 @@ def gen(setname, data, outdir):
     lines.append(f'  <year>{data.get("year", "")}</year>')
     lines.append(f'  <manufacturer>{escape(data.get("manu", "Sega"))}</manufacturer>')
     lines.append('  <rbf>SegaS32</rbf>')
+    button_meta = BUTTONS.get(parent)
+    if button_meta:
+        names, defaults = button_meta
+        count = names.count(",") + 1
+        lines.append(
+            f'  <buttons names="{names}" default="{defaults}" count="{count}"/>'
+        )
     lines.append('  <rom index="0" zip="%s.zip" md5="none">' % setname)
     # descriptor
     hexd = bytes(d).hex().upper()

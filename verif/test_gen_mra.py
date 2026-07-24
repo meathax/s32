@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
+from xml.etree import ElementTree
 
-from tools.gen_mra import GAMES
+from tools.gen_mra import BUTTONS, GAMES
 
 
 class BoardDescriptorTests(unittest.TestCase):
@@ -23,6 +25,25 @@ class BoardDescriptorTests(unittest.TestCase):
             self.assertEqual(descriptor[1] & 0x04, 0x04, game)  # gun_aim invert
         # a non-gun analog board (radm steering) must NOT default-invert
         self.assertEqual(bytearray(GAMES["radm"])[1] & 0x04, 0x00)
+
+
+class ButtonMetadataTests(unittest.TestCase):
+    def test_spiderman_has_two_action_buttons_and_system_controls(self) -> None:
+        names, defaults = BUTTONS["spidman"]
+        self.assertEqual(names.split(","),
+                         ["Attack", "Jump", "-", "-", "-", "-", "Start", "Coin", "Test"])
+        self.assertEqual(defaults.split(","),
+                         ["A", "B", "-", "-", "-", "-", "Start", "Select", "R"])
+
+    def test_all_spiderman_mras_expose_button_metadata(self) -> None:
+        mra_dir = Path(__file__).parents[1] / "mra"
+        for path in sorted(mra_dir.glob("Spider-Man The Videogame*.mra")):
+            root = ElementTree.parse(path).getroot()
+            buttons = root.find("buttons")
+            self.assertIsNotNone(buttons, path.name)
+            self.assertEqual(buttons.attrib["names"], BUTTONS["spidman"][0])
+            self.assertEqual(buttons.attrib["default"], BUTTONS["spidman"][1])
+            self.assertEqual(buttons.attrib["count"], "9")
 
 
 if __name__ == "__main__":
