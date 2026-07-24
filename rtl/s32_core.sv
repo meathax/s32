@@ -923,6 +923,10 @@ s32_intc intc (
 wire        br_trap;
 wire [15:0] br_trap_q;
 wire [15:0] dsp_q, dual_q;
+wire        prot_rom_req;
+wire [23:0] prot_rom_addr;
+wire        prot_rom_ack;
+wire [15:0] prot_rom_data = sdr_p0_dout;
 wire [7:0]  v25_q;
 
 generate
@@ -936,6 +940,8 @@ generate
         assign pr_be = 2'b00;
         assign br_trap = 1'b0;
         assign br_trap_q = 16'hffff;
+        assign prot_rom_req = 1'b0;
+        assign prot_rom_addr = 24'h000000;
         assign dsp_q = 16'hffff;
     end
     else begin : g_other_protection
@@ -947,7 +953,8 @@ generate
             .wram_req(pr_req), .wram_we(pr_we), .wram_addr(pr_addr),
             .wram_wdata(pr_wdata), .wram_be(pr_be),
             .wram_rdata(pr_q), .wram_ack(pr_ack),
-            .rom_req(), .rom_addr(), .rom_data(sdr_p0_dout), .rom_ack(1'b0)
+            .rom_req(prot_rom_req), .rom_addr(prot_rom_addr),
+            .rom_data(prot_rom_data), .rom_ack(prot_rom_ack)
         );
 
         s32_prot_brival brival (
@@ -1119,8 +1126,12 @@ reg [23:1] rom_addr_r;
 // here so the icache lookup can suppress re-arming a completed ROM read while
 // the V60 bus still holds m_req; the driving logic lives in the read-mux block.
 reg        ack_r;
-assign sdr_p0_req  = rom_req_r;
-assign sdr_p0_addr = {2'b00, rom_addr_r[21:1]};   // maincpu base = 0
+reg        prot_rom_grant;
+wire [23:1] prot_p0_addr = {3'b000, prot_rom_addr[20:3], 2'b00};
+assign prot_rom_ack = prot_rom_grant && sdr_p0_ack;
+assign sdr_p0_req  = prot_rom_grant ? prot_rom_req : rom_req_r;
+assign sdr_p0_addr = prot_rom_grant ? {2'b00, prot_p0_addr[21:1]} :
+                                       {2'b00, rom_addr_r[21:1]};
 
 reg  [63:0] icache_data [0:31];
 reg  [12:0] icache_tag  [0:31];      // addr[20:8]
@@ -1161,6 +1172,22 @@ reg  [17:0] fill_wbase;              // 8-byte line address (byte_a[20:3])
 reg         fill_isfetch;
 reg  [1:0]  fill_dsel;               // data-read word select (byte_a[2:1])
 reg  [2:0]  fill_foff;               // fetch intra-line offset (if_addr[2:0]) to align
+
+// The rev. C Sonic protection responder is a second architectural client of
+// the single main-ROM port.  Do not mux it by the live request level: a CPU
+// line fill may already own p0, and SDRAM services each request only once per
+// rising edge.  Wait for the CPU fill/request to become idle, latch the
+// protection address through prot_p0_addr, and hold the grant until p0 ack.
+always @(posedge clk_sys) begin
+    if (rst)
+        prot_rom_grant <= 1'b0;
+    else if (prot_rom_grant) begin
+        if (sdr_p0_ack) prot_rom_grant <= 1'b0;
+    end
+    else if (prot_rom_req && !rom_filling && !rom_req_r && !if_req &&
+             !sdr_p0_ack)
+        prot_rom_grant <= 1'b1;
+end
 
 always @(posedge clk_sys) begin
     if (rst) begin

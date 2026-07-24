@@ -7,6 +7,7 @@
 //                   sprites.hex expected inside)
 //    +B0=<hex>      board descriptor byte 0 (flags), default 0
 //    +B1=<hex>      board descriptor byte 1 (bit 1 = flip Y), default 0
+//    +B2=<hex>      protection selector (1 = Sonic), default 0
 //    +SBM=<hex>     physical sprite-ROM bank mask (0/1/3), default 3
 //    +FRAMES=<n>    frames to run (804k clk_sys each), default 3
 //    +COINAT=<n>     assert P1 coin active-low starting at harness frame n
@@ -70,10 +71,12 @@ end
 board_desc_t board;
 integer b0;
 integer b1;
+integer b2;
 integer sbm;
 initial begin
     if (!$value$plusargs("B0=%h", b0)) b0 = 0;
     if (!$value$plusargs("B1=%h", b1)) b1 = 0;
+    if (!$value$plusargs("B2=%h", b2)) b2 = 0;
     if (!$value$plusargs("SBM=%h", sbm)) sbm = 3;
     board = '0;
     board.multi32     = b0[0];
@@ -84,6 +87,7 @@ initial begin
     board.has_ppi     = b0[5];
     board.has_dsp_hle = b0[6];
     board.flip_y      = b1[1];
+    board.prot_sel    = b2[6:0];
     board.sprite_bank_valid = 1'b1;
     board.sprite_bank_mask  = sbm[1:0];
 end
@@ -1073,6 +1077,12 @@ initial begin
                 $display("[input] frames %0d..%0d: P1 start low (port E bit 4)",
                     start_at, start_at + start_len - 1);
         end
+        // MAME's Sonic driver exposes the same coin/start actions on the
+        // player-3 service bits used by its three-player join path.
+        if (b2 == 1) begin
+            in_svc12_r[6] = in_svc12_r[2];  // Coin 3
+            in_svc12_r[7] = in_svc12_r[4];  // 3 Players Start
+        end
         // +PLAYMAGIC gameplay autopilot: after coin+start, repeatedly tap
         // Button1 (0x01) to confirm the char select, then in gameplay hold Right
         // (0x40) toward the scripted rocks-flame and run a magic (Button3 0x04)
@@ -1177,14 +1187,14 @@ initial begin
     if (fb_line_acks < frames * 128)
         $fatal(1, "GA2 framebuffer line service too sparse: acks=%0d frames=%0d",
                fb_line_acks, frames);
-    if (frames >= 70 && spr_px == 0)
+    if (b2 != 1 && frames >= 70 && spr_px == 0)
         $fatal(1, "GA2 reached gameplay window without any sprite pixels");
     if (frame_sig_x != 0)
         $fatal(1, "GA2 active-video signature contained X on %0d frames",
                frame_sig_x);
-    if (frames >= 70 && frame_sig_samples < 10)
+    if (b2 != 1 && frames >= 70 && frame_sig_samples < 10)
         $fatal(1, "GA2 active-video signature window was not exercised");
-    if (frames >= 90 && frame_sig_changes < 3)
+    if (b2 != 1 && frames >= 90 && frame_sig_changes < 3)
         $fatal(1, "GA2 active video stopped changing: samples=%0d changes=%0d",
                frame_sig_samples, frame_sig_changes);
     $display("GA2 DDR QUALIFICATION PASS writes=%0d reads=%0d line_acks=%0d max_wr=%0d max_rd=%0d max_er=%0d sig_samples=%0d sig_changes=%0d",

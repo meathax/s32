@@ -472,6 +472,9 @@ end
 function automatic [7:0] p_dig(input [31:0] j);
     p_dig = ~{j[1], j[0], j[3], j[2], 1'b0, j[6], j[5], j[4]};
 endfunction
+wire [7:0] p1a_dig = p_dig(joystick_0);
+wire [7:0] sonic_p1a = {p1a_dig[7:3], ~joystick_2[4], p1a_dig[1:0]};
+wire [7:0] core_p1a = (board_desc.prot_sel == PROT_SONIC) ? sonic_p1a : p1a_dig;
 
 // --- Analog-stick gun aiming (alien3/jpark) --------------------------------
 // The gun channels are MAME IPT_AD_STICK_X/Y: absolute, offset-binary, resting
@@ -603,7 +606,12 @@ assign trk_dy_a[2] = joystick_2[2] ? TRK_STEP : joystick_2[3] ? -TRK_STEP : 9'sd
 wire [7:0] portc = 8'hff;
 wire test_btn = status[7] | joystick_0[12] | joystick_1[12];
 wire svc_btn  = joystick_0[13] | joystick_1[13];
-wire [7:0] svc12 = ~{2'b00, joystick_1[10], joystick_0[10],
+// SegaSonic maps Coin 3 and 3 Players Start to the upper service bits;
+// mirror the primary player controls there when the Sonic protection profile
+// is selected so a normal cabinet coin/start press can join the game.
+wire [7:0] svc12 = ~{(board_desc.prot_sel == PROT_SONIC) ? joystick_0[10] : 1'b0,
+                     (board_desc.prot_sel == PROT_SONIC) ? joystick_0[11] : 1'b0,
+                     joystick_1[10], joystick_0[10],
                      joystick_1[11], joystick_0[11], test_btn, svc_btn};
 // Port F/SERVICE34: bits 3:0 = DIP SW1:1-4 (Off), bit4 = PCB Push SW1
 // (Service), bit5 = PCB Push SW2 (Test), bit6 unknown; bit7 is replaced by the
@@ -676,7 +684,7 @@ s32_core core (
     .eep_ld_wr(eep_wr), .eep_ld_addr(eep_waddr), .eep_ld_data(eep_wdata),
     .eep_rd_data(eep_rd_data), .eep_rd_addr(eep_rd_addr),
     .eep_upload(eep_upload), .eep_modified(eep_modified),
-    .in_p1a(p_dig(joystick_0)), .in_p2a(p_dig(joystick_1)),
+    .in_p1a(core_p1a), .in_p2a(p_dig(joystick_1)),
     .in_portc(portc), .in_svc12(svc12), .in_svc34(svc34),
     .in_p1b(p_dig(joystick_2)), .in_p2b(p_dig(joystick_3)),
     .in_portc_b(8'hff), .in_svc12_b(8'hff), .in_svc34_b(8'hff),
