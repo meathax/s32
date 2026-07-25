@@ -1,3 +1,4 @@
+# This core is 100% AI coded
 # Sega System 32 / Multi 32 for MiSTer
 
 An open FPGA recreation of Sega's System 32 and Multi 32 arcade hardware
