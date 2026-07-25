@@ -92,14 +92,6 @@ Copy `SegaS32.rbf` to `_Arcade/cores/` and the matching `.mra` files to
 helper accepts the MiSTer host at runtime; no host, password, token, or SSH key
 is stored in the repository.
 
-## Public-release hygiene
-
-The repository intentionally contains RTL, testbenches, documentation, MRA
-metadata, and build scripts only. ROM archives, Quartus databases, RBF output,
-simulator work directories, local logs, machine-specific credentials, and
-private keys are ignored. Before publishing, run the repository's CI checks and
-review `git diff --cached`; never commit a MiSTer password or private SSH key.
-
 ## Licence and credits
 
 The behavioral reference is MAME's `segas32` driver. The V25 execution core is
