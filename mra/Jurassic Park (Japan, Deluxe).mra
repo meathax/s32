@@ -5,6 +5,7 @@
   <year>1993</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
+  <buttons names="Shoot,-,-,-,-,-,Start,Coin,Test,Service" default="A,-,-,-,-,-,Start,Select,R,L" count="10"/>
   <rom index="0" zip="jparkja.zip" md5="none">
     <part>08040083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="epr-16400.ic8" crc="321c3411"/>

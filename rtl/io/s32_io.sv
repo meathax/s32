@@ -28,7 +28,7 @@ module s32_io5296 (
 
 // registers 0-7 = ports A-H, 8-B = 'S''E''G''A' signature, C/E = CNT,
 // D/F = direction, 10-1F = unused (read 0xff).  Matches MAME 315_5296.cpp
-// read()/write() (D:\Arcade\AI\MAMESOURCE\...\315_5296.cpp).  System 32 wires
+// read()/write() in MAME's 315_5296 device.  System 32 wires
 // A/B/C/E/F as inputs and D/G/H as outputs; the games program DIR to match, so
 // the fixed port-direction hardcode below is equivalent to MAME's DIR-gated
 // port 0-7 access for these boards (a documented-benign device-model divergence
@@ -78,21 +78,23 @@ endmodule
 // ---------------------------------------------------------------------------
 // MiSTer index-3 NVRAM upload adapter. The MRA persists 128 bytes while the
 // 93C46 is organized as 64 little-endian 16-bit words.
-module s32_eeprom_nvram_if (
+module s32_eeprom_nvram_if #(parameter WIDE=0) (
     input             ioctl_upload,
     input      [15:0] ioctl_index,
     input      [26:0] ioctl_addr,
     input      [15:0] eep_rd_data,
     output            eep_upload,
     output      [5:0] eep_rd_addr,
-    output      [7:0] ioctl_din
+    output     [15:0] ioctl_din
 );
 
 assign eep_upload = ioctl_upload && (ioctl_index == 16'd3);
 assign eep_rd_addr = ioctl_addr[6:1];
-assign ioctl_din = eep_upload
-                 ? (ioctl_addr[0] ? eep_rd_data[15:8] : eep_rd_data[7:0])
-                 : 8'h00;
+assign ioctl_din = WIDE
+                 ? (eep_upload ? eep_rd_data : 16'h0000)
+                 : {8'h00, (eep_upload
+                     ? (ioctl_addr[0] ? eep_rd_data[15:8] : eep_rd_data[7:0])
+                     : 8'h00)};
 
 endmodule
 

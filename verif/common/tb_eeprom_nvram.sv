@@ -29,7 +29,7 @@ reg  [15:0] serial_readback;
 reg         ioctl_upload = 1'b0;
 reg  [15:0] ioctl_index = 16'd0;
 reg  [26:0] ioctl_addr = 27'd0;
-wire  [7:0] ioctl_din;
+wire [15:0] ioctl_din;
 wire        eep_upload;
 
 s32_eeprom_nvram_if nvram_if (
@@ -185,7 +185,7 @@ begin
     ioctl_addr = address;
     @(posedge clk);
     #1;
-    check(ioctl_din === expected, "index-3 little-endian upload byte");
+    check(ioctl_din[7:0] === expected && ioctl_din[15:8] === 8'h00, "index-3 little-endian upload byte");
 end
 endtask
 
@@ -204,7 +204,7 @@ initial begin
     check(!modified, "loader writes leave EEPROM clean");
 
     set_upload(16'd2, 1'b1);
-    check(!eep_upload && ioctl_din === 8'h00,
+    check(!eep_upload && ioctl_din === 16'h0000,
           "non-NVRAM upload index is isolated");
     set_upload(16'd2, 1'b0);
 

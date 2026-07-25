@@ -16,7 +16,7 @@
 
 import s32_pkg::*;
 
-module s32_rom_loader (
+module s32_rom_loader #(parameter WIDE=0) (
     input             clk,
     input             rst,
     input             mem_ready,
@@ -25,7 +25,7 @@ module s32_rom_loader (
     input       [7:0] ioctl_index,
     input             ioctl_wr,
     input      [26:0] ioctl_addr,
-    input       [7:0] ioctl_dout,
+    input      [15:0] ioctl_dout,
     output            ioctl_wait,
 
     // board descriptor out
@@ -129,57 +129,47 @@ always @(posedge clk) begin
 `ifdef SIMULATION
                 dl_addr_last <= ioctl_addr;
 `endif
-                if (ioctl_addr < OFF_MAINCPU) begin
-                    // descriptor
-                    if (ioctl_addr[26:4] == 0) desc_bytes[ioctl_addr[3:0]] <= ioctl_dout;
-                    if (ioctl_addr == OFF_MAINCPU-1) begin
-                        desc_r.multi32     <= desc_bytes[0][0];
-                        desc_r.has_v25     <= desc_bytes[0][1];
-                        desc_r.v25_table   <= desc_bytes[0][2];
-                        desc_r.has_adc     <= desc_bytes[0][3];
-                        desc_r.has_track   <= desc_bytes[0][4];
-                        desc_r.has_ppi     <= desc_bytes[0][5];
-                        desc_r.has_dsp_hle <= desc_bytes[0][6];
-                        desc_r.has_cd_stub <= desc_bytes[0][7];
-                        desc_r.dual_pcb    <= desc_bytes[1][0];
-                        desc_r.prot_sel    <= desc_bytes[2][6:0];
-                        desc_r.sprite_bank_valid <= desc_bytes[3][7];
-                        desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
-                        desc_r.flip_y            <= desc_bytes[1][1];
-                        desc_r.gun_aim           <= desc_bytes[1][2];
+                if (WIDE) begin
+                    // WIDE=1 presents one little-endian 16-bit stream word at
+                    // each even ioctl_addr. Preserve the exact fixed stream
+                    // offsets and emit one full SDRAM word per transfer.
+                    if (ioctl_addr < OFF_MAINCPU) begin
+                        if (ioctl_addr[26:4] == 0) begin
+                            desc_bytes[ioctl_addr[3:0]] <= ioctl_dout[7:0];
+                            desc_bytes[ioctl_addr[3:0] + 1'b1] <= ioctl_dout[15:8];
+                        end
+                        if (ioctl_addr == OFF_MAINCPU-27'd2) begin
+                            desc_r.multi32     <= desc_bytes[0][0];
+                            desc_r.has_v25     <= desc_bytes[0][1];
+                            desc_r.v25_table   <= desc_bytes[0][2];
+                            desc_r.has_adc     <= desc_bytes[0][3];
+                            desc_r.has_track   <= desc_bytes[0][4];
+                            desc_r.has_ppi     <= desc_bytes[0][5];
+                            desc_r.has_dsp_hle <= desc_bytes[0][6];
+                            desc_r.has_cd_stub <= desc_bytes[0][7];
+                            desc_r.dual_pcb    <= desc_bytes[1][0];
+                            desc_r.prot_sel    <= desc_bytes[2][6:0];
+                            desc_r.sprite_bank_valid <= desc_bytes[3][7];
+                            desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
+                            desc_r.flip_y            <= desc_bytes[1][1];
+                            desc_r.gun_aim           <= desc_bytes[1][2];
+                            desc_r.coin_swap         <= desc_bytes[1][3];
+                        end
                     end
-                end
-                else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
-                    logic [24:0] ma;
-                    // Preserve the legacy observation port for focused loader
-                    // tests, but store the production image in external SDRAM.
-                    v25_wr    <= 1'b1;
-                    v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
-                    v25_wdata <= ioctl_dout;
-                    // The descramble permutation preserves address bits 1:0,
-                    // so stream bytes 2k/2k+1 always land in the SAME sdram
-                    // word (lanes lo/hi).  Pair them and use the ordinary
-                    // full-word write path: the per-byte DQM-masked writes
-                    // this replaced were the only masked writes in the whole
-                    // design and were observed corrupting scattered bytes of
-                    // exactly this region on real hardware (V25 image-hash
-                    // diagnostic, 2026-07-22) while every full-word region
-                    // loads perfectly.
-                    if (!ioctl_addr[0]) byte_lo <= ioctl_dout;
-                    else begin
+                    else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
+                        logic [24:0] ma;
+                        // The real V25 consumes the external SDRAM image;
+                        // this pulse invalidates its cache while reset is held.
+                        v25_wr    <= 1'b1;
+                        v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
+                        v25_wdata <= ioctl_dout[7:0];
                         ma = map_addr(ioctl_addr);
                         sdr_wr_req  <= 1'b1;
                         busy        <= 1'b1;
                         sdr_wr_addr <= ma[24:1];
-                        sdr_wr_din  <= {ioctl_dout, byte_lo};
+                        sdr_wr_din  <= ioctl_dout;
                         sdr_wr_be   <= 2'b11;
                     end
-                end
-                else begin
-                    // SDRAM regions: global stream addresses are aligned, so
-                    // parity is a deterministic byte-pair marker and cannot
-                    // leak state between ioctl indexes.
-                    if (!ioctl_addr[0]) byte_lo <= ioctl_dout;
                     else begin
                         sdr_wr_req <= 1'b1;
                         busy       <= 1'b1;
@@ -188,21 +178,80 @@ always @(posedge clk) begin
                             ma = map_addr(ioctl_addr);
                             sdr_wr_addr <= ma[24:1];
                         end
-                        sdr_wr_din <= {ioctl_dout, byte_lo}; // little-endian stream
+                        sdr_wr_din <= ioctl_dout;
                         sdr_wr_be  <= 2'b11;
+                    end
+                end
+                else begin
+                    // Byte-mode fallback retained for simulation and older
+                    // host integrations. The live MiSTer top selects WIDE=1.
+                    if (ioctl_addr < OFF_MAINCPU) begin
+                        if (ioctl_addr[26:4] == 0) desc_bytes[ioctl_addr[3:0]] <= ioctl_dout[7:0];
+                        if (ioctl_addr == OFF_MAINCPU-1) begin
+                            desc_r.multi32     <= desc_bytes[0][0];
+                            desc_r.has_v25     <= desc_bytes[0][1];
+                            desc_r.v25_table   <= desc_bytes[0][2];
+                            desc_r.has_adc     <= desc_bytes[0][3];
+                            desc_r.has_track   <= desc_bytes[0][4];
+                            desc_r.has_ppi     <= desc_bytes[0][5];
+                            desc_r.has_dsp_hle <= desc_bytes[0][6];
+                            desc_r.has_cd_stub <= desc_bytes[0][7];
+                            desc_r.dual_pcb    <= desc_bytes[1][0];
+                            desc_r.prot_sel    <= desc_bytes[2][6:0];
+                            desc_r.sprite_bank_valid <= desc_bytes[3][7];
+                            desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
+                            desc_r.flip_y            <= desc_bytes[1][1];
+                            desc_r.gun_aim           <= desc_bytes[1][2];
+                            desc_r.coin_swap         <= desc_bytes[1][3];
+                        end
+                    end
+                    else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
+                        logic [24:0] ma;
+                        v25_wr    <= 1'b1;
+                        v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
+                        v25_wdata <= ioctl_dout[7:0];
+                        if (!ioctl_addr[0]) byte_lo <= ioctl_dout[7:0];
+                        else begin
+                            ma = map_addr(ioctl_addr);
+                            sdr_wr_req  <= 1'b1;
+                            busy        <= 1'b1;
+                            sdr_wr_addr <= ma[24:1];
+                            sdr_wr_din  <= {ioctl_dout[7:0], byte_lo};
+                            sdr_wr_be   <= 2'b11;
+                        end
+                    end
+                    else begin
+                        if (!ioctl_addr[0]) byte_lo <= ioctl_dout[7:0];
+                        else begin
+                            sdr_wr_req <= 1'b1;
+                            busy       <= 1'b1;
+                            begin
+                                logic [24:0] ma;
+                                ma = map_addr(ioctl_addr);
+                                sdr_wr_addr <= ma[24:1];
+                            end
+                            sdr_wr_din <= {ioctl_dout[7:0], byte_lo};
+                            sdr_wr_be  <= 2'b11;
+                        end
                     end
                 end
             end
             else if (ioctl_index == 8'd2 || ioctl_index == 8'd3) begin
-                // Factory image (2) or persisted NVRAM (3), 128 bytes ->
-                // 64 little-endian words. A saved image naturally overrides
-                // a factory image when both are supplied.
-                if (!ioctl_addr[0]) byte_lo <= ioctl_dout;
-                else begin
+                // Factory image (2) or persisted NVRAM (3), 128 bytes.
+                if (WIDE) begin
                     eep_wr     <= 1'b1;
                     eep_waddr  <= ioctl_addr[6:1];
-                    eep_wdata  <= {ioctl_dout, byte_lo};
+                    eep_wdata  <= ioctl_dout;
                     eep_loaded <= 1'b1;
+                end
+                else begin
+                    if (!ioctl_addr[0]) byte_lo <= ioctl_dout[7:0];
+                    else begin
+                        eep_wr     <= 1'b1;
+                        eep_waddr  <= ioctl_addr[6:1];
+                        eep_wdata  <= {ioctl_dout[7:0], byte_lo};
+                        eep_loaded <= 1'b1;
+                    end
                 end
             end
         end

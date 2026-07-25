@@ -3,21 +3,25 @@ REM ===========================================================================
 REM  Build SegaS32.rbf on Windows.  Run from anywhere:
 REM      tools\build.bat        (from the repo root)
 REM      .\build.bat            (from inside tools\)
-REM  Set QUARTUS_ROOT if your install is not at D:\Q.
+REM  Set QUARTUS_ROOT to the directory containing quartus\bin64.
 REM ===========================================================================
 
 REM Always operate from the repo root (the parent of this script's folder).
 cd /d "%~dp0.."
 echo Working directory: %CD%
 
-if "%QUARTUS_ROOT%"=="" set QUARTUS_ROOT=D:\Q
+if "%QUARTUS_ROOT%"=="" (
+  echo ERROR: QUARTUS_ROOT is not set.
+  echo Set it to your Quartus installation, e.g.  set QUARTUS_ROOT=C:\intelFPGA_lite\17.0
+  exit /b 1
+)
 
 set QBIN=%QUARTUS_ROOT%\quartus\bin64
 set QSYS=%QUARTUS_ROOT%\quartus\sopc_builder\bin
 
 if not exist "%QBIN%\quartus_sh.exe" (
   echo ERROR: quartus_sh not found at %QBIN%.
-  echo Set QUARTUS_ROOT to your Quartus folder, e.g.  set QUARTUS_ROOT=D:\Q
+  echo Set QUARTUS_ROOT to your Quartus folder, e.g.  set QUARTUS_ROOT=C:\intelFPGA_lite\17.0
   exit /b 1
 )
 

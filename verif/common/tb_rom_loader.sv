@@ -24,7 +24,7 @@ reg         ioctl_download = 1'b0;
 reg  [7:0]  ioctl_index = 8'd0;
 reg         ioctl_wr = 1'b0;
 reg  [26:0] ioctl_addr = 27'd0;
-reg  [7:0]  ioctl_dout = 8'd0;
+reg [15:0]  ioctl_dout = 16'd0;
 wire        ioctl_wait;
 
 wire board_desc_t board_desc;

@@ -3124,8 +3124,8 @@ function automatic [1:0] f12_dim1(input [7:0] op);
         8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h40, 8'h41, 8'h20, 8'h21,
         8'h38, 8'h39, 8'h50, 8'h51, 8'h80, 8'h81, 8'h88,
         8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1, 8'ha8, 8'hb0, 8'hb1,
-        8'hb8, 8'h49, 8'h4b, 8'h4d, 8'h4e, 8'h4f:
-            f12_dim1 = 2'd0;   // CALL address and CHLVL/CHKA byte operands
+        8'hb8, 8'h47, 8'h49, 8'h4b, 8'h4d, 8'h4e, 8'h4f:
+            f12_dim1 = 2'd0;   // SETF/CHLVL/CHKA byte operands; CALL address
         // NOTE: ROTH (8b) / ROTCH (9b) must NOT appear here — their op1 is
         // the rotate COUNT, a byte (MAME ReadAM dim 0); listing them in the
         // half group made `ROT.H #imm8, r6` decode one byte long and holo's
@@ -3146,7 +3146,7 @@ function automatic [1:0] f12_dim2(input [7:0] op);
         8'h09, 8'h19, 8'h29, 8'h38, 8'h39, 8'h41, 8'h50, 8'h51,
         8'h80, 8'h81, 8'h88, 8'h90, 8'h91, 8'h98, 8'ha0, 8'ha1,
         8'ha8, 8'hb0, 8'hb1, 8'hb8, 8'h89, 8'h99, 8'ha9, 8'hb9,
-        8'h4b, 8'h4d, 8'h4e, 8'h4f: f12_dim2 = 2'd0;
+        8'h47, 8'h4b, 8'h4d, 8'h4e, 8'h4f: f12_dim2 = 2'd0;
         8'h0a, 8'h0b, 8'h1b, 8'h2b, 8'h3a, 8'h3b, 8'h43, 8'h52, 8'h53,
         8'h82, 8'h83, 8'h8a, 8'h92, 8'h93, 8'h9a, 8'ha2, 8'ha3, 8'haa,
         8'hb2, 8'hb3, 8'hba, 8'h8b, 8'h9b, 8'hab, 8'hbb: f12_dim2 = 2'd1;
@@ -3498,9 +3498,18 @@ task automatic exec_op;
             logic [31:0] sa, sb, maga, magb;
             is_rem    = (cur_op[7:4] == 4'h5);
             is_signed = is_rem ? ~cur_op[0] : ~cur_op[4];
-            // sign-extend operands to 32 bits per operand size
-            sa = (d2==2'd0) ? {{24{a[7]}},a[7:0]} : (d2==2'd1) ? {{16{a[15]}},a[15:0]} : a;
-            sb = (d2==2'd0) ? {{24{b[7]}},b[7:0]} : (d2==2'd1) ? {{16{b[15]}},b[15:0]} : b;
+            // Signed DIV/REM sign-extend width-sized operands; unsigned
+            // DIVU/REMU must zero-extend them.  Sign-extending an unsigned
+            // halfword dividend with bit 15 set turned GA2's fixed-point
+            // 0xC000 boss-meter numerator into 0xFFFFC000.
+            sa = is_signed
+               ? ((d2==2'd0) ? {{24{a[7]}},a[7:0]} :
+                  (d2==2'd1) ? {{16{a[15]}},a[15:0]} : a)
+               : dimext(a, d2);
+            sb = is_signed
+               ? ((d2==2'd0) ? {{24{b[7]}},b[7:0]} :
+                  (d2==2'd1) ? {{16{b[15]}},b[15:0]} : b)
+               : dimext(b, d2);
             maga = (is_signed && sa[31]) ? (~sa + 1'b1) : sa;
             magb = (is_signed && sb[31]) ? (~sb + 1'b1) : sb;
             mdop   <= maga;

@@ -41,16 +41,16 @@ STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
 #   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
 PROT = dict(NONE=0, SONIC=1, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
 def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0, dsp=0, cd=0,
-         dual=0, flip_y=0, prot=0, gun=0):
+         dual=0, flip_y=0, prot=0, gun=0, coin_swap=0):
     b0 = (multi32 | v25 << 1 | v25table << 2 | adc << 3 | track << 4 |
           ppi << 5 | dsp << 6 | cd << 7)
-    d = bytes([b0, dual | (flip_y << 1) | (gun << 2), prot]) + bytes(61)
+    d = bytes([b0, dual | (flip_y << 1) | (gun << 2) | (coin_swap << 3), prot]) + bytes(61)
     return d
 
 GAMES = {
     # parent: (descriptor, per-set list built from clones automatically)
     "arescue":  desc(adc=1, dsp=1, dual=1),
-    "alien3":   desc(adc=1, gun=1),
+    "alien3":   desc(adc=1, gun=1, coin_swap=1),
     "arabfgt":  desc(v25=1, v25table=1, ppi=1),
     "brival":   desc(ppi=1, prot=PROT["BRIVAL"]),
     "darkedge": desc(ppi=1, prot=PROT["DARKEDGE"]),
@@ -81,12 +81,20 @@ GAMES = {
 # remapping UI metadata as well as the ROM stream.
 BUTTONS = {
     "ga2": (
-        "Attack,Jump,Magic,-,-,-,Start,Coin,Test",
-        "A,B,X,-,-,-,Start,Select,R",
+        "Attack,Jump,Magic,-,-,-,Start,Coin,Test,Service",
+        "A,B,X,-,-,-,Start,Select,R,L",
+    ),
+    "jpark": (
+        "Shoot,-,-,-,-,-,Start,Coin,Test,Service",
+        "A,-,-,-,-,-,Start,Select,R,L",
+    ),
+    "alien3": (
+        "Trigger,Button,-,-,-,-,Start,Coin,Test,Service",
+        "A,B,-,-,-,-,Start,Select,R,L",
     ),
     "spidman": (
-        "Attack,Jump,-,-,-,-,Start,Coin,Test",
-        "A,B,-,-,-,-,Start,Select,R",
+        "Attack,Jump,-,-,-,-,Start,Coin,Test,Service",
+        "A,B,-,-,-,-,Start,Select,R,L",
     ),
 }
 

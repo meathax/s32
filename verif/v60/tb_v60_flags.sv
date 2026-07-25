@@ -128,7 +128,22 @@ initial begin
     ab(8'hA5); ab(8'h60 | 5'd29); ab(8'h60 | 5'd28); // DIV.W R29 /= R28
     getpsw(5'd30);
 
+    // 11: Golden Axe executes SETF #4 against adjacent byte fields at
+    // 0x2C7B and 0x2C7A.  SETF is byte-sized: each instruction must update
+    // only its addressed byte and preserve the following coinage fields.
+    movw_imm(5'd0, 32'h0000_0000);
+    movw_imm(5'd1, 32'h0000_0001);
+    movw_imm(5'd25, 32'h0000_0000);
+    ab(8'hB8); ab(8'h40); ab(8'h60);             // CMP.B R0,R0: Z=1
+    ab(8'h47); ab(8'h80); ab(8'hE4); ab(8'h39); ab(8'h7B); ab(8'h2C);
+    ab(8'hB8); ab(8'h41); ab(8'h60);             // CMP.B R1,R0: Z=0
+    ab(8'h47); ab(8'h80); ab(8'hE4); ab(8'h39); ab(8'h7A); ab(8'h2C);
+
     ab(8'h00);                                   // HALT
+
+    ram[16'h163D] = 16'hAA55;                    // 2C7A=55, 2C7B=AA
+    ram[16'h163E] = 16'hCCBB;                    // 2C7C=BB, 2C7D=CC
+    ram[16'h163F] = 16'hEEDD;                    // 2C7E=DD, 2C7F=EE
 
     repeat (8) @(posedge clk);
     rst = 0;
@@ -165,6 +180,9 @@ initial begin
     chk((cpu.r[27] & 4'h4) == 4'h4,  "DIV.W min/-1 overflow OV=1");
     chk(cpu.r[29] == 32'h0000_0005, "DIV.W 10/2 result");
     chk((cpu.r[30] & 4'h4) == 4'h0,  "DIV.W 10/2 OV=0");
+    chk(ram[16'h163D] == 16'h0100, "SETF.B updates only 2C7A/2C7B bytes");
+    chk((ram[16'h163E] == 16'hCCBB) && (ram[16'h163F] == 16'hEEDD),
+        "SETF.B preserves adjacent coinage bytes 2C7C-2C7F");
 
     if (fail == 0) $display("V60 FLAGS PASS (%0d checks)", pass);
     else           $display("V60 FLAGS FAIL (%0d/%0d failed)", fail, pass+fail);

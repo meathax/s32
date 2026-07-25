@@ -819,6 +819,24 @@ always @(posedge clk_sys) begin
             core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata, core.m_be);
 end
 
+// Optional write-range trace for semantic comparisons against MAME.  Frames
+// are metadata only; compare the ordered PC/address/data/lane transactions.
+integer trace_lo, trace_hi;
+initial begin
+    if (!$value$plusargs("TRACELO=%h", trace_lo)) trace_lo = -1;
+    if (!$value$plusargs("TRACEHI=%h", trace_hi)) trace_hi = -1;
+end
+always @(posedge clk_sys) begin
+    if (trace_lo >= 0 && trace_hi >= trace_lo &&
+        core.m_req && core.m_ack && core.m_we && !core.ack_d &&
+        {core.A[23:1],1'b0} >= trace_lo[23:0] &&
+        {core.A[23:1],1'b0} <= trace_hi[23:0]) begin
+        $display("[memtrace] f=%0d pc=%08x a=%06x d=%04x be=%b op=%02x st=%0d",
+            cur_frame, core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_wdata,
+            core.m_be, core.v60.cur_op, core.v60.st);
+    end
+end
+
 // ModelSim X-provenance aid for GA2's object-state setup.  The behavioural
 // work RAM is zero-filled, so an unknown at these locations must have arrived
 // on a CPU write.  Keep this diagnostic inert unless +XDIAG is requested.

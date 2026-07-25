@@ -105,7 +105,6 @@ function Resolve-ModelSimDirectory {
     $vsimCommand = Get-Command "vsim.exe" -ErrorAction SilentlyContinue
     if ($vsimCommand) { $candidates.Add((Split-Path -Parent $vsimCommand.Source)) }
 
-    $candidates.Add("D:\Q\modelsim_ase\win32aloem")
     foreach ($candidate in $candidates) {
         foreach ($directory in @($candidate, (Join-Path $candidate "win32aloem"))) {
             if ((Test-Path -LiteralPath (Join-Path $directory "vlib.exe")) -and
@@ -409,6 +408,7 @@ try {
     Run-HdlTest "t07_v60_audit" "tb_v60_audit" ($V60Sources + "verif/v60/tb_v60_audit.sv") "AUDIT PASS"
     Run-HdlTest "t07_v60_search" "tb_v60_search" ($V60Sources + "verif/v60/tb_v60_search.sv") "V60 SEARCH PASS"
     Run-HdlTest "t07_v60_flags" "tb_v60_flags" ($V60Sources + "verif/v60/tb_v60_flags.sv") "V60 FLAGS PASS"
+    Run-HdlTest "t07_v60_ga2_bossbar" "tb_v60_ga2_bossbar" ($V60Sources + "verif/v60/tb_v60_ga2_bossbar.sv") "V60 GA2 BOSSBAR PASS"
     Run-HdlTest "t07_v60_shaov" "tb_v60_shaov" ($V60Sources + "verif/v60/tb_v60_shaov.sv") "V60 SHAOV PASS"
     Run-HdlTest "t07_v60_incdecmem" "tb_v60_incdecmem" ($V60Sources + "verif/v60/tb_v60_incdecmem.sv") "V60 INCDECMEM PASS"
     Run-HdlTest "t07_v60_movd" "tb_v60_movd" ($V60Sources + "verif/v60/tb_v60_movd.sv") "V60 MOVD PASS"
@@ -460,6 +460,7 @@ try {
 
     Write-Tier 17 "ROM loader reset / mapping / completion gating"
     Run-HdlTest "t17_rom_loader" "tb_rom_loader" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader.sv") "ROM LOADER PASS"
+    Run-HdlTest "t17_rom_loader_wide" "tb_rom_loader_wide" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader_wide.sv") "WIDE ROM LOADER PASS"
 
     Write-Tier 18 "EEPROM NVRAM upload byte order / dirty-state persistence"
     Run-HdlTest "t18_eeprom" "tb_eeprom_nvram" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_eeprom_nvram.sv") "EEPROM NVRAM PASS"
@@ -495,8 +496,9 @@ try {
     Write-Tier 25 "V25 HLE mailbox BRAM timing / wakeup / protection overlays"
     Run-HdlTest "t25_v25_dpram" "tb_v25_dpram" @("rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv", "rtl/prot/s32_prot.sv", "verif/common/tb_v25_dpram.sv") "V25 DPRAM PASS"
 
-    Write-Tier 26 "SDRAM CL2 centred input capture / first-word freshness / burst ordering"
+    Write-Tier 26 "SDRAM CL2 capture / row-open ROM write throughput / burst ordering"
     Run-HdlTest "t26_sdram" "tb_sdram" @("rtl/mem/sdram.sv", "verif/common/tb_sdram.sv") "SDRAM CAPTURE PASS"
+    Run-HdlTest "t26_sdram_write" "tb_sdram_write_throughput" @("rtl/mem/sdram.sv", "verif/common/tb_sdram_write_throughput.sv") "SDRAM WRITE THROUGHPUT PASS"
 
     Write-Tier 27 "integrated sprite renderer / backpressured DDR framebuffer stress"
     Run-HdlTest "t27_sprite_fb" "tb_sprite_fb" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_fb.sv") "SPRITE FB PASS"

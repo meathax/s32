@@ -35,7 +35,6 @@ function Resolve-ModelSim {
     }
     $command = Get-Command "vsim.exe" -ErrorAction SilentlyContinue
     if ($command) { $candidates.Add((Split-Path -Parent $command.Source)) }
-    $candidates.Add("D:\Q\modelsim_ase\win32aloem")
 
     foreach ($candidate in $candidates) {
         foreach ($directory in @($candidate, (Join-Path $candidate "win32aloem"))) {

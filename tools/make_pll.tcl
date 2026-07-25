@@ -3,9 +3,9 @@
 #   outclk_0 = 96.648 MHz, outclk_1 = 48.324 MHz (DESIGN.md §3.3).
 #
 # Run from the repo root with the qsys scripting tool from your Quartus
-# install, e.g. (Windows, Quartus at D:\Q):
-#   D:\Q\quartus\sopc_builder\bin\qsys-script.exe --script=tools/make_pll.tcl
-#   D:\Q\quartus\sopc_builder\bin\qsys-generate.exe rtl/pll/pll.qsys \
+# install. Run the following from the repository root (with Quartus on PATH):
+#   qsys-script --script=tools/make_pll.tcl
+#   qsys-generate rtl/pll/pll.qsys \
 #       --synthesis=VERILOG --output-directory=rtl/pll
 #
 # tools/build.bat does both of these plus the compile.

@@ -134,7 +134,6 @@ localparam CONF_STR = {
     "O[16:15],CPU Turbo,Normal,x2,x3,x4;",
     "O[12],Pause,Off,On;",
     "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
-    "O[11:8],Debug Video,Game,CPU PC,Progress,First ROM Word,Tile ROM Probe,Sprite ROM Probe,Inputs,Sprite FB/DDR,Palette Rd,FB Overrun,Camera Var,V25;",
     "-;",
     "R[0],Reset;",
     "J1,B1,B2,B3,B4,B5,B6,Start,Coin,Test,Service;",
@@ -243,7 +242,7 @@ wire [63:0] status;
 wire        ioctl_download, ioctl_upload, ioctl_wr, ioctl_rd, ioctl_wait;
 wire [15:0] ioctl_index;
 wire [26:0] ioctl_addr;
-wire  [7:0] ioctl_dout, ioctl_din;
+wire [15:0] ioctl_dout, ioctl_din;
 wire        eep_upload, eep_modified;
 wire  [5:0] eep_rd_addr;
 wire [15:0] eep_rd_data;
@@ -253,7 +252,7 @@ wire [15:0] joystick_l_analog_0, joystick_l_analog_1;
 wire  [7:0] paddle_0, paddle_1;
 wire [24:0] ps2_mouse;
 
-hps_io #(.CONF_STR(CONF_STR)) hps_io (
+hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
     .clk_sys(clk_sys),
     .HPS_BUS(HPS_BUS),
 
@@ -287,7 +286,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io (
 
 // MiSTer MRA NVRAM is a byte stream at index 3. Convert the EEPROM's
 // 64x16 little-endian shadow into that stream for save uploads.
-s32_eeprom_nvram_if eep_nvram_if (
+s32_eeprom_nvram_if #(.WIDE(1)) eep_nvram_if (
     .ioctl_upload(ioctl_upload), .ioctl_index(ioctl_index),
     .ioctl_addr(ioctl_addr), .eep_rd_data(eep_rd_data),
     .eep_upload(eep_upload), .eep_rd_addr(eep_rd_addr),
@@ -306,7 +305,7 @@ wire        eep_wr;
 wire  [5:0] eep_waddr;
 wire [15:0] eep_wdata;
 
-s32_rom_loader loader (
+s32_rom_loader #(.WIDE(1)) loader (
     .clk(clk_sys), .rst(~pll_locked),
     .mem_ready(sdram_ready_sys),
     .ioctl_download(ioctl_download), .ioctl_index(ioctl_index[7:0]),
@@ -336,8 +335,8 @@ wire[127:0] p2_dout;
 // Each returned 16-bit lane is displayed as a 64-pixel colour band by the
 // debug video mux below.  This distinguishes SDRAM burst corruption from the
 // tile/sprite unpackers without changing the normal game path.
-wire debug_tile_probe   = status[11:8] == 4'd4;
-wire debug_sprite_probe = status[11:8] == 4'd5;
+wire debug_tile_probe   = 1'b0;
+wire debug_sprite_probe = 1'b0;
 localparam [24:3] DEBUG_TILE_ADDR = SDR_TILES_BASE[24:3] + 22'd92;
 localparam [24:4] DEBUG_SPR_ADDR  = SDR_SPRITES_BASE[24:4];
 reg         debug_p1_req;
@@ -480,22 +479,14 @@ wire [7:0] core_p1a = (board_desc.prot_sel == PROT_SONIC) ? sonic_p1a : p1a_dig;
 // The gun channels are MAME IPT_AD_STICK_X/Y: absolute, offset-binary, resting
 // at 0x80 (full left/up=0x00, full right/down=0xff).  MiSTer's left analog
 // stick feeds them directly (P1 = stick 0, P2 = stick 1).  Three conditioning
-// stages sit between the raw stick and the MSM6253:
-//   1. per-axis invert, OSD-selectable (alien3 wants XY; steering games want
-//      Off, so this is a toggle rather than a fixed polarity);
-//   2. a small centred deadzone that removes the resting jitter of a noisy
-//      analog stick without shifting the 0x80 rest point;
-//   3. a light first-order IIR to tame the remaining sample-to-sample jitter
-//      that reads as over-sensitivity, while keeping the full 0x00..0xff throw
-//      so the in-game gun-cal screen can still reach the screen edges.
-// Deadzone/smoothing are always on and benefit every analog game; only the
-// invert is game-specific and therefore user-controlled.
-// Gun games (alien3/jpark) carry gun_aim=1 in the board descriptor and default
-// to inverted aim (the correct orientation for a MiSTer stick); the OSD toggle
-// then flips relative to that default so it still overrides per player taste.
+// The archived gun radial-response experiment is kept in
+// scratch/alien3-jurassic-park-gun-radial-response.backup.sv. The live path
+// remains the stable per-axis inversion, deadzone, and IIR conditioning.
+// Gun games retain their default inversion through board_desc.gun_aim; the
+// OSD toggle still permits the user to override it.
 wire aim_inv_x = status[13] ^ board_desc.gun_aim;
 wire aim_inv_y = status[14] ^ board_desc.gun_aim;
-localparam signed [8:0] AIM_DZ = 9'sd6;   // deadzone half-width (LSB about 0x80)
+localparam signed [8:0] AIM_DZ = 9'sd6;
 
 // signed stick -> offset binary (center 0x80), with centred optional inversion
 function automatic [7:0] aim_axis(input [7:0] raw, input inv);
@@ -612,7 +603,9 @@ wire svc_btn  = joystick_0[13] | joystick_1[13];
 wire [7:0] svc12 = ~{(board_desc.prot_sel == PROT_SONIC) ? joystick_0[10] : 1'b0,
                      (board_desc.prot_sel == PROT_SONIC) ? joystick_0[11] : 1'b0,
                      joystick_1[10], joystick_0[10],
-                     joystick_1[11], joystick_0[11], test_btn, svc_btn};
+                     board_desc.coin_swap ? joystick_0[11] : joystick_1[11],
+                     board_desc.coin_swap ? joystick_1[11] : joystick_0[11],
+                     test_btn, svc_btn};
 // Port F/SERVICE34: bits 3:0 = DIP SW1:1-4 (Off), bit4 = PCB Push SW1
 // (Service), bit5 = PCB Push SW2 (Test), bit6 unknown; bit7 is replaced by the
 // EEPROM DO line inside s32_core.  Some games poll the PCB push switches
@@ -915,7 +908,7 @@ wire [23:0] debug_rgb = status[11:8] == 4'd1 ? core_debug_pc[23:0] :
 // yellow=external/OSD reset. Normal game RGB takes over after boot.
 wire [23:0] rgb_out = ioctl_download ? 24'h0000C0 :
                         ~rom_loaded   ? 24'hC00000 :
-                        video_reset   ? 24'hC0C000 : debug_rgb;
+                        video_reset   ? 24'hC0C000 : game_rgb;
 
 assign CE_PIXEL = ce_pix_core;
 assign VGA_R  = rgb_out[23:16];

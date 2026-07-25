@@ -304,8 +304,10 @@ The MRA starts ioctl index 0 with a 64-byte board descriptor. Byte 0 contains
 has_cd_stub}` in ascending bit order. Byte 1 bit 0 selects the dual-PCB bridge
 and bit 1 requests final cabinet Y orientation (set for Holosseum). Byte 2 is
 the protection selector. Byte 3 bit 7 validates physical sprite-bank metadata
-and bits 1:0 hold the bank mask (`0/1/3` for 4/8/16 MiB). Remaining bytes are
-reserved. Release profiles may compile out descriptor-unreachable blocks.
+and bits 1:0 hold the bank mask (`0/1/3` for 4/8/16 MiB).
+Byte 1 bit 2 marks positional-gun analog inversion; bit 3 selects the Alien 3
+Coin1/Coin2 service-bit ordering. Remaining bytes are reserved. Release
+profiles may compile out descriptor-unreachable blocks.
 
 ---
 

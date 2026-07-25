@@ -6,9 +6,9 @@ recorded 2026-07-19).
 
 The source snapshot is stored under ignored
 `scratch/upstream/mame-master-20260719/`, preserving the upstream directory
-layout and BSD-3-Clause source headers. The user-supplied
-`D:/Downloads/segas32.cpp` is byte-identical to the downloaded official file:
-SHA-256 `DB9E1752BF512AB3040CF4AC58F40A89E5BF159ABCFBA95CD4598D3FA11E89AF`.
+layout and BSD-3-Clause source headers. The locally acquired reference file
+was checked byte-for-byte against the upstream commit; its SHA-256 is
+`DB9E1752BF512AB3040CF4AC58F40A89E5BFBA95CD4598D3FA11E89AF`.
 
 | Upstream file | SHA-256 | Core use |
 | --- | --- | --- |

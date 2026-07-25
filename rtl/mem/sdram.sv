@@ -1,7 +1,8 @@
 //============================================================================
 //  Sega System 32 for MiSTer — SDRAM controller
-//  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, strictly serialized single
-//  transactions with auto-precharge (no bank interleave).
+//  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, strictly serialized
+//  transactions. ROM-download writes keep a row open for same-row words and
+//  explicitly precharge before row changes, reads, or refreshes.
 //  Six request ports with bounded round-robin arbitration (DESIGN.md §4.2):
 //    p0: V60 fetch/data (latency critical, 16-bit single)
 //    p1: tile fetch      (64-bit burst = 4 words)
@@ -116,7 +117,7 @@ reg        ref_pend;
 
 typedef enum logic [3:0] {
     ST_IDLE, ST_ACT, ST_RCD1, ST_RCD2, ST_RD, ST_RDW, ST_WR, ST_WRRC,
-    ST_PRE_REF, ST_REF, ST_REFW
+    ST_PRE_XFER, ST_PRE_REF, ST_REF, ST_REFW
 } state_t;
 state_t state = ST_IDLE;
 
@@ -131,6 +132,10 @@ reg [15:0] din_r;
 reg [1:0]  be_r;
 reg [2:0]  wrrc_cnt;
 reg [2:0]  refw_cnt;
+reg [1:0]  pre_cnt;
+reg        row_open;
+reg  [1:0] open_bank;
+reg [12:0] open_row;
 reg [1:0]  ack_stretch;     // acks held 2 clk_ram cycles (clk_sys is /2 sync)
 
 reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
@@ -304,6 +309,10 @@ always @(posedge clk) begin
         state    <= ST_IDLE;
         ref_pend <= 1'b0;
         ref_cnt  <= 10'd0;
+        row_open <= 1'b0;
+        open_bank <= 2'b00;
+        open_row <= 13'd0;
+        pre_cnt <= 2'd0;
         dqm      <= 2'b11;
         cl_pipe  <= 4'b0000;
         ack_stretch <= 0;
@@ -347,6 +356,7 @@ always @(posedge clk) begin
         ST_IDLE: begin
             if (ref_pend && cl_pipe == 0) begin
                 cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
+                row_open <= 1'b0;
                 refw_cnt <= 3'd1;             // tRP >= 2 cycles before REF
                 state <= ST_PRE_REF;
             end
@@ -375,14 +385,37 @@ always @(posedge clk) begin
                 // row-address pins.  Besides making the request mailbox a
                 // clean transaction boundary, this removes the long
                 // pending-request -> priority mux -> output-DDR path.
-                state     <= ST_ACT;
+                // A same-row download write can reuse the active row. Every
+                // other transfer first closes the row explicitly so the read
+                // path retains its original ACT/auto-precharge behavior.
+                if (row_open && wr_pend &&
+                    a[24:23] == open_bank && a[22:10] == open_row) begin
+                    state <= ST_WR;
+                end
+                else if (row_open) begin
+                    cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
+                    row_open <= 1'b0;
+                    pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
+                    state <= ST_PRE_XFER;
+                end
+                else begin
+                    state <= ST_ACT;
+                end
             end
+        end
+
+        ST_PRE_XFER: begin
+            if (pre_cnt == 0) state <= ST_ACT;
+            else pre_cnt <= pre_cnt - 1'd1;
         end
 
         ST_ACT: begin
             cmd      <= CMD_ACT;
             SDRAM_BA <= xfer_addr[24:23];
             SDRAM_A  <= xfer_addr[22:10];
+            open_bank <= xfer_addr[24:23];
+            open_row  <= xfer_addr[22:10];
+            row_open  <= 1'b1;
             state    <= ST_RCD1;
         end
 
@@ -393,15 +426,18 @@ always @(posedge clk) begin
         ST_WR: begin
             cmd      <= CMD_WRITE;
             SDRAM_BA <= xfer_addr[24:23];
-            SDRAM_A  <= {2'b00, 1'b1, xfer_addr[10:1]};  // A10 = auto-precharge
+            SDRAM_A  <= {2'b00, 1'b0, xfer_addr[10:1]};  // keep row open
             dq_out   <= din_r;
             dq_oe    <= 1'b1;
             dqm      <= ~be_r;
-            wrrc_cnt <= 3'd4;   // tDAL ~= 42ns = 5 cycles before next ACT
+            // No auto-precharge is used for download writes. The conservative
+            // two-cycle write-recovery gap is enough before another WRITE on
+            // the same row and still leaves explicit precharge for row changes.
+            wrrc_cnt <= 3'd2;
             state    <= ST_WRRC;
         end
         ST_WRRC: begin
-            if (wrrc_cnt == 3'd4) begin wr_ack <= 1'b1; ack_stretch <= 2'd1; end
+            if (wrrc_cnt == 3'd2) begin wr_ack <= 1'b1; ack_stretch <= 2'd1; end
             if (wrrc_cnt == 0) state <= ST_IDLE;
             else wrrc_cnt <= wrrc_cnt - 1'd1;
         end
@@ -415,7 +451,10 @@ always @(posedge clk) begin
             cl_pipe[0] <= 1'b1;
             xfer_addr[10:1] <= xfer_addr[10:1] + 1'd1;
             rd_issued <= rd_issued + 1'd1;
-            if (rd_issued + 1'd1 == rd_total) state <= ST_RDW;
+            if (rd_issued + 1'd1 == rd_total) begin
+                row_open <= 1'b0; // final CAS requests auto-precharge
+                state <= ST_RDW;
+            end
         end
         ST_RDW: begin
             // wait for capture pipeline to finish (delivery in capture logic);
@@ -426,6 +465,7 @@ always @(posedge clk) begin
         ST_PRE_REF: begin
             if (refw_cnt == 0) begin
                 cmd      <= CMD_REF;
+                row_open <= 1'b0;
                 ref_pend <= 1'b0;
                 refw_cnt <= 3'd6;   // tRC(ref) >= 63ns = 7 cycles
                 state    <= ST_REFW;

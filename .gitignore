@@ -48,11 +48,15 @@ verif/tools/*_tmp/
 
 # Local screenshots, simulator transcripts, and crash diagnostics
 /ga2-*.png
+*.ppm
 /c5_pin_model_dump.txt
 /console_history
 verif/modelsim-*.log
 /verif/t*-retry.log
 *.vstf
+# Generated probe captures (recreate with the verification scripts)
+sim_obj8_writes.txt
+sim_wram_*.hex
 
 # Quartus diagnostics contain machine-specific crash/build details
 cr_ie_info.json

@@ -60,11 +60,11 @@ left on an unmodified hosted runner.
 
 ## Option C — Native Windows Quartus build
 
-If Quartus is at `D:\Q` (set `QUARTUS_ROOT` otherwise):
+Set `QUARTUS_ROOT` to your Quartus installation, then run from the repository root:
 
-```bat
-cd <repo root>
-tools\build.bat
+```powershell
+$env:QUARTUS_ROOT = 'C:\intelFPGA_lite\17.0'
+.\tools\build.bat
 ```
 
 `build.bat` regenerates the PLL, checks that Qsys emitted
