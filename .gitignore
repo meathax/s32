@@ -3,6 +3,7 @@
 undefined/
 scratch/
 roms/
+/docs/
 *.tmp
 
 # Build outputs (Quartus / simulation), for later development phases
