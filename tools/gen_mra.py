@@ -283,7 +283,15 @@ def gen(setname, data, outdir):
         lines.append(
             f'  <buttons names="{names}" default="{defaults}" count="{count}"/>'
         )
-    lines.append('  <rom index="0" zip="%s.zip" md5="none">' % setname)
+    # A clone MRA must be usable with all standard MAME set layouts.  The
+    # parent archive is needed by split sets, while merged sets keep the clone
+    # ROMs in that same parent-named archive.  MiSTer/mra-tools accepts a
+    # pipe-separated list and combines every archive that is present, so a
+    # missing side of the pair is harmless for standalone/non-merged sets.
+    rom_zips = f"{setname}.zip"
+    if parent != setname:
+        rom_zips = f"{parent}.zip|{rom_zips}"
+    lines.append('  <rom index="0" zip="%s" md5="none">' % rom_zips)
     # descriptor
     hexd = bytes(d).hex().upper()
     lines.append(f'    <part>{hexd}</part>')
