@@ -1,3 +1,8 @@
+# Root-level local audit/build transcripts
+/*.log
+/*.err.log
+
+/audit.md
 # Scratch/reference material used during design research — not part of the core.
 # (Pinned MAME sources stay local; provenance and hashes are documented.)
 undefined/

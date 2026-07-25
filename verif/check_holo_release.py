@@ -8,8 +8,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 qsf = (ROOT / "Arcade-SegaSystem32.qsf").read_text(encoding="utf-8")
 assert 'VERILOG_MACRO "S32_SYSTEM32_ONLY=1"' in qsf, "release is not System 32-only"
-assert 'VERILOG_MACRO "S32_HOLO_ONLY=1"' in qsf, "release is not Holosseum-only"
-assert 'VERILOG_MACRO "S32_GA2_ONLY=1"' not in qsf, "GA2 pruning leaked into Holo release"
+assert 'VERILOG_MACRO "S32_GA2_ONLY=1"' in qsf, "release profile must retain GA2/V25"
 # Since 2026-07-21 the release targets are ga2/spidman/arabfgt on the holo
 # profile, so the real V25 (the ga2/arabfgt protection MCU) must now be BUILT
 # IN — the opposite of the original holo-only contract.  Non-V25 games are
@@ -30,7 +29,7 @@ path, tree = matches[0]
 root = tree.getroot()
 assert root.findtext("name") == "Holosseum (US, Rev A)"
 rom = root.find("rom[@index='0']")
-assert rom is not None and rom.get("zip") == "holo.zip"
+assert rom is not None and rom.get("zip") is None
 
 descriptor_part = rom.find("part")
 assert descriptor_part is not None and descriptor_part.text is not None
@@ -41,7 +40,7 @@ assert descriptor[1] == 0x02, "Holo cabinet vertical orientation is missing"
 assert descriptor[2] == 0x00, "Holo unexpectedly selects protection HLE"
 assert descriptor[3] == 0x81, "Holo must expose two physical 4 MiB sprite banks"
 assert descriptor[4:] == bytes(60), "unexpected Holo descriptor options"
-assert not any(part.get("name", "").endswith(".u3") for part in rom.findall("part")), \
+assert root.find("rom[@index='8']") is None, \
     "Holo release unexpectedly carries a V25 program"
 
 print(f"HOLO RELEASE MRA PASS: {path.name}")

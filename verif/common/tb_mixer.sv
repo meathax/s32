@@ -211,10 +211,17 @@ initial begin
         $display("  FAIL winner stage misaligned");
     end
     @(posedge clk_ram); #1;
-    if (mix.second_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
+    if (mix.second_pending !== 1'b0 || mix.context_pending !== 1'b1 ||
+        mix.ph !== 4'hf || mix_addr !== 14'd1) begin
         errors = errors + 1;
-        $display("  FAIL partner/palette stage misaligned: pending=%b ph=%0d addr=%04x",
-                 mix.second_pending, mix.ph, mix_addr);
+        $display("  FAIL partner register stage misaligned: second=%b context=%b ph=%0d addr=%04x",
+                 mix.second_pending, mix.context_pending, mix.ph, mix_addr);
+    end
+    @(posedge clk_ram); #1;
+    if (mix.context_pending !== 1'b0 || mix.ph !== 4'd0 || mix_addr !== 14'd1) begin
+        errors = errors + 1;
+        $display("  FAIL partner/palette context stage misaligned: context=%b ph=%0d addr=%04x",
+                 mix.context_pending, mix.ph, mix_addr);
     end
     @(posedge clk_ram); #1;
     if (mix.ph !== 4'd1 || mix_addr !== 14'd2) begin

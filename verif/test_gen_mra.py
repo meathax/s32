@@ -46,5 +46,24 @@ class ButtonMetadataTests(unittest.TestCase):
             self.assertEqual(buttons.attrib["count"], "10")
 
 
+class OptimizedLayoutTests(unittest.TestCase):
+    def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
+        mra_dir = Path(__file__).parents[1] / "mra"
+        paths = sorted(mra_dir.glob("*.mra"))
+        self.assertEqual(len(paths), 59)
+        for path in paths:
+            root = ElementTree.parse(path).getroot()
+            roms = root.findall("rom")
+            indexes = [int(rom.attrib["index"]) for rom in roms]
+            self.assertEqual(indexes[-1], 0, path.name)
+            self.assertTrue(all(index in {0, 2, 4, 5, 6, 7, 8, 9}
+                                for index in indexes), path.name)
+            descriptor_rom = roms[-1]
+            self.assertNotIn("zip", descriptor_rom.attrib, path.name)
+            descriptor = bytes.fromhex(descriptor_rom.findtext("part", ""))
+            self.assertEqual(len(descriptor), 64, path.name)
+            self.assertTrue(any(index >= 4 for index in indexes), path.name)
+
+
 if __name__ == "__main__":
     unittest.main()

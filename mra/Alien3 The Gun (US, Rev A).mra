@@ -6,8 +6,7 @@
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
   <buttons names="Trigger,Button,-,-,-,-,Start,Coin,Test,Service" default="A,B,-,-,-,-,Start,Select,R,L" count="10"/>
-  <rom index="0" zip="alien3.zip|alien3u.zip" md5="none">
-    <part>080C0083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="alien3.zip|alien3u.zip" md5="none">
     <part name="epr-15941.ic17" crc="bf8c257f"/>
     <part name="epr-15941.ic17" crc="bf8c257f"/>
     <part name="epr-15940a.ic8" crc="8840b51e"/>
@@ -16,6 +15,8 @@
       <part name="mpr-15855.ic18" crc="a6fadabe" map="01"/>
       <part name="mpr-15854.ic9" crc="d1aec392" map="10"/>
     </interleave>
+  </rom>
+  <rom index="5" zip="alien3.zip|alien3u.zip" md5="none">
     <part name="epr-15859a.ic36" crc="91b55bd0"/>
     <part name="epr-15859a.ic36" crc="91b55bd0"/>
     <part name="epr-15859a.ic36" crc="91b55bd0"/>
@@ -23,12 +24,14 @@
     <part name="mpr-15858.ic35" crc="2eb64c10"/>
     <part name="mpr-15857.ic34" crc="915c56df"/>
     <part name="mpr-15856.ic24" crc="a5ef4f1f"/>
+  </rom>
+  <rom index="6" zip="alien3.zip|alien3u.zip" md5="none">
     <interleave output="16">
       <part name="mpr-15863.ic14" crc="9d36b645" map="01"/>
       <part name="mpr-15862.ic5" crc="9e277d25" map="10"/>
     </interleave>
-    <part repeat="4194304">FF</part>
-    <part repeat="65536">FF</part>
+  </rom>
+  <rom index="9" zip="alien3.zip|alien3u.zip" md5="none">
     <interleave output="64">
       <part name="mpr-15864.ic32" crc="58207157" map="00000021"/>
       <part name="mpr-15866.ic30" crc="9c53732c" map="00002100"/>
@@ -46,4 +49,7 @@
     <part name="93c45_eeprom.ic76" crc="6e1d9df3"/>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>080C0083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>

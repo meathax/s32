@@ -20,5 +20,13 @@ report_timing \
     -show_routing \
     -file $report_file
 
+report_timing \
+    -hold \
+    -to_clock $core_clock \
+    -npaths 50 \
+    -nworst 10 \
+    -detail full_path \
+    -show_routing \
+
 delete_timing_netlist
 project_close

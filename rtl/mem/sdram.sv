@@ -116,8 +116,8 @@ reg [9:0]  ref_cnt;
 reg        ref_pend;
 
 typedef enum logic [3:0] {
-    ST_IDLE, ST_ACT, ST_RCD1, ST_RCD2, ST_RD, ST_RDW, ST_WR, ST_WRRC,
-    ST_PRE_XFER, ST_PRE_REF, ST_REF, ST_REFW
+    ST_IDLE, ST_DISPATCH, ST_ACT, ST_RCD1, ST_RCD2, ST_RD, ST_RDW,
+    ST_WR, ST_WRRC, ST_PRE_XFER, ST_PRE_REF, ST_REF, ST_REFW
 } state_t;
 state_t state = ST_IDLE;
 
@@ -381,26 +381,32 @@ always @(posedge clk) begin
                 be_r      <= wr_be_p;
                 rd_issued   <= 0;
                 rd_captured <= 0;
-                // Register the arbitration result before it drives the SDRAM
-                // row-address pins.  Besides making the request mailbox a
-                // clean transaction boundary, this removes the long
-                // pending-request -> priority mux -> output-DDR path.
-                // A same-row download write can reuse the active row. Every
-                // other transfer first closes the row explicitly so the read
-                // path retains its original ACT/auto-precharge behavior.
-                if (row_open && wr_pend &&
-                    a[24:23] == open_bank && a[22:10] == open_row) begin
-                    state <= ST_WR;
-                end
-                else if (row_open) begin
-                    cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
-                    row_open <= 1'b0;
-                    pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
-                    state <= ST_PRE_XFER;
-                end
-                else begin
-                    state <= ST_ACT;
-                end
+                // Register arbitration before command generation.  The
+                // dedicated dispatch cycle breaks the dense real-V25 path
+                // from p5_pend through the six-port priority mux and row
+                // decision into cmd[].  Requesters already wait for ack, so
+                // the extra clk_ram cycle changes latency but not semantics.
+                state <= ST_DISPATCH;
+            end
+        end
+
+        ST_DISPATCH: begin
+            // A same-row download write can reuse the active row. Every other
+            // transfer first closes the row explicitly so reads retain their
+            // original ACT/auto-precharge behavior.
+            if (row_open && is_write &&
+                xfer_addr[24:23] == open_bank &&
+                xfer_addr[22:10] == open_row) begin
+                state <= ST_WR;
+            end
+            else if (row_open) begin
+                cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
+                row_open <= 1'b0;
+                pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
+                state <= ST_PRE_XFER;
+            end
+            else begin
+                state <= ST_ACT;
             end
         end
 

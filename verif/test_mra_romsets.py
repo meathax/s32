@@ -13,11 +13,13 @@ class CloneMraRomsetTests(unittest.TestCase):
             if not parent:
                 continue
             clone_count += 1
-            rom = root.find("rom[@index='0']")
-            self.assertIsNotNone(rom, path.name)
             setname = root.findtext("setname")
-            self.assertEqual(rom.attrib["zip"],
-                             f"{parent}.zip|{setname}.zip")
+            region_roms = [r for r in root.findall("rom")
+                           if int(r.attrib["index"]) >= 4]
+            self.assertGreater(len(region_roms), 0, path.name)
+            for rom in region_roms:
+                self.assertEqual(rom.attrib["zip"],
+                                 f"{parent}.zip|{setname}.zip")
         self.assertGreater(clone_count, 0)
 
 

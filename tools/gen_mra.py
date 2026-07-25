@@ -3,12 +3,14 @@
 MRA generator for the Sega System 32 / Multi 32 MiSTer core.
 
 Parses MAME's segas32.cpp (ROM_START blocks + GAME macros) and emits one
-.mra per supported set, laying out the ioctl stream per DESIGN.md §9.3:
+.mra per supported set using independent download regions:
 
-  index 0: [64B board descriptor][maincpu 2MB][soundcpu 4MB][tiles 4MB]
-           [multipcm 4MB][mcu 64KB][sprites 16MB]
+  index 0: 64-byte board descriptor (emitted last as the boot commit)
+  indexes 4..9: maincpu, soundcpu, tiles, multipcm, mcu, sprites
   index 2: eeprom default image (128B), when the set provides one
 
+Only regions present in the MAME set are transferred, eliminating fixed-slot
+padding while retaining a backward-compatible legacy index-0 RTL path.
 Region padding/interleave is derived from the ROM_LOAD macros:
   ROM_LOAD                → linear
   ROM_LOAD16_BYTE         → interleave 2, map 01/10
@@ -32,6 +34,7 @@ REGION_SIZES = {
     "sprites":  0x1000000,
 }
 STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
+REGION_INDEX = dict(zip(STREAM_ORDER, range(4, 10)))
 
 # board descriptor per parent (DESIGN.md §3.4):
 #   b0: flags {multi32,v25,v25table,adc,track,ppi,dsp_hle,cd_stub}
@@ -101,15 +104,14 @@ BUTTONS = {
 UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
-# to every set of that parent.  Offsets are into the composed index-0 stream
-# (0x40 descriptor + maincpu region offset).
+# to every set of that parent. Offsets are local to the maincpu index-4 stream.
 #   jpark: init_jpark (segas32.cpp) pokes pROM[0xC15A8/2]=0xCD70 and
 #   pROM[0xC15AA/2]=0xD8CD -- "Temp. Patch until we emulate the 'Drive
 #   Board', thanks to Malice" -- letting the MAIN BD -> DRIVE BD network
 #   check pass without the cabinet's drive-board Z80.  V60 is little-endian,
 #   so the words become bytes 70 CD / CD D8.
 PATCHES = {
-    "jpark": [(0x40 + 0xC15A8, "70 CD CD D8")],
+    "jpark": [(0xC15A8, "70 CD CD D8")],
 }
 
 def parse(src):
@@ -291,28 +293,35 @@ def gen(setname, data, outdir):
     rom_zips = f"{setname}.zip"
     if parent != setname:
         rom_zips = f"{parent}.zip|{rom_zips}"
-    lines.append('  <rom index="0" zip="%s" md5="none">' % rom_zips)
-    # descriptor
-    hexd = bytes(d).hex().upper()
-    lines.append(f'    <part>{hexd}</part>')
+    # Region downloads precede the descriptor commit. Each is padded only to
+    # its MAME-declared size, rather than every core slot's maximum size.
     for reg in STREAM_ORDER:
-        size = REGION_SIZES[reg]
         r = regions.get(reg)
-        if r and r["loads"]:
-            parts, _ = interleave_parts(r["loads"], size, ctx=f"{setname}/{reg}")
-            lines += parts
-        else:
-            lines.append(f'    <part repeat="{size}">FF</part>')
-    for off, patch_hex in PATCHES.get(parent, []):
-        lines.append(f'    <patch offset="0x{off:X}">{patch_hex}</patch>')
-    lines.append('  </rom>')
-    # eeprom default
+        if not r or not r["loads"]:
+            continue
+        region_size = r["size"]
+        assert region_size <= REGION_SIZES[reg], (
+            f"{setname}: region {reg} size {region_size:#x} exceeds slot")
+        lines.append(f'  <rom index="{REGION_INDEX[reg]}" zip="{rom_zips}" md5="none">')
+        parts, _ = interleave_parts(r["loads"], region_size, ctx=f"{setname}/{reg}")
+        lines += parts
+        if reg == "maincpu":
+            for off, patch_hex in PATCHES.get(parent, []):
+                lines.append(f'    <patch offset="0x{off:X}">{patch_hex}</patch>')
+        lines.append('  </rom>')
+
+    # Defaults precede index 0 so the descriptor is the final boot commit.
     ee = regions.get("eeprom")
     if ee and ee["loads"]:
         lines.append('  <rom index="2">')
         lines.append(f'    <part name="{escape(ee["loads"][0]["file"])}" crc="{ee["loads"][0]["crc"]}"/>')
         lines.append('  </rom>')
     lines.append('  <nvram index="3" size="128"/>')
+
+    hexd = bytes(d).hex().upper()
+    lines.append('  <rom index="0">')
+    lines.append(f'    <part>{hexd}</part>')
+    lines.append('  </rom>')
     lines.append('</misterromdescription>')
     title = data.get("title", setname).replace("/", "-").replace(":", "")
     with open(os.path.join(outdir, f"{title}.mra"), "w") as f:

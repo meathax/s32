@@ -5,8 +5,7 @@
   <year>1992</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="sonic.zip|sonicp.zip" md5="none">
-    <part>10000181000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="sonic.zip|sonicp.zip" md5="none">
     <part name="sonpg0.bin" crc="da05dcbb"/>
     <part name="sonpg0.bin" crc="da05dcbb"/>
     <part name="sonpg0.bin" crc="da05dcbb"/>
@@ -23,6 +22,8 @@
       <part name="sonpd0.bin" crc="a7da7546" map="01"/>
       <part name="sonpd1.bin" crc="c30e4c70" map="10"/>
     </interleave>
+  </rom>
+  <rom index="5" zip="sonic.zip|sonicp.zip" md5="none">
     <part name="sonsnd0.bin" crc="569c8d4b"/>
     <part name="sonsnd0.bin" crc="569c8d4b"/>
     <part name="sonsnd0.bin" crc="569c8d4b"/>
@@ -30,15 +31,16 @@
     <part name="sonsnd1.bin" crc="f4fa5a21"/>
     <part name="sonsnd2.bin" crc="e1bd45a5"/>
     <part name="sonsnd3.bin" crc="cf56b5a0"/>
+  </rom>
+  <rom index="6" zip="sonic.zip|sonicp.zip" md5="none">
     <interleave output="32">
       <part name="sonscl0.bin" crc="445e31b9" map="0001"/>
       <part name="sonscl2.bin" crc="a5de28b2" map="0010"/>
       <part name="sonscl1.bin" crc="3d234181" map="0100"/>
       <part name="sonscl3.bin" crc="7ce7554b" map="1000"/>
     </interleave>
-    <part repeat="2097152">FF</part>
-    <part repeat="4194304">FF</part>
-    <part repeat="65536">FF</part>
+  </rom>
+  <rom index="9" zip="sonic.zip|sonicp.zip" md5="none">
     <interleave output="64">
       <part name="sonobj0.bin" crc="ceea18e3" map="00000001"/>
       <part name="sonobj1.bin" crc="6bbc226b" map="00000010"/>
@@ -49,7 +51,9 @@
       <part name="sonobj6.bin" crc="313c92d1" map="01000000"/>
       <part name="sonobj7.bin" crc="3784c507" map="10000000"/>
     </interleave>
-    <part repeat="8388608">FF</part>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>10000181000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>

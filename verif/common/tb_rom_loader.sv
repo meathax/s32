@@ -235,6 +235,23 @@ initial begin
     check_sdr_pair(OFF_MCU-2,        8'h42, 8'h43, 24'h6FFFFF);
     check_sdr_pair(OFF_SPRITES,      8'h50, 8'h51, 24'h800000);
 
+    // Optimized MRAs address each populated region from local offset zero.
+    // These downloads must map identically to the legacy fixed stream and
+    // must not alter the descriptor-controlled boot gate.
+    send_byte(8'd4, 27'd0, 8'h61);
+    check(!sdr_wr_req, "split main even byte parks locally");
+    send_byte(8'd4, 27'd1, 8'h62);
+    check(sdr_wr_req && sdr_wr_addr === 24'h000000 &&
+          sdr_wr_din === 16'h6261, "split main maps to maincpu base");
+    ack_sdr();
+    check(!rom_loaded, "split region cannot open boot gate");
+
+    send_byte(8'd9, 27'd0, 8'h71);
+    send_byte(8'd9, 27'd1, 8'h72);
+    check(sdr_wr_req && sdr_wr_addr === 24'h800000 &&
+          sdr_wr_din === 16'h7271, "split sprites map to sprite base");
+    ack_sdr();
+
     // The stream's MCU base has low bits 0x0040.  Local source offset 0x0040
     // contains only source bit 6, which the inverse permutation maps to
     // destination bit 10 (0x0400).  This also detects accidentally permuting

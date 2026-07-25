@@ -62,7 +62,7 @@ $buildExtensions = @(
 )
 $buildInputs = @(
     Get-ChildItem -LiteralPath $ProjectRoot -File -ErrorAction SilentlyContinue
-    foreach ($tree in @('rtl', 'sys')) {
+    foreach ($tree in @('rtl', 'sys', 'tools')) {
         $treePath = Join-Path $ProjectRoot $tree
         if (Test-Path -LiteralPath $treePath -PathType Container) {
             Get-ChildItem -LiteralPath $treePath -Recurse -File -ErrorAction SilentlyContinue

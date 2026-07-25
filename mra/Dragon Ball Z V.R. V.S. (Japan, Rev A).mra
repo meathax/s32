@@ -4,11 +4,12 @@
   <year>1994</year>
   <manufacturer>Sega / Banpresto</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="dbzvrvs.zip" md5="none">
-    <part>08000583000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="dbzvrvs.zip" md5="none">
     <part name="epr-16543" crc="7b9bc6f5"/>
     <part name="epr-16542a" crc="6449ab22"/>
     <part repeat="1048576">FF</part>
+  </rom>
+  <rom index="5" zip="dbzvrvs.zip" md5="none">
     <part name="epr-16541" crc="1d61d836"/>
     <part name="epr-16541" crc="1d61d836"/>
     <part name="epr-16541" crc="1d61d836"/>
@@ -16,13 +17,14 @@
     <part name="mpr-16540" crc="b6f9bb43"/>
     <part name="mpr-16539" crc="38c26418"/>
     <part name="mpr-16538" crc="4d402c31"/>
+  </rom>
+  <rom index="6" zip="dbzvrvs.zip" md5="none">
     <interleave output="16">
       <part name="mpr-16545" crc="51748bac" map="01"/>
       <part name="mpr-16544" crc="f6c93dfc" map="10"/>
     </interleave>
-    <part repeat="2097152">FF</part>
-    <part repeat="4194304">FF</part>
-    <part repeat="65536">FF</part>
+  </rom>
+  <rom index="9" zip="dbzvrvs.zip" md5="none">
     <interleave output="64">
       <part name="mpr-16546" crc="96f4be31" map="00000021"/>
       <part name="mpr-16548" crc="00377f59" map="00002100"/>
@@ -37,4 +39,7 @@
     </interleave>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>08000583000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>

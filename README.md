@@ -77,9 +77,40 @@ sound and ROM accesses. Tilemaps and the sprite engine feed the priority mixer;
 sprite pixels are rendered into DDR3-backed line buffers so SDRAM ROM traffic
 cannot starve the display path.
 
-For the block-level design and memory map, see
-[docs/DESIGN.md](docs/DESIGN.md). For build and deployment instructions, see
-[docs/BUILD.md](docs/BUILD.md).
+The ROM loader supports legacy fixed index-0 streams and optimized region MRAs.
+Current MRAs transfer only populated MAME regions on indexes 4–9, then send the
+64-byte board descriptor on index 0 as the final boot commit. This avoids up to
+16 MiB of padding per launch while keeping CPUs reset until loading is complete.
+
+The SDRAM byte map is: main CPU `0x000000`, sound CPU `0x200000`, tiles
+`0x600000`, PCM `0xA00000`, V25 program `0xE00000`, and sprites `0x1000000`.
+The loader preserves little-endian 16-bit HPS transfers and descrambles V25
+program addresses while writing them.
+
+## Building from source
+
+Quartus Lite 17.0 is the supported toolchain. On Windows, point
+`QUARTUS_ROOT` at the installation and run the audited build driver:
+
+```bat
+set QUARTUS_ROOT=D:\Q17
+tools\build.bat
+```
+
+On Linux or in the CI Quartus container, run `tools/build.sh`. Both drivers
+clean stale databases, regenerate the PLL, synthesize once, retry fitter
+crashes, sweep fitter seeds, run multicorner timing analysis, and stage
+`releases/SegaS32.rbf` only when fit, non-negative timing slack, report
+freshness, and RBF freshness all pass. The optional `S32_FIT_SEEDS` and
+`S32_FIT_RETRIES` environment variables control the search. A merely generated
+RBF is not considered deployable.
+
+Useful checks that do not build an RBF are:
+
+```sh
+bash verif/run_regression.sh
+python -m unittest discover -s verif -p "test_*.py"
+```
 
 ## Requirements and installation
 

@@ -244,7 +244,7 @@ reg signed [13:0] pixel_scrx;
 reg        [9:0]  pixel_sx_px;
 reg        [2:0]  pixel_piw, pixel_piw_last;
 reg        [9:0]  pixel_wordi;
-reg        [23:0] pixel_byteaddr;
+reg        [7:0]  pixel_pen8;
 
 // Width is latched at buffer swap; a live write cannot alter this pass.
 wire [8:0] hpix = ctl_latched[6][0] ? 9'd416 : 9'd320;
@@ -848,7 +848,12 @@ always @(posedge clk) begin
                 pixel_piw     <= piw;
                 pixel_piw_last<= piw_last;
                 pixel_wordi   <= wordi;
-                pixel_byteaddr<= byteaddr;
+                // Register the selected source byte at the cache/address
+                // boundary. Keeping the 16:1 pixrow mux out of R_EMIT
+                // prevents the pen select, transparency tests, and write
+                // qualifier from forming one 96.6 MHz combinational path.
+                // This is cycle-neutral: R_PIXEL already precedes R_EMIT.
+                pixel_pen8    <= pixrow[{byteaddr[3:0], 3'b000} +: 8];
                 rs <= R_EMIT;
             end
         end
@@ -861,7 +866,7 @@ always @(posedge clk) begin
 
             // Pen extract: bits 31:28 of the BE word = leftmost pixel;
             // even source px = high nibble of its byte.
-            pen8 = pixrow[{pixel_byteaddr[3:0], 3'b000} +: 8];
+            pen8 = pixel_pen8;
             pen4 = pixel_sx_px[0] ? pen8[3:0] : pen8[7:4];
             pix  = d_bpp8 ? pen8 : {4'b0, pen4};
             // MAME: first/last pixel of each 32-bit word uses transp

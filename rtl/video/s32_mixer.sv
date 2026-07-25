@@ -176,8 +176,8 @@ wire [10:0] win_max = max_candidate(win_q0, win_q1);
 wire [6:0] best = win_max[10:4];
 wire [3:0] bestsel = win_max[3:0]; // 0=text 1..4 nbg 5 bmp 6 spr 7 bg
 
-reg [6:0] best_hold;
-reg [3:0] bestsel_hold;
+reg [6:0] best_hold, best2_hold;
+reg [3:0] bestsel_hold, best2sel_hold;
 
 // Blend partner: mask the winner, then use the same balanced max tree.
 wire [10:0] run_p0 = max_candidate({(bestsel_hold != 4'd6) ? ep_spr_s  : 7'd0, 4'd6},
@@ -246,7 +246,7 @@ always @(*) begin
         4'd4: idx_winner = idx_nbg3_s; 4'd5: idx_winner = idx_bmp_s;
         4'd6: idx_winner = idx_spr_s; default: idx_winner = idx_bg_s;
     endcase
-    case (best2sel)
+    case (best2sel_hold)
         4'd0: idx_runner = idx_text_s; 4'd1: idx_runner = idx_nbg0_s;
         4'd2: idx_runner = idx_nbg1_s; 4'd3: idx_runner = idx_nbg2_s;
         4'd4: idx_runner = idx_nbg3_s; 4'd5: idx_runner = idx_bmp_s;
@@ -278,8 +278,8 @@ end
 reg [3:0] spr_group_raw_s;
 // MAME uses the raw pixel-derived group for the per-layer sprite blend
 // mask. sprgroup_or selects the effective priority/palette register only.
-wire do_blend_resolved = blendmask[best2sel[2:0]] &&
-                         (best2sel != 4'd6 || sprblendmask[spr_group_raw_s]);
+wire do_blend_resolved = blendmask[best2sel_hold[2:0]] &&
+                         (best2sel_hold != 4'd6 || sprblendmask[spr_group_raw_s]);
 
 // shadow applies when the scan passes the sprite layer's order slot:
 //   scan 1 (always): sprite at/above the winner
@@ -288,7 +288,7 @@ wire do_blend_resolved = blendmask[best2sel[2:0]] &&
 reg spr_shadow_src_s;
 wire shadow_resolved = spr_shadow_src_s && (ep_spr_nom_s != 0) &&
                        ( ep_spr_nom_s >= best_hold ||
-                         (blendmask != 8'h00 && bestsel_hold != 4'd6 && ep_spr_nom_s >= best2) );
+                         (blendmask != 8'h00 && bestsel_hold != 4'd6 && ep_spr_nom_s >= best2_hold) );
 
 // ---------------------------------------------------------------------------
 // color offsets: rgboffs bank0 = regs 0x40-0x44, bank1 = 0x46-0x4A, bank2 = 0
@@ -365,7 +365,8 @@ endfunction
 //   T0 (disp_x changes): synchronous line-RAM read is issued
 //   T1: snapshot candidates from the RAM outputs
 //   T2: resolve/register winner
-//   T3: resolve/register blend partner and latch final context
+//   T3: resolve/register blend partner
+//   T4: latch the runner palette index and final context
 //   P0: present the second palette index; the first address has already been
 //       registered for a full clk_ram edge, so its data is in flight
 //   P2: capture the first pixel before the earliest second result can replace it
@@ -378,6 +379,7 @@ reg [3:0]  ph;
 reg        launch_pending;
 reg        winner_pending;
 reg        second_pending;
+reg        context_pending;
 reg [13:0] pal_addr_r;
 reg [15:0] pal_data_r;
 reg [15:0] first_pal;
@@ -430,6 +432,7 @@ always @(posedge clk) begin
         launch_pending <= 1'b0;
         winner_pending <= 1'b0;
         second_pending <= 1'b0;
+        context_pending <= 1'b0;
         rgb <= 24'h000000;
     end
     else if (disp_x != dx_d) begin
@@ -439,6 +442,7 @@ always @(posedge clk) begin
         launch_pending <= 1'b1;
         winner_pending <= 1'b0;
         second_pending <= 1'b0;
+        context_pending <= 1'b0;
         ph <= 4'hF;
     end
     else if (launch_pending) begin
@@ -485,12 +489,20 @@ always @(posedge clk) begin
         second_pending <= 1'b1;
     end
     else if (second_pending) begin
+        // Register the runner tree before the palette-index and blend-control
+        // muxes.  This removes the remaining 96 MHz candidate-to-idx2 path.
+        best2_hold    <= best2;
+        best2sel_hold <= best2sel;
+        second_pending <= 1'b0;
+        context_pending <= 1'b1;
+    end
+    else if (context_pending) begin
         idx2_hold   <= idx_runner;
         blend_hold  <= do_blend_resolved;
         shadow_hold <= shadow_resolved;
-        co1_hold    <= coloroffs_of(bestsel_hold, r3e_s, r4c15_s, layer_color_flags_s);
-        co2_hold    <= coloroffs_of(best2sel,      r3e_s, r4c15_s, layer_color_flags_s);
-        second_pending <= 1'b0;
+        co1_hold    <= coloroffs_of(bestsel_hold,  r3e_s, r4c15_s, layer_color_flags_s);
+        co2_hold    <= coloroffs_of(best2sel_hold, r3e_s, r4c15_s, layer_color_flags_s);
+        context_pending <= 1'b0;
         ph <= 4'd0;
     end
     else if (ph != 4'hF) begin

@@ -511,7 +511,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_lex0,o_lex1,o_lex2,o_lex3       : std_logic;
 	SIGNAL o_wr : unsigned(3 DOWNTO 0);
 	SIGNAL o_hcpt,o_vcpt,o_vcpt_pre,o_vcpt_pre2,o_vcpt_pre3,o_vcpt2 : uint12;
-	SIGNAL o_hlast : std_logic := '0';
+	SIGNAL o_hlast,o_vlast : std_logic := '0';
 	SIGNAL o_ihsize,o_ihsizem,o_ivsize : uint12;
 	SIGNAL o_ihsize_temp, o_ihsize_temp2 : natural RANGE 0 TO 32767;
 
@@ -2775,13 +2775,19 @@ BEGIN
 						o_vcpt_sync <= o_vcpt_sync+1;
 					END IF;
 
-					IF o_vcpt_pre3+1>=o_vtotal THEN
+					-- As with o_hlast above, register the vertical terminal
+					-- decision one line early. This removes the 12-bit
+					-- compare from the o_vcpt_pre3 feedback path at 148.5 MHz.
+					IF o_vlast='1' THEN
 						o_vcpt_pre3<=0;
+						o_vlast<=to_std_logic(1>=o_vtotal);
 					ELSIF o_vrr_sync2 THEN
 						o_vcpt_pre3<=o_vsstart;
+						o_vlast<=to_std_logic(o_vsstart+1>=o_vtotal);
 						o_sync<=false;
 					ELSE
 						o_vcpt_pre3<=(o_vcpt_pre3+1) MOD 4096;
+						o_vlast<=to_std_logic(o_vcpt_pre3+2>=o_vtotal);
 					END IF;
 
 					o_vcpt_pre2<=o_vcpt_pre3;

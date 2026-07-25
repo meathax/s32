@@ -3587,8 +3587,8 @@ task automatic exec_op;
 
     // ------------ XCH ------------
     8'h41, 8'h43, 8'h45: begin
-        // both operands are addresses (simplified: register case only in exec;
-        // memory-memory exchange via microstates TODO)
+        // Register-register completes here; one-memory and memory-memory forms
+        // continue through the S_XCH microstates below.
         if (flag1 && flag2) begin
             logic [31:0] t;
             t = rf_rdata_a;

@@ -29,7 +29,20 @@ def write_mra(path: Path, patch_offset: str) -> None:
     )
 
 
+def write_split_mra(path: Path) -> None:
+    descriptor = "00" * 64
+    path.write_text(
+        "<misterromdescription>"
+        '<rom index="4"><part>01 02 03 04</part></rom>'
+        '<rom index="9"><part>10 20</part></rom>'
+        f'<rom index="0"><part>{descriptor}</part></rom>'
+        "</misterromdescription>",
+        encoding="utf-8",
+    )
+
+
 class MakeSimImagesPatchTests(unittest.TestCase):
+
     def test_patch_uses_complete_download_stream_offset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -47,6 +60,19 @@ class MakeSimImagesPatchTests(unittest.TestCase):
             write_mra(mra, "0x4")
             with self.assertRaisesRegex(AssertionError, "exceeds stream"):
                 make_sim_images.build_stream(mra, temp)
+
+    def test_split_regions_are_mapped_and_missing_regions_are_erased(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            mra = temp / "split.mra"
+            write_split_mra(mra)
+            descriptor, regions = make_sim_images.build_regions(mra, temp)
+            self.assertEqual(descriptor, bytes(64))
+            self.assertEqual(regions[0][:4], bytes.fromhex("01 02 03 04"))
+            self.assertEqual(regions[0][4:], b"\xff" * (0x200000 - 4))
+            self.assertEqual(regions[1], b"\xff" * 0x400000)
+            self.assertEqual(regions[5][:2], bytes.fromhex("10 20"))
+            self.assertEqual(regions[5][2:], b"\xff" * (0x1000000 - 2))
 
 
 if __name__ == "__main__":

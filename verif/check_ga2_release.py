@@ -18,7 +18,7 @@ root = tree.getroot()
 
 assert root.findtext("name") == "Golden Axe: The Revenge of Death Adder (World, Rev B)"
 rom = root.find("rom[@index='0']")
-assert rom is not None and rom.get("zip") == "ga2.zip"
+assert rom is not None and rom.get("zip") is None
 
 # The first anonymous part is the fixed 64-byte board descriptor.  GA2 must be
 # single-screen System 32 with the V25 and PPI flags set (0x02 | 0x20), while
@@ -32,7 +32,8 @@ assert descriptor[1:3] == bytes(2), "unexpected GA2 descriptor options"
 assert descriptor[3] == 0x83, f"GA2 sprite-bank byte is 0x{descriptor[3]:02x}, expected 0x83"
 assert descriptor[4:] == bytes(60), "unexpected GA2 descriptor options"
 
-mcu = [part for part in rom.findall("part") if part.get("name") == "epr-14468-02.u3"]
+mcu_rom = root.find("rom[@index='8']")
+mcu = [] if mcu_rom is None else [part for part in mcu_rom.findall("part") if part.get("name") == "epr-14468-02.u3"]
 assert len(mcu) == 1 and mcu[0].get("crc") == "77634daa", "GA2 V25 MCU program is missing or wrong"
 
 nvram = root.find("nvram[@index='3']")

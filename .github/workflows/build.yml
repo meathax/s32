@@ -1,7 +1,7 @@
 name: build-rbf
 
 # Compiles the Sega System 32 core to SegaS32.rbf and uploads it as an
-# artifact. See docs/BUILD.md.
+# artifact only after fit, timing, freshness, and RBF qualification pass.
 #
 # Quartus is large and its license/container availability varies; this
 # workflow uses a community Quartus 17.0 image. If it is unavailable
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write          # required to create Releases
+  contents: read
 
 jobs:
   quartus:
@@ -48,25 +48,13 @@ jobs:
       - name: Pull Quartus 17.0 image
         run: docker pull raetro/quartus:17.0
 
-      - name: Generate PLL and compile
+      - name: Build and qualify RBF
         run: |
           docker run --rm \
             --workdir /build \
             --volume "$GITHUB_WORKSPACE:/build" \
             raetro/quartus:17.0 \
-            bash -c '
-              qsys-script --script=tools/make_pll.tcl &&
-              qsys-generate rtl/pll/pll.qsys --synthesis=VERILOG \
-                --output-directory=rtl/pll &&
-              test -f rtl/pll/synthesis/pll.qip &&
-              quartus_sh --flow compile Arcade-SegaSystem32
-            '
-          test -f output_files/Arcade-SegaSystem32.rbf
-
-      - name: Stage RBF under the MRA name
-        run: |
-          mkdir -p releases
-          cp output_files/Arcade-SegaSystem32.rbf releases/SegaS32.rbf
+            bash tools/build.sh
 
       - name: Upload RBF artifact
         uses: actions/upload-artifact@v4
@@ -85,15 +73,24 @@ jobs:
             output_files/*.summary
           if-no-files-found: ignore
 
-      # On a version tag (vX.Y.Z), publish the freshly built RBF as a
-      # GitHub Release asset so it lands under the repo's Releases page.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: quartus
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download qualified RBF
+        uses: actions/download-artifact@v4
+        with:
+          name: SegaS32-rbf
+          path: releases
+
       - name: Publish RBF to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: releases/SegaS32.rbf
           fail_on_unmatched_files: true
           body: |
             Sega System 32 / Multi 32 MiSTer core — `SegaS32.rbf`.
-            Built by CI from ${{ github.sha }}.
-            Install per docs/BUILD.md; MRAs live in `mra/`.
+            Built by CI from ${{ github.sha }}. Installation instructions are in `README.md`.

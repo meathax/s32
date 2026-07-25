@@ -1,6 +1,6 @@
 //============================================================================
 //  Sega System 32 — ioctl ROM loader  (DESIGN.md §9.3)
-//  Stream layout (ioctl index 0):
+//  Legacy stream layout (ioctl index 0):
 //    [0x00..0x3f]  board descriptor (64 bytes)
 //    [maincpu 2MB][soundcpu 4MB][tiles 4MB][multipcm 4MB][mcu 64KB]
 //    [sprites up to 16MB]
@@ -11,6 +11,9 @@
 //  avoiding a duplicate 64 KiB on-chip ROM that cannot fit alongside the real
 //  V25. The inverse of MAME's destination-to-source address lookup is applied
 //  (see v25_stream_to_dst below and DESIGN.md §8.1).
+//  Optimized MRAs use index 4 main, 5 sound, 6 tiles, 7 PCM, 8 MCU and
+//  9 sprites. A descriptor-only index-0 transfer is emitted last so reset is
+//  released only after all populated regions have completed.
 //  ioctl index 2 = 93C46 default image (128 bytes).
 //============================================================================
 
@@ -98,6 +101,22 @@ function automatic [24:0] map_addr(input [26:0] a);
     else                       map_addr = SDR_SPRITES_BASE + (a[24:0] - OFF_SPRITES[24:0]);
 endfunction
 
+function automatic is_rom_index(input [7:0] index);
+    is_rom_index = (index == 8'd0) || (index >= 8'd4 && index <= 8'd9);
+endfunction
+
+function automatic [26:0] stream_addr(input [7:0] index, input [26:0] a);
+    case (index)
+        8'd4: stream_addr = OFF_MAINCPU  + a;
+        8'd5: stream_addr = OFF_SOUNDCPU + a;
+        8'd6: stream_addr = OFF_TILES    + a;
+        8'd7: stream_addr = OFF_MULTIPCM + a;
+        8'd8: stream_addr = OFF_MCU      + a;
+        8'd9: stream_addr = OFF_SPRITES  + a;
+        default: stream_addr = a;
+    endcase
+endfunction
+
 board_desc_t desc_r;
 assign board_desc = desc_r;
 
@@ -125,15 +144,17 @@ always @(posedge clk) begin
         // mailbox is free (!busy); ioctl_wait (=busy) backpressures the HPS to
         // hold and re-present the word after sdr_wr_ack, so none is dropped.
         if (mem_ready && ioctl_download && ioctl_wr && !busy) begin
-            if (ioctl_index == 8'd0) begin
+            if (is_rom_index(ioctl_index)) begin
+                logic [26:0] a;
+                a = stream_addr(ioctl_index, ioctl_addr);
 `ifdef SIMULATION
-                dl_addr_last <= ioctl_addr;
+                if (ioctl_index == 8'd0) dl_addr_last <= ioctl_addr;
 `endif
                 if (WIDE) begin
                     // WIDE=1 presents one little-endian 16-bit stream word at
                     // each even ioctl_addr. Preserve the exact fixed stream
                     // offsets and emit one full SDRAM word per transfer.
-                    if (ioctl_addr < OFF_MAINCPU) begin
+                    if (ioctl_index == 8'd0 && a < OFF_MAINCPU) begin
                         if (ioctl_addr[26:4] == 0) begin
                             desc_bytes[ioctl_addr[3:0]] <= ioctl_dout[7:0];
                             desc_bytes[ioctl_addr[3:0] + 1'b1] <= ioctl_dout[15:8];
@@ -156,14 +177,14 @@ always @(posedge clk) begin
                             desc_r.coin_swap         <= desc_bytes[1][3];
                         end
                     end
-                    else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
+                    else if (a >= OFF_MCU && a < OFF_SPRITES) begin
                         logic [24:0] ma;
                         // The real V25 consumes the external SDRAM image;
                         // this pulse invalidates its cache while reset is held.
                         v25_wr    <= 1'b1;
-                        v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
+                        v25_waddr <= v25_stream_to_dst(a[15:0] - OFF_MCU[15:0]);
                         v25_wdata <= ioctl_dout[7:0];
-                        ma = map_addr(ioctl_addr);
+                        ma = map_addr(a);
                         sdr_wr_req  <= 1'b1;
                         busy        <= 1'b1;
                         sdr_wr_addr <= ma[24:1];
@@ -175,7 +196,7 @@ always @(posedge clk) begin
                         busy       <= 1'b1;
                         begin
                             logic [24:0] ma;
-                            ma = map_addr(ioctl_addr);
+                            ma = map_addr(a);
                             sdr_wr_addr <= ma[24:1];
                         end
                         sdr_wr_din <= ioctl_dout;
@@ -185,7 +206,7 @@ always @(posedge clk) begin
                 else begin
                     // Byte-mode fallback retained for simulation and older
                     // host integrations. The live MiSTer top selects WIDE=1.
-                    if (ioctl_addr < OFF_MAINCPU) begin
+                    if (ioctl_index == 8'd0 && a < OFF_MAINCPU) begin
                         if (ioctl_addr[26:4] == 0) desc_bytes[ioctl_addr[3:0]] <= ioctl_dout[7:0];
                         if (ioctl_addr == OFF_MAINCPU-1) begin
                             desc_r.multi32     <= desc_bytes[0][0];
@@ -205,14 +226,14 @@ always @(posedge clk) begin
                             desc_r.coin_swap         <= desc_bytes[1][3];
                         end
                     end
-                    else if (ioctl_addr >= OFF_MCU && ioctl_addr < OFF_SPRITES) begin
+                    else if (a >= OFF_MCU && a < OFF_SPRITES) begin
                         logic [24:0] ma;
                         v25_wr    <= 1'b1;
-                        v25_waddr <= v25_stream_to_dst(ioctl_addr[15:0] - OFF_MCU[15:0]);
+                        v25_waddr <= v25_stream_to_dst(a[15:0] - OFF_MCU[15:0]);
                         v25_wdata <= ioctl_dout[7:0];
                         if (!ioctl_addr[0]) byte_lo <= ioctl_dout[7:0];
                         else begin
-                            ma = map_addr(ioctl_addr);
+                            ma = map_addr(a);
                             sdr_wr_req  <= 1'b1;
                             busy        <= 1'b1;
                             sdr_wr_addr <= ma[24:1];
@@ -227,7 +248,7 @@ always @(posedge clk) begin
                             busy       <= 1'b1;
                             begin
                                 logic [24:0] ma;
-                                ma = map_addr(ioctl_addr);
+                                ma = map_addr(a);
                                 sdr_wr_addr <= ma[24:1];
                             end
                             sdr_wr_din <= {ioctl_dout[7:0], byte_lo};
@@ -270,7 +291,7 @@ always @(posedge clk) begin
             // The byte-pairing above assumes every region is even-length (the
             // fixed MRA layout guarantees it).  An odd-length stream would
             // silently drop its parked final byte — make that loud in sim.
-            if (dl_addr_last[0] == 1'b0)
+            if (!WIDE && dl_addr_last[0] == 1'b0)
                 $display("LOADER WARNING: index-0 stream ended on an even address (odd length) — final parked byte was dropped");
 `endif
         end

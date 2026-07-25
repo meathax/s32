@@ -5,8 +5,7 @@
   <year>1991</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="arabfgt.zip|arabfgtu.zip" md5="none">
-    <part>26000083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="arabfgt.zip|arabfgtu.zip" md5="none">
     <part name="epr-14608.ic8" crc="cd5efba9"/>
     <part name="epr-14608.ic8" crc="cd5efba9"/>
     <part name="epr-14608.ic8" crc="cd5efba9"/>
@@ -23,6 +22,8 @@
       <part name="epr-14592.ic18" crc="f7dff316" map="01"/>
       <part name="epr-14591.ic9" crc="bbd940fb" map="10"/>
     </interleave>
+  </rom>
+  <rom index="5" zip="arabfgt.zip|arabfgtu.zip" md5="none">
     <part name="epr-14596.ic36" crc="bd01faec"/>
     <part name="epr-14596.ic36" crc="bd01faec"/>
     <part name="epr-14596.ic36" crc="bd01faec"/>
@@ -34,12 +35,17 @@
     <part name="mpr-14595f.ic35" crc="5173d1af"/>
     <part name="mpr-14594f.ic34" crc="01777645"/>
     <part name="mpr-14593f.ic24" crc="aa037047"/>
+  </rom>
+  <rom index="6" zip="arabfgt.zip|arabfgtu.zip" md5="none">
     <interleave output="16">
       <part name="mpr-14599f.ic14" crc="94f1cf10" map="01"/>
       <part name="mpr-14598f.ic5" crc="010656f3" map="10"/>
     </interleave>
-    <part repeat="4194304">FF</part>
+  </rom>
+  <rom index="8" zip="arabfgt.zip|arabfgtu.zip" md5="none">
     <part name="epr-14468-01.u3" crc="c3c591e4"/>
+  </rom>
+  <rom index="9" zip="arabfgt.zip|arabfgtu.zip" md5="none">
     <interleave output="64">
       <part name="mpr-14600f.ic32" crc="e860988a" map="00000021"/>
       <part name="mpr-14602.ic30" crc="64524e4d" map="00002100"/>
@@ -54,4 +60,7 @@
     </interleave>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>26000083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>

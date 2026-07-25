@@ -118,24 +118,14 @@ def interleave(el, romdir):
                 out[base + pos] = src[idx]
     return bytes(out)
 
-def build_stream(mra_path, romdir):
-    root = ET.parse(mra_path).getroot()
-    rom0 = None
-    for r in root.findall("rom"):
-        if r.get("index") == "0":
-            rom0 = r
-            break
-    assert rom0 is not None
+def build_rom(rom, romdir):
     stream = bytearray()
-    for el in rom0:
+    for el in rom:
         if el.tag == "part":
             stream += part_bytes(el, romdir)
         elif el.tag == "interleave":
             stream += interleave(el, romdir)
-    # MiSTer applies patches after assembling the complete index-0 download
-    # stream. Offsets include the 0x40-byte board descriptor. Jurassic Park
-    # relies on this protection bypass to leave its protected idle loop.
-    for el in rom0.findall("patch"):
+    for el in rom.findall("patch"):
         offset_text = el.get("offset")
         assert offset_text is not None, "MRA patch is missing an offset"
         offset = int(offset_text, 0)
@@ -143,11 +133,39 @@ def build_stream(mra_path, romdir):
         assert patch, f"MRA patch at {offset:#x} is empty"
         end = offset + len(patch)
         assert end <= len(stream), (
-            f"MRA patch {offset:#x}..{end - 1:#x} exceeds stream "
-            f"size {len(stream):#x}"
-        )
+            f"MRA patch {offset:#x}..{end - 1:#x} exceeds stream size {len(stream):#x}")
         stream[offset:end] = patch
     return bytes(stream)
+
+def build_stream(mra_path, romdir):
+    """Build index 0; retained for legacy callers and focused patch tests."""
+    root = ET.parse(mra_path).getroot()
+    rom0 = next((r for r in root.findall("rom") if r.get("index") == "0"), None)
+    assert rom0 is not None
+    return build_rom(rom0, romdir)
+
+def build_regions(mra_path, romdir):
+    """Return descriptor and fixed-size simulation regions for either format."""
+    root = ET.parse(mra_path).getroot()
+    by_index = {int(r.get("index")): r for r in root.findall("rom")}
+    if any(index in by_index for index in range(4, 10)):
+        desc = build_rom(by_index[0], romdir)
+        assert len(desc) == 0x40, f"descriptor {len(desc):#x} != 0x40"
+        blobs = []
+        for index, (name, size) in enumerate(REGIONS, start=4):
+            data = build_rom(by_index[index], romdir) if index in by_index else b""
+            assert len(data) <= size, f"{name} {len(data):#x} exceeds slot {size:#x}"
+            blobs.append(data.ljust(size, b"\xff"))
+        return desc, blobs
+
+    stream = build_rom(by_index[0], romdir)
+    expect = 0x40 + sum(size for _, size in REGIONS)
+    assert len(stream) == expect, f"stream {len(stream):#x} != expected {expect:#x}"
+    desc, off, blobs = stream[:0x40], 0x40, []
+    for _, size in REGIONS:
+        blobs.append(stream[off:off + size])
+        off += size
+    return desc, blobs
 
 def emit_hex(path, data, width_bytes):
     with open(path, "w") as f:
@@ -160,16 +178,10 @@ def emit_hex(path, data, width_bytes):
 def main():
     mra_path, romdir, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
     os.makedirs(outdir, exist_ok=True)
-    stream = build_stream(mra_path, romdir)
-    expect = 0x40 + sum(size for _, size in REGIONS)
-    assert len(stream) == expect, f"stream {len(stream):#x} != expected {expect:#x}"
-    desc = stream[0:0x40]
+    desc, blobs = build_regions(mra_path, romdir)
     with open(os.path.join(outdir, "desc.txt"), "w") as f:
         f.write(desc.hex() + "\n")
-    off = 0x40
-    for name, size in REGIONS:
-        blob = stream[off:off+size]
-        off += size
+    for (name, _), blob in zip(REGIONS, blobs):
         if name == "mcu":
             open(os.path.join(outdir, "mcu.bin"), "wb").write(blob)
         elif name == "tiles":

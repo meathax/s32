@@ -636,7 +636,7 @@ always @(posedge clk) begin
             endcase
         end
 
-        rdata <= 8'hff;   // int_control_r returns 0xFF (timer counts TODO)
+        rdata <= 8'hff;   // MAME int_control_r/hardware-visible readback
     end
 end
 

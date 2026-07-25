@@ -5,8 +5,7 @@
   <year>1992</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="brival.zip|brivalj.zip" md5="none">
-    <part>20000283000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="brival.zip|brivalj.zip" md5="none">
     <part name="epr-15720.ic8" crc="0d182d78"/>
     <part name="epr-15720.ic8" crc="0d182d78"/>
     <part name="epr-15720.ic8" crc="0d182d78"/>
@@ -19,6 +18,8 @@
       <part name="epr-15723.ic18" crc="4ff40d39" map="01"/>
       <part name="epr-15724.ic9" crc="3ff8a052" map="10"/>
     </interleave>
+  </rom>
+  <rom index="5" zip="brival.zip|brivalj.zip" md5="none">
     <part name="epr-15725.ic36" crc="ea1407d7"/>
     <part name="epr-15725.ic36" crc="ea1407d7"/>
     <part name="epr-15725.ic36" crc="ea1407d7"/>
@@ -30,12 +31,14 @@
     <part name="mpr-15627.ic35" crc="8a8388c5"/>
     <part name="mpr-15626.ic34" crc="83306d1e"/>
     <part name="mpr-15625.ic24" crc="3ce82932"/>
+  </rom>
+  <rom index="6" zip="brival.zip|brivalj.zip" md5="none">
     <interleave output="16">
       <part name="mpr-15629.ic14" crc="2c8dd96d" map="01"/>
       <part name="mpr-15628.ic5" crc="58d4ca40" map="10"/>
     </interleave>
-    <part repeat="4194304">FF</part>
-    <part repeat="65536">FF</part>
+  </rom>
+  <rom index="9" zip="brival.zip|brivalj.zip" md5="none">
     <interleave output="64">
       <part name="mpr-15637.ic32" crc="b6cf2f05" map="00000021"/>
       <part name="mpr-15635.ic30" crc="70f2eb2b" map="00002100"/>
@@ -50,4 +53,7 @@
     </interleave>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>20000283000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>

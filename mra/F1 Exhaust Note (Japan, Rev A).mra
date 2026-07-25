@@ -5,8 +5,7 @@
   <year>1991</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="f1en.zip|f1enj.zip" md5="none">
-    <part>08010081000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="4" zip="f1en.zip|f1enj.zip" md5="none">
     <part name="epr-14450a.ic6" crc="10f62723"/>
     <part name="epr-14450a.ic6" crc="10f62723"/>
     <part name="epr-14450a.ic6" crc="10f62723"/>
@@ -23,6 +22,8 @@
       <part name="epr-14445.ic14" crc="d06261ab" map="01"/>
       <part name="epr-14444.ic7" crc="07724354" map="10"/>
     </interleave>
+  </rom>
+  <rom index="5" zip="f1en.zip|f1enj.zip" md5="none">
     <part name="epr-14449.ic35" crc="2d29699c"/>
     <part name="epr-14449.ic35" crc="2d29699c"/>
     <part name="epr-14449.ic35" crc="2d29699c"/>
@@ -37,15 +38,16 @@
     <part name="epr-14447.ic26" crc="db1cfcbd"/>
     <part name="epr-14446.ic22" crc="646ec2cb"/>
     <part name="epr-14446.ic22" crc="646ec2cb"/>
+  </rom>
+  <rom index="6" zip="f1en.zip|f1enj.zip" md5="none">
     <interleave output="32">
       <part name="mpr-14362.ic38" crc="fb1c4e79" map="0001"/>
       <part name="mpr-14360.ic29" crc="c5e8da79" map="0010"/>
       <part name="mpr-14361.ic34" crc="e3204bda" map="0100"/>
       <part name="mpr-14359.ic25" crc="70305c68" map="1000"/>
     </interleave>
-    <part repeat="3145728">FF</part>
-    <part repeat="4194304">FF</part>
-    <part repeat="65536">FF</part>
+  </rom>
+  <rom index="9" zip="f1en.zip|f1enj.zip" md5="none">
     <interleave output="64">
       <part name="mpr-14370.ic36" crc="fda78289" map="00000001"/>
       <part name="mpr-14369.ic32" crc="7765116d" map="00000010"/>
@@ -56,7 +58,10 @@
       <part name="mpr-14364.ic28" crc="0fa12ecd" map="01000000"/>
       <part name="mpr-14363.ic24" crc="f3427a56" map="10000000"/>
     </interleave>
-    <part repeat="12582912">FF</part>
+    <part repeat="4194304">FF</part>
   </rom>
   <nvram index="3" size="128"/>
+  <rom index="0">
+    <part>08010081000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  </rom>
 </misterromdescription>
