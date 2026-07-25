@@ -31,9 +31,9 @@ class ButtonMetadataTests(unittest.TestCase):
     def test_spiderman_has_two_action_buttons_and_system_controls(self) -> None:
         names, defaults = BUTTONS["spidman"]
         self.assertEqual(names.split(","),
-                         ["Attack", "Jump", "-", "-", "-", "-", "Start", "Coin", "Test"])
+                         ["Attack", "Jump", "-", "-", "-", "-", "Start", "Coin", "Test", "Service"])
         self.assertEqual(defaults.split(","),
-                         ["A", "B", "-", "-", "-", "-", "Start", "Select", "R"])
+                         ["A", "B", "-", "-", "-", "-", "Start", "Select", "R", "L"])
 
     def test_all_spiderman_mras_expose_button_metadata(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
@@ -43,7 +43,7 @@ class ButtonMetadataTests(unittest.TestCase):
             self.assertIsNotNone(buttons, path.name)
             self.assertEqual(buttons.attrib["names"], BUTTONS["spidman"][0])
             self.assertEqual(buttons.attrib["default"], BUTTONS["spidman"][1])
-            self.assertEqual(buttons.attrib["count"], "9")
+            self.assertEqual(buttons.attrib["count"], "10")
 
 
 if __name__ == "__main__":
