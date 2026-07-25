@@ -5,7 +5,7 @@
   <year>1994</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="svfo.zip" md5="none">
+  <rom index="0" zip="svf.zip|svfo.zip" md5="none">
     <part>00000083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="epr-16872.ic17" crc="654d8c95"/>
     <part name="epr-16872.ic17" crc="654d8c95"/>

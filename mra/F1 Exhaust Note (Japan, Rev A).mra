@@ -5,7 +5,7 @@
   <year>1991</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="f1enj.zip" md5="none">
+  <rom index="0" zip="f1en.zip|f1enj.zip" md5="none">
     <part>08010081000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="epr-14450a.ic6" crc="10f62723"/>
     <part name="epr-14450a.ic6" crc="10f62723"/>

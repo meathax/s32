@@ -5,7 +5,7 @@
   <year>1995</year>
   <manufacturer>Capcom</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="slipstrmh.zip" md5="none">
+  <rom index="0" zip="slipstrm.zip|slipstrmh.zip" md5="none">
     <part>08000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="s32h_prg01.ic6" crc="ab778297"/>
     <part name="s32h_prg01.ic6" crc="ab778297"/>

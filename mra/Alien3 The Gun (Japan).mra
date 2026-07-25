@@ -6,8 +6,8 @@
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
   <buttons names="Trigger,Button,-,-,-,-,Start,Coin,Test,Service" default="A,B,-,-,-,-,Start,Select,R,L" count="10"/>
-  <rom index="0" zip="alien3j.zip" md5="none">
-    <part>080C00830000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
+  <rom index="0" zip="alien3.zip|alien3j.zip" md5="none">
+    <part>080C0083000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="epr-15861.ic17" crc="e970603f"/>
     <part name="epr-15861.ic17" crc="e970603f"/>
     <part name="epr-15860.ic8" crc="9af0d996"/>

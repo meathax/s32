@@ -144,6 +144,10 @@ cp output_files/Arcade-SegaSystem32.rbf releases/SegaS32.rbf
   `ga2.zip`, `spidman.zip`, `svf.zip`, …). The MRA references each zip by name
   and validates the individual ROM CRCs.
 
+Clone MRAs list both the parent and clone ZIP names. This supports merged
+parent-named archives, split parent-plus-clone archives, and standalone clone
+archives without maintaining separate MRA files.
+
 Launch from the MiSTer `_Arcade` menu.
 
 On Windows, a passwordless-SSH MiSTer can be updated with:

@@ -5,7 +5,7 @@
   <year>1993</year>
   <manufacturer>Sega</manufacturer>
   <rbf>SegaS32</rbf>
-  <rom index="0" zip="f1lapt.zip" md5="none">
+  <rom index="0" zip="f1lap.zip|f1lapt.zip" md5="none">
     <part>08000483000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</part>
     <part name="epr-15598.ic17" crc="9feab7cd"/>
     <part name="epr-15598.ic17" crc="9feab7cd"/>
