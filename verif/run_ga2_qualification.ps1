@@ -120,6 +120,7 @@ try {
             "+define+SIMULATION",
             "+define+S32_SYSTEM32_ONLY",
             "+define+S32_GA2_ONLY",
+            "+define+S32_GOLDENAXE_ONLY",
             "+define+S32_REAL_FB_SIM"
         ) + $Sources
     ) "vlog"

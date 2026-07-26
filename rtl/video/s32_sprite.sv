@@ -11,7 +11,9 @@
 module s32_sprite #(
     // update_sprites() runs 50 us after VBLANK ends. At 96.634615 MHz this
     // is round(50 us * clk_ram) = 4,832 clocks.
-    parameter integer POST_VBLANK_CYCLES = 4832
+    parameter integer POST_VBLANK_CYCLES = 4832,
+    // Dedicated Golden Axe hardware profile: verify FPGA SDRAM sprite bursts.
+    parameter bit VERIFY_SROM = 1'b0
 ) (
     input             clk,          // clk_ram
     input             rst,
@@ -144,7 +146,8 @@ typedef enum logic [4:0] {
     R_ROW, R_ROWDATA, R_ROWDATAW,
     R_RAMDATA, R_RAMDATAP, R_RAMDATAW,
     R_PIXEL, R_EMIT, R_SCAN,
-    R_PIXEL_DATA, R_DONE, R_DELAY
+    R_PIXEL_DATA, R_DONE, R_DELAY,
+    R_ROM_GAP, R_ROM_VERIFY, R_ROM_VERIFYW, R_ROM_RETRY
 } rst_t;
 rst_t rs;
 
@@ -202,6 +205,13 @@ reg signed [13:0] x0, y0; // wide MAME int-domain origin; no 12-bit wrap
 reg [15:0] indtab [0:15];
 reg [3:0]  indi;
 reg [127:0] pixrow;
+// The MiSTer SDRAM port is the only part of the Golden Axe sprite path that
+// cannot be reproduced by the cycle-exact MAME/RTL replays. Qualify every
+// 128-bit ROM cache line with a second identical read before publishing it to
+// the pixel walker. A transient/contended SDRAM capture can otherwise turn a
+// valid descriptor into persistent garbage in the off-chip sprite framebuffer.
+reg [127:0] srom_verify_data;
+reg [15:0]  srom_retry_count;
 reg [23:4]  rowbase;
 reg [23:0] row_byte_base; // sprite base + source-row pitch, once per row
 reg [15:0] ram_fetch_base;
@@ -310,6 +320,8 @@ always @(posedge clk) begin
         debug_draw_count <= 8'd0;
         debug_fromram_count <= 8'd0;
         debug_romreq_count <= 8'd0;
+        srom_verify_data <= 128'd0;
+        srom_retry_count <= 16'd0;
         list_count <= 0;
         srom_req <= 0; fb_er_req <= 0;
         fb_wr_valid <= 0; fb_wr_start <= 0; fb_wr_end <= 0;
@@ -729,10 +741,47 @@ always @(posedge clk) begin
         R_ROWDATAW: if (srom_ack) begin
             debug_activity[14] <= 1'b1;
             srom_req <= 0;
-            pixrow <= srom_data;
-            rowtag <= rowbase;
-            rowtag_v <= 1;
-            rs <= R_PIXEL;
+            if (VERIFY_SROM) begin
+                srom_verify_data <= srom_data;
+                // The SDRAM acknowledge is stretched for the clk_sys crossing.
+                // Wait for it to fall before creating the second request edge.
+                rs <= R_ROM_GAP;
+            end
+            else begin
+                pixrow <= srom_data;
+                rowtag <= rowbase;
+                rowtag_v <= 1'b1;
+                rs <= R_PIXEL;
+            end
+        end
+        R_ROM_GAP: if (!srom_ack) begin
+            rs <= R_ROM_VERIFY;
+        end
+        R_ROM_VERIFY: begin
+            debug_romreq_count <= debug_sat_inc(debug_romreq_count);
+            srom_req <= 1'b1;
+            srom_addr <= rowbase;
+            rs <= R_ROM_VERIFYW;
+        end
+        R_ROM_VERIFYW: if (srom_ack) begin
+            debug_activity[14] <= 1'b1;
+            srom_req <= 1'b0;
+            if (srom_data == srom_verify_data) begin
+                pixrow <= srom_data;
+                rowtag <= rowbase;
+                rowtag_v <= 1'b1;
+                rs <= R_PIXEL;
+            end
+            else begin
+                if (~&srom_retry_count)
+                    srom_retry_count <= srom_retry_count + 1'd1;
+                // Discard both samples. Start a fresh pair only after the
+                // stretched acknowledge has returned low.
+                rs <= R_ROM_RETRY;
+            end
+        end
+        R_ROM_RETRY: if (!srom_ack) begin
+            rs <= R_ROWDATA;
         end
 
         // Pixel-from-sprite-RAM mode shares the list RAM read port while the

@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "sha256.ps1")
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -30,8 +31,8 @@ $temp = Join-Path $releaseDir ".$ReleaseName.rbf.partial.$PID.$([Guid]::NewGuid(
 
 try {
     [IO.File]::Copy($source.FullName, $temp, $false)
-    $sourceHash = (Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash
-    $tempHash = (Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash
+    $sourceHash = Get-S32FileSha256 -LiteralPath $source.FullName
+    $tempHash = Get-S32FileSha256 -LiteralPath $temp
     if ($sourceHash -ne $tempHash) {
         throw "RBF staging hash mismatch before activation."
     }
@@ -41,7 +42,7 @@ try {
     if ($final.Length -ne $source.Length) {
         throw "Staged release size differs from the qualified RBF."
     }
-    $finalHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    $finalHash = Get-S32FileSha256 -LiteralPath $destination
     if ($finalHash -ne $sourceHash) {
         throw "Staged release hash differs from the qualified RBF."
     }

@@ -30,8 +30,10 @@ module tb_core_romboot;
 import s32_pkg::*;
 
 reg clk_sys = 0, clk_ram = 0, rst = 1;
+reg clk_v25 = 0;
 always #10.35 clk_sys = ~clk_sys;
 always #5.175 clk_ram = ~clk_ram;
+always @(posedge clk_sys) clk_v25 <= ~clk_v25;
 
 // clock enables
 reg ce_cpu = 0;  reg [1:0] cdiv = 0;
@@ -99,6 +101,14 @@ reg [15:0]  mc  [0:1048575];    // maincpu   base 0x000000, 2MB
 reg [15:0]  sc  [0:2097151];    // soundcpu  base 0x200000, 4MB
 reg [63:0]  tl  [0:524287];     // tiles     base 0x600000, 4MB
 reg [127:0] sp  [0:1048575];    // sprites   base 0x1000000, 16MB
+reg [7:0] mcu_raw [0:65535];
+reg [7:0] mcu_ext [0:65535];
+integer mcu_fd, mcu_got, mcu_i;
+
+function automatic [15:0] mcu_descramble(input [15:0] i);
+    mcu_descramble = {i[14], i[11], i[15], i[12], i[13], i[4], i[3], i[7],
+                      i[5], i[10], i[2], i[8], i[9], i[6], i[1], i[0]};
+endfunction
 
 string imgdir;
 initial begin
@@ -107,6 +117,20 @@ initial begin
     $readmemh({imgdir, "/soundcpu.hex"}, sc);
     $readmemh({imgdir, "/tiles.hex"},    tl);
     $readmemh({imgdir, "/sprites.hex"},  sp);
+    mcu_fd = $fopen({imgdir, "/mcu.bin"}, "rb");
+    if (mcu_fd == 0) begin
+        $display("ROMBOOT FAIL: cannot open %s/mcu.bin", imgdir);
+        $finish;
+    end else begin
+        mcu_got = $fread(mcu_raw, mcu_fd);
+        $fclose(mcu_fd);
+        if (mcu_got != 65536) begin
+            $display("ROMBOOT FAIL: mcu.bin is %0d bytes, expected 65536", mcu_got);
+            $finish;
+        end
+        for (mcu_i = 0; mcu_i < 65536; mcu_i = mcu_i + 1)
+            mcu_ext[mcu_i] = mcu_raw[mcu_descramble(mcu_i[15:0])];
+    end
 end
 
 // p0: V60 program (clk_sys single-cycle toggle ack)
@@ -117,6 +141,38 @@ reg         p0_ack = 0;
 always @(posedge clk_sys) begin
     p0_ack  <= p0_req & ~p0_ack;
     p0_dout <= mc[p0_addr[20:1]];
+end
+
+// p5: production real-V25 program path. The loader stores the descrambled
+// 64 KiB MCU image at SDR_MCU_BASE and the core fetches aligned 8-byte lines.
+localparam [21:0] MCU_BASE_W = SDR_MCU_BASE[24:3];
+wire        p5_req;
+wire [24:3] p5_addr;
+reg  [63:0] p5_dout = 64'h0;
+reg         p5_ack = 0;
+reg         p5_pend = 0;
+reg  [24:3] p5_addr_l = 0;
+wire [12:0] p5_off = p5_addr_l[15:3] - MCU_BASE_W[12:0];
+always @(posedge clk_sys) begin
+    p5_ack <= 1'b0;
+    if (rst) begin
+        p5_pend <= 1'b0;
+    end else begin
+        if (p5_req && !p5_pend) begin
+            p5_addr_l <= p5_addr;
+            p5_pend <= 1'b1;
+        end
+        if (p5_pend) begin
+            p5_dout <= {
+                mcu_ext[{p5_off, 3'd7}], mcu_ext[{p5_off, 3'd6}],
+                mcu_ext[{p5_off, 3'd5}], mcu_ext[{p5_off, 3'd4}],
+                mcu_ext[{p5_off, 3'd3}], mcu_ext[{p5_off, 3'd2}],
+                mcu_ext[{p5_off, 3'd1}], mcu_ext[{p5_off, 3'd0}]
+            };
+            p5_ack <= 1'b1;
+            p5_pend <= 1'b0;
+        end
+    end
 end
 
 // p1: tile data, 64-bit (clk_ram)
@@ -329,14 +385,18 @@ wire        ce_pix;
 wire signed [15:0] audio_l, audio_r;
 
 s32_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .rst(rst), .video_rst(rst), .board(board),
+    .clk_sys(clk_sys), .clk_ram(clk_ram),
+`ifdef S32_REAL_V25
+    .clk_v25(clk_v25),
+`endif
+    .rst(rst), .video_rst(rst), .board(board),
     .ce_cpu(ce_cpu), .ce_z80(ce_z80), .ce_fm(ce_fm), .ce_pcm(ce_pcm), .pause(1'b0),
     .sdr_p0_req(p0_req), .sdr_p0_addr(p0_addr), .sdr_p0_dout(p0_dout), .sdr_p0_ack(p0_ack),
     .sdr_p1_req(p1_req), .sdr_p1_addr(p1_addr), .sdr_p1_dout(p1_dout), .sdr_p1_ack(p1_ack),
     .sdr_p2_req(p2_req), .sdr_p2_addr(p2_addr), .sdr_p2_dout(p2_dout), .sdr_p2_ack(p2_ack),
     .sdr_p3_req(p3_req), .sdr_p3_addr(p3_addr), .sdr_p3_dout(p3_dout), .sdr_p3_ack(p3_ack),
     .sdr_p4_req(), .sdr_p4_addr(), .sdr_p4_dout(16'h0), .sdr_p4_ack(1'b0),
-    .sdr_p5_req(), .sdr_p5_addr(), .sdr_p5_dout(64'h0), .sdr_p5_ack(1'b0),
+    .sdr_p5_req(p5_req), .sdr_p5_addr(p5_addr), .sdr_p5_dout(p5_dout), .sdr_p5_ack(p5_ack),
     .fb_wr_start(fbw_start), .fb_wr_buf(fbw_buf), .fb_wr_x(fbw_x), .fb_wr_y(fbw_y),
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
@@ -471,6 +531,10 @@ end
 // +DUMPSPRAT=<frame>: dump the V60-written sprite command RAM (0x400000, the
 // display list) to sim_spriteram.hex so it can be diffed against MAME's list.
 integer sprdump_at, sprdump_fd, sprdump_i;
+reg vb_d2 = 0, sprdump_done = 0;
+integer sprdump_last = -1;
+integer wdump_fd;
+reg wdone250 = 0, wdone400 = 0, wdone500 = 0;
 initial if (!$value$plusargs("DUMPSPRAT=%d", sprdump_at)) sprdump_at = -1;
 integer sprdump_cur = 0;
 always @(posedge clk_sys) begin
@@ -544,8 +608,6 @@ always @(posedge clk_sys) begin
         end
     end
 end
-integer wdump_fd;
-reg wdone250 = 0, wdone400 = 0, wdone500 = 0;
 
 // Monitor every V60 write to char-select object[8] (0x2005a0, wram_a 0x2d0-0x2d7)
 // with the V60 PC + data. MAME spawns it at frame 436 via 0x063DB5 (word0=0x8000)
@@ -561,8 +623,6 @@ always @(posedge clk_sys) begin
         $fflush(obj8_fd);
     end
 end
-reg vb_d2 = 0, sprdump_done = 0;
-integer sprdump_last = -1;
 
 // +LOFF=<hex>: force tm_layer_off to isolate which layer draws the arabfgt
 // select "swirl". bits {5:BITMAP,4:NBG3,3:NBG2,2:NBG1,1:NBG0,0:TEXT} (1=off).
@@ -859,9 +919,15 @@ always @(posedge clk_sys) begin
     if (core.m_req && !core.m_ack) begin
         hang_cnt = hang_cnt + 1;
         if (hang_cnt == 20000)
+`ifdef S32_GOLDENAXE_ONLY
+            $display("[HANG] pc=%08x A=%06x we=%b be=%b st=%0d p0req=%b",
+                core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_we, core.m_be,
+                core.v60.st, p0_req);
+`else
             $display("[HANG] pc=%08x A=%06x we=%b be=%b st=%0d rom_ready=%b rom_filling=%b ic_hit=%b p0req=%b",
                 core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_we, core.m_be,
                 core.v60.st, core.rom_ready, core.rom_filling, core.ic_hit, p0_req);
+`endif
     end
     else hang_cnt = 0;
 end

@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "sha256.ps1")
 $repoRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $MisterHost) {
     throw "Pass -MisterHost root@<MISTER-IP> or set S32_MISTER_HOST."
@@ -133,13 +134,13 @@ try {
     if ($rbf.PSIsContainer -or $rbf.Length -le 0) {
         throw "Selected RBF is empty: $resolvedRbf"
     }
-    $localRbfHash = (Get-FileHash -LiteralPath $resolvedRbf -Algorithm SHA256).Hash.ToLowerInvariant()
+    $localRbfHash = Get-S32FileSha256 -LiteralPath $resolvedRbf
     $qualifiedRbf = Join-Path $ReportRoot "output_files\$Revision.rbf"
     $qualified = Get-Item -LiteralPath $qualifiedRbf -ErrorAction Stop
     if ($qualified.Length -le 0) {
         throw "The report-qualified RBF is empty: $qualifiedRbf"
     }
-    $qualifiedRbfHash = (Get-FileHash -LiteralPath $qualifiedRbf -Algorithm SHA256).Hash.ToLowerInvariant()
+    $qualifiedRbfHash = Get-S32FileSha256 -LiteralPath $qualifiedRbf
     if ($localRbfHash -ne $qualifiedRbfHash) {
         throw "Selected RBF does not match the RBF qualified by the Quartus reports."
     }
@@ -162,7 +163,7 @@ try {
         if ($mraCore -cne $CoreName) {
             throw "MRA targets RBF '$mraCore', but this deployment targets '$CoreName'."
         }
-        $localMraHash = (Get-FileHash -LiteralPath $resolvedMra -Algorithm SHA256).Hash.ToLowerInvariant()
+        $localMraHash = Get-S32FileSha256 -LiteralPath $resolvedMra
     }
 
     $remoteCoreDir = "/media/fat/_Arcade/cores"

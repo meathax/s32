@@ -160,9 +160,10 @@ function automatic clip_vis(input [8:0] xx, input [8:0] yy,
     clip_vis = !en || ((|hit) ^ outp);
 endfunction
 
-// text layer name address: page from $1FF5C bits 7:4 (<<11 words).  Bit 8 is
-// reserved and must not alias the text name table into the upper half of VRAM.
-wire [15:0] text_page_base = {1'b0, r1ff5c[7:4], 11'b0};
+// Text layer name address: MAME's get_text_tile_info uses the full five-bit
+// page selector $1FF5C[8:4] (<<11 words). Golden Axe stores its gameplay HUD
+// and GO-prompt name table in the upper half of video RAM.
+wire [15:0] text_page_base = {r1ff5c[8:4], 11'b0};
 // text char gfx base: bank bits 2:0 of $1FF5C, 16 words/char
 wire [15:0] text_bank_base = {r1ff5c[2:0], 13'b0};
 

@@ -6,6 +6,7 @@ files.  They must never start Quartus, Qsys, SSH, or an FPGA build.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -385,6 +386,7 @@ class PowerShellSyntaxTests(unittest.TestCase):
             "build-docker.ps1",
             "invoke-build-locked.ps1",
             "report-quartus.ps1",
+            "sha256.ps1",
             "sync-goldenaxe-qsf.ps1",
             "deploy-mister.ps1",
             "deploy-goldenaxe.ps1",
@@ -420,11 +422,37 @@ class PowerShellSyntaxTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout)
 
 
+    def test_sha256_helper_matches_python(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="s32-sha256-") as temporary:
+            path = Path(temporary) / "probe.bin"
+            payload = b"Sega System 32\x00Golden Axe\xff"
+            path.write_bytes(payload)
+            helper = str(TOOLS / "sha256.ps1").replace("'", "''")
+            probe = str(path).replace("'", "''")
+            command = f". '{helper}'; Get-S32FileSha256 -LiteralPath '{probe}'"
+            result = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-Command", command],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stdout.strip(), hashlib.sha256(payload).hexdigest())
+
+
 class BatchPipelineSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.build = (TOOLS / "build.bat").read_text(encoding="utf-8")
         cls.goldenaxe = (TOOLS / "build-goldenaxe.bat").read_text(encoding="utf-8")
+
+    def test_windows_batch_files_use_crlf_for_reliable_label_scanning(self) -> None:
+        for path in (TOOLS / "build.bat", TOOLS / "build-goldenaxe.bat"):
+            data = path.read_bytes()
+            self.assertNotIn(b"\n", data.replace(b"\r\n", b""), path.name)
+
 
     def test_negative_native_exit_codes_cannot_fall_through(self) -> None:
         for name, content in (
@@ -521,6 +549,7 @@ class LockWrapperTests(unittest.TestCase):
             probe.write_text(
                 "@echo off\r\n"
                 "echo S32_SAFE_LOCK_PROBE\r\n"
+                "echo QSYS_INFORMATIONAL_STDERR 1>&2\r\n"
                 "exit /b 73\r\n",
                 encoding="ascii",
                 newline="",
@@ -530,6 +559,7 @@ class LockWrapperTests(unittest.TestCase):
                 ("-BuildScript", str(probe)),
             )
             self.assertEqual(result.returncode, 73, result.stdout)
+            self.assertIn("QSYS_INFORMATIONAL_STDERR", result.stdout)
             logs = list(root.glob("*.log"))
             self.assertTrue(logs, "the wrapper must retain a root-level build log")
             self.assertTrue(

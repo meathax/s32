@@ -309,17 +309,20 @@ initial begin
     wait_done;
     cpu_write(16'hff98, 16'h0000);
 
-    // TEXT name and glyph are two distinct synchronous VRAM reads.
-    cpu_write(16'h0000, 16'h0402); // palette 2, character 2
-    cpu_write(16'h0020, 16'h00f0); // char 2, row 0: x0 pen F
-    // $1FF5C bit 8 is reserved.  It must not become a fifth text-page bit and
-    // redirect the name fetch from word $0000 to word $8000.
-    cpu_write(16'hffae, 16'h0100);
+    // TEXT name and glyph are two distinct synchronous VRAM reads. Reproduce
+    // Golden Axe's captured $1FF5C=$01F7: page $1F and character bank 7.
+    cpu_write(16'h7800, 16'h0401); // wrong page $0F name
+    cpu_write(16'hf800, 16'h0402); // correct page $1F name
+    cpu_write(16'he020, 16'h00f0); // bank 7, char 2, row 0: x0 pen F
+    // Bit 8 is the fifth text-page bit; dropping it redirects HUD/GO names
+    // from word $F800 to $7800 and makes the dynamic text layer corrupt.
+    cpu_write(16'hffae, 16'h01f7);
     cpu_write(16'hff81, 16'h002f); // only TEXT enabled
     start_render;
     expect_first_pixel(3'd0, 14'h202f);
     wait_done;
     cpu_write(16'hffae, 16'h0000);
+    cpu_write(16'h0000, 16'h0402);
 
     // 4bpp bitmap words are little-endian nibble streams. Exercise all four
     // pixels rather than allowing a uniform test word to hide lane reversal.

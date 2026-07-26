@@ -590,7 +590,13 @@ assign sdr_p1_addr = SDR_TILES_BASE[24:3] + {3'b000, tile_rom_addr};
 wire [7:0] sprctl_q;
 wire [1:0] disp_buf;
 wire [1:0] spr_scan_buf;
-s32_sprite sprite (
+s32_sprite #(
+`ifdef S32_GOLDENAXE_ONLY
+    .VERIFY_SROM(1'b1)
+`else
+    .VERIFY_SROM(1'b0)
+`endif
+) sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
     // Old MRAs predate bank metadata and therefore retain the original
     // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.

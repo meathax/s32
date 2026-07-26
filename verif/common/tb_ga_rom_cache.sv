@@ -254,7 +254,9 @@ initial begin : run_tests
         fail("simultaneous instruction/data arbitration timed out");
     if (if_data !== (reference_line(line_d) >> 16))
         fail("instruction-priority result did not match reference line");
-    if (data_data !== reference_line(line_c)[63:48])
+    // Icarus does not accept a part-select directly on a function call.
+    // Shifting preserves the same upper-word comparison portably.
+    if (data_data !== (reference_line(line_c) >> 48))
         fail("queued data result did not match cached reference word");
     if ((rom_request_count-req_start) != 4)
         fail("simultaneous request did not give the instruction miss sole ROM priority");

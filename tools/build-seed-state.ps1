@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "sha256.ps1")
 try {
     if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
         $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -57,7 +58,7 @@ try {
         WorstTimingType = $result.WorstTimingType
         InputFingerprint = $result.InputFingerprint
         FitReportSha256 = if (Test-Path -LiteralPath $fitReportPath -PathType Leaf) {
-            (Get-FileHash -LiteralPath $fitReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            (Get-S32FileSha256 -LiteralPath $fitReportPath)
         } else {
             $null
         }

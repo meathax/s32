@@ -13,6 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "sha256.ps1")
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -91,7 +92,16 @@ function Get-InputFiles([string]$Root, [string]$Rev) {
         $files.Add($pllGenerator)
     }
 
-    return @($files | Sort-Object FullName -Unique)
+    # Sort-Object's default string collation differs between Windows PowerShell
+    # 5.1 and PowerShell 7.  The build uses the former while deployment may use
+    # the latter, which made identical inputs produce different fingerprints.
+    $filesByPath = @{}
+    foreach ($file in $files) {
+        $filesByPath[$file.FullName] = $file
+    }
+    [string[]]$paths = @($filesByPath.Keys)
+    [Array]::Sort($paths, [StringComparer]::OrdinalIgnoreCase)
+    return @($paths | ForEach-Object { $filesByPath[$_] })
 }
 
 function Get-InputSnapshot([string]$Root, [IO.FileInfo[]]$Files) {
@@ -101,7 +111,7 @@ function Get-InputSnapshot([string]$Root, [IO.FileInfo[]]$Files) {
         $rows += [pscustomobject][ordered]@{
             Path = $relative
             Length = [int64]$file.Length
-            Sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Sha256 = (Get-S32FileSha256 -LiteralPath $file.FullName)
         }
     }
 
@@ -189,8 +199,8 @@ if ($WriteMapManifest) {
         QuartusVersion = $quartusVersion
         InputFingerprint = $inputSnapshot.Fingerprint
         Inputs = $inputSnapshot.Files
-        MapSummarySha256 = (Get-FileHash -LiteralPath $mapSummaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        MapReportSha256 = (Get-FileHash -LiteralPath $mapReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        MapSummarySha256 = (Get-S32FileSha256 -LiteralPath $mapSummaryPath)
+        MapReportSha256 = (Get-S32FileSha256 -LiteralPath $mapReportPath)
         RecordedUtc = [DateTime]::UtcNow.ToString("o")
     }
     Write-AtomicUtf8 $manifestPath (([pscustomobject]$manifest | ConvertTo-Json -Depth 8) + [Environment]::NewLine)
@@ -211,15 +221,45 @@ if ($manifestFile) {
 }
 
 $manifestRevisionMatches = $manifestReadable -and $manifest.Revision -eq $Revision
+$manifestInputRowsMatch = $false
+if ($manifestRevisionMatches -and $null -ne $manifest.Inputs) {
+    # Schema-1 manifests used the host PowerShell's collation order when
+    # calculating the aggregate fingerprint. Compare their actual path/hash
+    # rows as a set so an ordering-only runtime difference cannot stale a fit.
+    $recordedInputs = @{}
+    $currentInputs = @{}
+    $rowsValid = $true
+    foreach ($row in @($manifest.Inputs)) {
+        $path = [string]$row.Path
+        if ([string]::IsNullOrWhiteSpace($path) -or $recordedInputs.ContainsKey($path)) {
+            $rowsValid = $false
+            break
+        }
+        $recordedInputs[$path] = "$([int64]$row.Length)|$([string]$row.Sha256)"
+    }
+    foreach ($row in @($inputSnapshot.Files)) {
+        $currentInputs[[string]$row.Path] = "$([int64]$row.Length)|$([string]$row.Sha256)"
+    }
+    if ($rowsValid -and $recordedInputs.Count -eq $currentInputs.Count) {
+        $manifestInputRowsMatch = $true
+        foreach ($path in $recordedInputs.Keys) {
+            if (-not $currentInputs.ContainsKey($path) -or
+                $currentInputs[$path] -cne $recordedInputs[$path]) {
+                $manifestInputRowsMatch = $false
+                break
+            }
+        }
+    }
+}
 $manifestInputMatches = $manifestRevisionMatches -and
-    $manifest.InputFingerprint -eq $inputSnapshot.Fingerprint
+    ($manifest.InputFingerprint -eq $inputSnapshot.Fingerprint -or $manifestInputRowsMatch)
 $manifestToolMatches = $manifestRevisionMatches -and
     ([string]::IsNullOrWhiteSpace($quartusVersion) -or $manifest.QuartusVersion -eq $quartusVersion)
 $manifestMapHashesMatch = $false
 if ($manifestRevisionMatches -and $mapSummaryFile -and $mapReportFile) {
     $manifestMapHashesMatch =
-        $manifest.MapSummarySha256 -eq (Get-FileHash -LiteralPath $mapSummaryPath -Algorithm SHA256).Hash.ToLowerInvariant() -and
-        $manifest.MapReportSha256 -eq (Get-FileHash -LiteralPath $mapReportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest.MapSummarySha256 -eq (Get-S32FileSha256 -LiteralPath $mapSummaryPath) -and
+        $manifest.MapReportSha256 -eq (Get-S32FileSha256 -LiteralPath $mapReportPath)
 }
 $mapIsCurrent = $mapSuccessful -and [bool]$mapSummaryFile -and [bool]$mapReportFile -and
     $manifestReadable -and $manifestInputMatches -and $manifestToolMatches -and $manifestMapHashesMatch -and

@@ -104,9 +104,24 @@ try {
     Write-Host "Build lock acquired. Persistent log: $logPath"
 
     $commandLine = [char]34 + $resolvedScript + [char]34
-    & $env:ComSpec /d /c $commandLine 2>&1 |
-        Tee-Object -FilePath $logPath -Append
-    $buildExitCode = $LASTEXITCODE
+    # Windows PowerShell 5.1 wraps native stderr lines as ErrorRecord objects.
+    # With the script-wide Stop preference, benign tools such as qsys-script
+    # can otherwise abort the wrapper merely by printing an informational line
+    # to stderr even when their native exit status is zero. Stream every line
+    # explicitly and make the native exit code the sole success authority.
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $env:ComSpec /d /c $commandLine 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            Write-Host $line
+            Append-Log $line
+        }
+        $buildExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
     Append-Log ""
     Append-Log "FinishedUtc: $([DateTime]::UtcNow.ToString('o'))"
     Append-Log "NativeExitCode: $buildExitCode"

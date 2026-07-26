@@ -106,22 +106,28 @@ def _run_modelsim(
     max_cycles: int,
     seed: int,
     rom_stall: int,
+    rom_fault: bool,
     fb_stall: bool,
+    integrated_fb: bool,
 ) -> tuple[bytes, str]:
     vlib = _tool("vlib", model_sim_bin)
     vlog = _tool("vlog", model_sim_bin)
     vsim = _tool("vsim", model_sim_bin)
     library = work / "modelsim_work"
     _run([vlib, str(library)], cwd=work, label="vlib sprite replay")
+    sources = [
+        str(REPO_ROOT / "rtl/video/s32_sprite.sv"),
+        str(REPO_ROOT / "verif/sprite_replay/tb_sprite_replay.sv"),
+    ]
+    defines: list[str] = []
+    if integrated_fb:
+        sources[1:1] = [
+            str(REPO_ROOT / "rtl/mem/s32_fb_if.sv"),
+            str(REPO_ROOT / "verif/common/s32_fb_ddr_model.sv"),
+        ]
+        defines.append("+define+S32_REPLAY_REAL_FB")
     _run(
-        [
-            vlog,
-            "-sv",
-            "-work",
-            str(library),
-            str(REPO_ROOT / "rtl/video/s32_sprite.sv"),
-            str(REPO_ROOT / "verif/sprite_replay/tb_sprite_replay.sv"),
-        ],
+        [vlog, "-sv", "-work", str(library), *defines, *sources],
         cwd=work,
         label="vlog sprite replay",
     )
@@ -150,6 +156,7 @@ def _run_modelsim(
         f"+MAXCYCLES={max_cycles}",
         f"+SEED={seed & 0x7fffffff}",
         f"+ROMSTALL={rom_stall}",
+        f"+ROMFAULT={1 if rom_fault else 0}",
         f"+FBSTALL={1 if fb_stall else 0}",
         f"+SBM={bank_mask:x}",
     ]
@@ -173,7 +180,9 @@ def run_fixture(
     max_cycles: int,
     seed: int,
     rom_stall: int,
+    rom_fault: bool,
     fb_stall: bool,
+    integrated_fb: bool,
 ) -> dict[str, object]:
     manifest_path, manifest = load_manifest(manifest_file)
     if manifest.get("event", "render") != "render":
@@ -198,7 +207,9 @@ def run_fixture(
         max_cycles=max_cycles,
         seed=seed,
         rom_stall=rom_stall,
+        rom_fault=rom_fault,
         fb_stall=fb_stall,
+        integrated_fb=integrated_fb,
     )
     (work / "rtl_back.fb16le").write_bytes(actual_blob)
     width = int(manifest.get("width", 416 if manifest["controls"][6] & 1 else 320))
@@ -225,6 +236,7 @@ def run_fixture(
         "comparison_physical": physical_comparison,
         "physical_match_required": (control2 & 3) == 0,
         "global_flip_storage_adapter": control2 & 3,
+        "integrated_framebuffer": integrated_fb,
         "descriptor_bank_audit": bank_audit,
         "expected_path": str(expected),
         "rtl_path": str(work / "rtl_back.fb16le"),
@@ -248,7 +260,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-cycles", type=int, default=50_000_000)
     parser.add_argument("--seed", type=lambda value: int(value, 0), default=0x5386A)
     parser.add_argument("--rom-stall", type=int, choices=range(0, 256), default=7)
+    parser.add_argument(
+        "--rom-fault", action="store_true", help="corrupt one sprite-ROM response to exercise retry"
+    )
     parser.add_argument("--no-fb-stall", action="store_true")
+    parser.add_argument("--integrated-fb", action="store_true")
     parser.add_argument("--keep-work", action="store_true")
     args = parser.parse_args(argv)
 
@@ -268,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
             max_cycles=args.max_cycles,
             seed=args.seed,
             rom_stall=args.rom_stall,
+            rom_fault=args.rom_fault,
             fb_stall=not args.no_fb_stall,
+            integrated_fb=args.integrated_fb,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"SPRITE REPLAY: FAIL: {exc}", file=sys.stderr)

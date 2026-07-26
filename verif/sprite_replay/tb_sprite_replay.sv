@@ -45,7 +45,13 @@ wire [15:0] fb_wr_pix;
 wire        fb_er_req;
 wire  [1:0] fb_er_buf;
 wire  [7:0] fb_er_y;
+`ifdef S32_REPLAY_REAL_FB
+wire        fb_er_ack;
+wire        fb_busy;
+`else
 reg         fb_er_ack = 1'b0;
+wire        fb_busy;
+`endif
 wire  [1:0] disp_buf;
 wire        rendering;
 reg         vblank = 1'b0;
@@ -55,7 +61,9 @@ reg [2:0] ctl_addr = 3'd0;
 reg [7:0] ctl_wdata = 8'd0;
 
 reg [31:0] lfsr = 32'h5386_a5c3;
-wire fb_busy = fb_stall_enable != 0 && rendering && lfsr[0] && lfsr[5];
+`ifndef S32_REPLAY_REAL_FB
+assign fb_busy = fb_stall_enable != 0 && rendering && lfsr[0] && lfsr[5];
+`endif
 always @(posedge clk) begin
     if (rst)
         lfsr <= seed ^ 32'h5386_a5c3;
@@ -63,7 +71,7 @@ always @(posedge clk) begin
         lfsr <= {lfsr[30:0], lfsr[31] ^ lfsr[21] ^ lfsr[1] ^ lfsr[0]};
 end
 
-s32_sprite dut (
+s32_sprite #(.VERIFY_SROM(1'b1)) dut (
     .clk(clk), .rst(rst), .is_multi32(1'b0),
     .srom_bank_mask(sprite_bank_mask[1:0]),
     .present(vblank), .vblank(vblank), .rendering(rendering),
@@ -98,12 +106,15 @@ integer fb_run_ends = 0;
 reg rom_outstanding = 1'b0;
 reg rom_acked = 1'b0;
 reg [23:4] rom_addr_latched = 20'd0;
+integer rom_fault_once = 0;
+reg rom_fault_done = 1'b0;
 integer rom_wait = 0;
 always @(posedge clk) begin
     srom_ack <= 1'b0;
     if (rst) begin
         rom_outstanding <= 1'b0;
         rom_acked <= 1'b0;
+        rom_fault_done <= 1'b0;
         rom_wait <= 0;
     end
     else if (!rom_outstanding && srom_req) begin
@@ -137,6 +148,12 @@ always @(posedge clk) begin
                          rom_addr_latched, rom_chunks);
                 srom_data <= {128{1'b1}};
             end
+            else if (rom_fault_once != 0 && !rom_fault_done) begin
+                // One deliberately corrupt response proves the production
+                // renderer discards a mismatched verification pair.
+                srom_data <= rom128[rom_addr_latched] ^ 128'h1;
+                rom_fault_done <= 1'b1;
+            end
             else
                 srom_data <= rom128[rom_addr_latched];
             srom_ack <= 1'b1;
@@ -151,11 +168,34 @@ always @(posedge clk) begin
     end
 end
 
+`ifdef S32_REPLAY_REAL_FB
+// Exact integration mode: route the production renderer through the same
+// framebuffer RTL and deterministic MiSTer-style DDR model as real-ROM
+// qualification. Direct-render fixtures start from a transparent buffer.
+wire [31:0] model_write_accepts, model_read_accepts, model_line_acks;
+wire [31:0] model_max_wr_wait, model_max_rd_wait, model_max_er_wait;
+wire        model_deadline_fail;
+s32_fb_ddr_model fb_model (
+    .clk(clk), .rst(rst),
+    .wr_start(fb_wr_start), .wr_buf(fb_wr_buf),
+    .wr_x(fb_wr_x), .wr_y(fb_wr_y), .wr_valid(fb_wr_valid),
+    .wr_pix(fb_wr_pix), .wr_end(fb_wr_end), .wr_shadow(fb_wr_shadow),
+    .wr_busy(fb_busy),
+    .er_req(fb_er_req), .er_buf(fb_er_buf), .er_y(fb_er_y), .er_ack(fb_er_ack),
+    .rd_req(1'b0), .rd_buf(2'd0), .rd_y(8'd0), .rd_ack(),
+    .rd_x(9'd0), .rd_pix(),
+    .write_accepts(model_write_accepts), .read_accepts(model_read_accepts),
+    .line_acks(model_line_acks), .max_wr_wait(model_max_wr_wait),
+    .max_rd_wait(model_max_rd_wait), .max_er_wait(model_max_er_wait),
+    .deadline_fail(model_deadline_fail)
+);
+`else
 // Erase is not part of a direct render event, but acknowledge it with bounded
 // behavior so an accidental controller command cannot deadlock silently.
 always @(posedge clk) begin
     fb_er_ack <= fb_er_req;
 end
+`endif
 
 // -------------------------------------------------------------------------
 // Physical framebuffer sink and write-run liveness checks.
@@ -200,11 +240,13 @@ always @(posedge clk) begin
                          fb_wr_x, fb_wr_y);
             end
             else begin
+`ifndef S32_REPLAY_REAL_FB
                 if (fb_wr_shadow)
                     fb[fb_wr_y * FB_WIDTH + fb_wr_x] <=
                         fb[fb_wr_y * FB_WIDTH + fb_wr_x] & 16'h7fff;
                 else
                     fb[fb_wr_y * FB_WIDTH + fb_wr_x] <= fb_wr_pix;
+`endif
                 fb_writes = fb_writes + 1;
             end
         end
@@ -250,6 +292,7 @@ endtask
 
 integer init_i;
 integer out_fd;
+integer out_x, out_y, out_word, out_lane;
 initial begin
     if (!$value$plusargs("SPRRAM=%s", sram_path))
         $fatal(1, "missing +SPRRAM=<hex>");
@@ -263,6 +306,7 @@ initial begin
     if (!$value$plusargs("MAXCYCLES=%d", max_cycles)) max_cycles = 50000000;
     if (!$value$plusargs("SEED=%d", seed)) seed = 342122;
     if (!$value$plusargs("ROMSTALL=%d", rom_stall_mask)) rom_stall_mask = 7;
+    if (!$value$plusargs("ROMFAULT=%d", rom_fault_once)) rom_fault_once = 0;
     if (!$value$plusargs("FBSTALL=%d", fb_stall_enable)) fb_stall_enable = 1;
     if (!$value$plusargs("SBM=%h", sprite_bank_mask)) sprite_bank_mask = 3;
     if (!$value$plusargs("C0=%h", c0)) c0 = 0;
@@ -305,6 +349,7 @@ initial begin
         $display("REPLAY ASSERT FAIL: renderer exceeded MAXCYCLES=%0d", max_cycles);
     end
     while ((run_active || rom_outstanding) && cycles < max_cycles) @(posedge clk);
+    while (fb_busy && cycles < max_cycles) @(posedge clk);
     repeat (8) @(posedge clk);
 
     if (fb_runs != fb_run_ends) begin
@@ -315,6 +360,18 @@ initial begin
     out_fd = $fopen(out_path, "w");
     if (out_fd == 0)
         $fatal(1, "cannot open RTL framebuffer output %s", out_path);
+`ifdef S32_REPLAY_REAL_FB
+    // Read the physical work buffer selected by the production triple-buffer
+    // rotation, including the overrun-only third slot.
+    for (out_y = 0; out_y < FB_HEIGHT; out_y = out_y + 1) begin
+        for (out_x = 0; out_x < FB_WIDTH; out_x = out_x + 1) begin
+            out_word = (dut.work_buf << 15) + (out_y << 7) + (out_x >> 2);
+            out_lane = out_x & 3;
+            fb[out_y * FB_WIDTH + out_x] =
+                fb_model.ddr[out_word] >> (out_lane * 16);
+        end
+    end
+`endif
     for (init_i = 0; init_i < FB_PIXELS; init_i = init_i + 1)
         $fdisplay(out_fd, "%04x", fb[init_i]);
     $fclose(out_fd);
