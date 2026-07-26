@@ -1,5 +1,7 @@
+Built cores avalible at https://www.patreon.com/cw/Meathax
+
 # This core is 100% AI coded
-# Sega System 32 / Multi 32 for MiSTer
+# Sega System 32 / Multi 32 for MiSTer FPGA
 
 An open FPGA recreation of Sega's System 32 and Multi 32 arcade hardware
 (1990–1994) for the MiSTer DE10-Nano. The project is source-first and does
