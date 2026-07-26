@@ -1,96 +1,57 @@
-name: build-rbf
+name: verify-source
 
-# Compiles the Sega System 32 core to SegaS32.rbf and uploads it as an
-# artifact only after fit, timing, freshness, and RBF qualification pass.
+# Public CI intentionally does not compile or publish an RBF. The only
+# supported release path is the named-mutex Windows build using the pinned
+# D:\Q17 Quartus Lite 17.0.2.602 installation:
 #
-# Quartus is large and its license/container availability varies; this
-# workflow uses a community Quartus 17.0 image. If it is unavailable
-# for your fork, either:
-#   - switch `container.image` to another Quartus 17.0.x Standard image, or
-#   - move this job to a self-hosted runner with Quartus installed and drop
-#     the Docker steps (the compile command itself is unchanged).
-
+#   set QUARTUS_ROOT=D:\Q17
+#   tools\build-goldenaxe.bat
+#
+# That path records an input manifest, qualifies fit and multicorner timing,
+# and stages a hash-verified per-game RBF. Community containers and the legacy
+# Linux qualifier cannot provide the same provenance and are fail-closed.
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]          # tagging vX.Y.Z publishes a GitHub Release
+    tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  quartus:
-    runs-on: ubuntu-latest
+  source-verification:
+    name: Source and release-profile checks
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The Quartus 17.0 image is larger than the free space left on a stock
-      # hosted runner. Reclaim only preinstalled SDKs on this disposable VM,
-      # before Docker pulls the image. Running the job itself in the container
-      # would pull it before any cleanup step could execute.
-      - name: Reclaim runner disk for Quartus
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run portable Python verification
+        shell: pwsh
+        run: python -B -m unittest discover -s verif -p "test_*.py" -v
+
+      - name: Check dedicated release profiles and MRAs
+        shell: pwsh
         run: |
-          echo "Disk before cleanup:"
-          df -h /
-          sudo rm -rf \
-            /opt/ghc \
-            /opt/hostedtoolcache \
-            /usr/local/.ghcup \
-            /usr/local/lib/android \
-            /usr/share/dotnet
-          sudo apt-get clean
-          docker system prune --all --force
-          echo "Disk after cleanup:"
-          df -h /
+          python -B verif/check_ga2_release.py
+          python -B verif/check_holo_release.py
 
-      - name: Pull Quartus 17.0 image
-        run: docker pull raetro/quartus:17.0
+      - name: Check fail-closed shell entrypoint syntax
+        shell: bash
+        run: bash -n tools/build.sh
 
-      - name: Build and qualify RBF
+      - name: Enforce source-only CI policy
+        shell: pwsh
         run: |
-          docker run --rm \
-            --workdir /build \
-            --volume "$GITHUB_WORKSPACE:/build" \
-            raetro/quartus:17.0 \
-            bash tools/build.sh
-
-      - name: Upload RBF artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SegaS32-rbf
-          path: releases/SegaS32.rbf
-          if-no-files-found: error
-
-      - name: Upload fit/timing reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quartus-reports
-          path: |
-            output_files/*.rpt
-            output_files/*.summary
-          if-no-files-found: ignore
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: quartus
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download qualified RBF
-        uses: actions/download-artifact@v4
-        with:
-          name: SegaS32-rbf
-          path: releases
-
-      - name: Publish RBF to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          files: releases/SegaS32.rbf
-          fail_on_unmatched_files: true
-          body: |
-            Sega System 32 / Multi 32 MiSTer core — `SegaS32.rbf`.
-            Built by CI from ${{ github.sha }}. Installation instructions are in `README.md`.
+          $unexpected = @(Get-ChildItem -Path releases -Filter *.rbf -File -ErrorAction SilentlyContinue)
+          if ($unexpected.Count -ne 0) {
+            throw "Source verification must not produce or publish an RBF."
+          }
+          Write-Host "RBF generation remains on the locked tools\build-goldenaxe.bat path."

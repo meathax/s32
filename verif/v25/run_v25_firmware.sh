@@ -11,6 +11,7 @@ for required in \
     rtl/cpu/v25/s32_v25_cpu.sv \
     rtl/cpu/v25/s80x86/generated/microcode.bin \
     verif/common/tb_v25_rom_cache.sv \
+    verif/common/tb_v25_internal_data.sv \
     verif/common/tb_v25_firmware.sv; do
     if [[ ! -f "$required" ]]; then
         echo "V25_FIRMWARE RUNNER FAIL: missing $required" >&2
@@ -41,6 +42,19 @@ if ! grep -Fq "V25 ROM CACHE PASS" "$build_dir/cache.log"; then
     exit 1
 fi
 
+iverilog \
+    -g2012 \
+    -s tb_v25_internal_data \
+    -o "$build_dir/tb_v25_internal_data" \
+    rtl/cpu/v25/s32_v25_rom_cache.sv \
+    rtl/cpu/v25/s32_v25_cpu.sv \
+    verif/common/tb_v25_internal_data.sv
+"$build_dir/tb_v25_internal_data" 2>&1 | tee "$build_dir/internal-data.log"
+if ! grep -Fq "V25 INTERNAL DATA PASS" "$build_dir/internal-data.log"; then
+    echo "V25_INTERNAL_DATA RUNNER FAIL: success marker missing" >&2
+    exit 1
+fi
+
 verilator \
     --binary \
     --timing \
@@ -68,6 +82,7 @@ fi
 # The test emits one atomic success marker only after independently checking
 # the complete 48-byte wake-up and 16-byte protection table (plus stack state).
 echo "V25_ROM_CACHE RUNNER: PASS"
+echo "V25_INTERNAL_DATA RUNNER: PASS"
 echo "V25_FIRMWARE WAKE: PASS"
 echo "V25_FIRMWARE TABLE: PASS"
 echo "V25_FIRMWARE RUNNER: PASS ($((SECONDS - start_seconds))s)"

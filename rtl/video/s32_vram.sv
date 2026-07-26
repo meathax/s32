@@ -56,6 +56,14 @@ function automatic [15:0] merge_be(
                 be[0] ? new_value[7:0]  : old_value[7:0]};
 endfunction
 
+// Keep clip-register indices explicitly five bits wide.  The low block maps
+// to entries 0..15 and the high block maps to entries 16..19; expressing the
+// leading zero only inside the array subscript let older Quartus versions
+// reduce the low expression to four bits and warn that it could not address
+// the complete 20-word array.
+wire [4:0] clip_index_lo = {1'b0, cpu_addr[3:0]};
+wire [4:0] clip_index_hi = {3'b100, cpu_addr[1:0]};
+
 s32_big_dpram #(
     .ADDR_WIDTH(16),
     .NUM_WORDS(65536),
@@ -113,13 +121,13 @@ always @(posedge clk) begin
             7'h2f: reg_1ff5e <= merge_be(reg_1ff5e, cpu_wdata, cpu_be);
             7'h30, 7'h31, 7'h32, 7'h33, 7'h34, 7'h35, 7'h36, 7'h37,
             7'h38, 7'h39, 7'h3a, 7'h3b, 7'h3c, 7'h3d, 7'h3e, 7'h3f:
-                reg_clips[{1'b0, cpu_addr[3:0]}] <=
-                    merge_be(reg_clips[{1'b0, cpu_addr[3:0]}], cpu_wdata, cpu_be);
+                reg_clips[clip_index_lo] <=
+                    merge_be(reg_clips[clip_index_lo], cpu_wdata, cpu_be);
             7'h40, 7'h41, 7'h42, 7'h43:                // 5th rect (bitmap)
                 // Fifth rectangle occupies clip words 16..19. The former
                 // four-bit concatenation decoded as 8..11 and overwrote rect 3.
-                reg_clips[{3'b100, cpu_addr[1:0]}] <=
-                    merge_be(reg_clips[{3'b100, cpu_addr[1:0]}], cpu_wdata, cpu_be);
+                reg_clips[clip_index_hi] <=
+                    merge_be(reg_clips[clip_index_hi], cpu_wdata, cpu_be);
             7'h44: reg_1ff88 <= merge_be(reg_1ff88, cpu_wdata, cpu_be);
             7'h45: reg_1ff8a <= merge_be(reg_1ff8a, cpu_wdata, cpu_be);
             7'h46: reg_1ff8c <= merge_be(reg_1ff8c, cpu_wdata, cpu_be);

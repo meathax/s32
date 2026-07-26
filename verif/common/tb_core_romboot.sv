@@ -48,7 +48,7 @@ reg ce_fm = 0; reg [15:0] fm_acc = 0;
 always @(posedge clk_sys) begin
     logic [16:0] fm_sum;
     // Mirror the production free-running FM NCO, including while rst is high.
-    fm_sum = fm_acc + 17'd10923;
+    fm_sum = fm_acc + 17'd10924;
     ce_fm <= fm_sum[16];
     fm_acc <= fm_sum[15:0];
 end
@@ -60,8 +60,8 @@ always @(posedge clk_sys) begin
         ce_pcm <= 1'b0;
     end
     else begin
-        // 12.5 MHz / 48.324 MHz, identical to the production top-level NCO.
-        pcm_sum = pcm_acc + 17'd16952;
+        // 12.5 MHz / 48.317307 MHz, identical to the production top-level NCO.
+        pcm_sum = pcm_acc + 17'd16955;
         ce_pcm <= pcm_sum[16];
         pcm_acc <= pcm_sum[15:0];
     end

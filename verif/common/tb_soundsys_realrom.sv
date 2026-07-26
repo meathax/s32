@@ -5,7 +5,7 @@
 // activity and subsystem state; it never writes ROM contents to an artifact.
 module tb_soundsys_realrom;
     reg clk = 1'b0;
-    always #10.345 clk = ~clk; // 48.332 MHz, close to the 48.324 MHz PLL output
+    always #10.345 clk = ~clk; // 48.317 MHz, matching the generated 48.317307 MHz PLL output
 
     reg rst = 1'b1;
     reg z80_reset = 1'b1;
@@ -25,10 +25,10 @@ module tb_soundsys_realrom;
             ce_pcm  <= 1'b0;
         end
         else begin
-            sum = acc_z80 + 17'd10923;
+            sum = acc_z80 + 17'd10924;
             ce_z80 <= sum[16];
             acc_z80 <= sum[15:0];
-            sum = acc_pcm + 17'd16952;
+            sum = acc_pcm + 17'd16955;
             ce_pcm <= sum[16];
             acc_pcm <= sum[15:0];
         end
@@ -39,7 +39,7 @@ module tb_soundsys_realrom;
     // enabled-clock reset rings are actually flushed.
     always @(posedge clk) begin
         logic [16:0] sum;
-        sum = acc_fm + 17'd10923;
+        sum = acc_fm + 17'd10924;
         ce_fm <= sum[16];
         acc_fm <= sum[15:0];
     end

@@ -85,21 +85,24 @@ GAMES = {
 BUTTONS = {
     "ga2": (
         "Attack,Jump,Magic,-,-,-,Start,Coin,Test,Service",
-        "A,B,X,-,-,-,Start,Select,R,L",
+        "A,B,X,Start,Select,R,L",
     ),
     "jpark": (
         "Shoot,-,-,-,-,-,Start,Coin,Test,Service",
-        "A,-,-,-,-,-,Start,Select,R,L",
+        "A,Start,Select,R,L",
     ),
     "alien3": (
         "Trigger,Button,-,-,-,-,Start,Coin,Test,Service",
-        "A,B,-,-,-,-,Start,Select,R,L",
+        "A,B,Start,Select,R,L",
     ),
     "spidman": (
         "Attack,Jump,-,-,-,-,Start,Coin,Test,Service",
-        "A,B,-,-,-,-,Start,Select,R,L",
+        "A,B,Start,Select,R,L",
     ),
 }
+
+BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2}
+RBF_BY_PARENT = {"ga2": "s32GoldenAxe"}
 
 UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
 
@@ -277,11 +280,11 @@ def gen(setname, data, outdir):
         lines.append(f'  <parent>{parent}</parent>')
     lines.append(f'  <year>{data.get("year", "")}</year>')
     lines.append(f'  <manufacturer>{escape(data.get("manu", "Sega"))}</manufacturer>')
-    lines.append('  <rbf>SegaS32</rbf>')
+    lines.append(f'  <rbf>{RBF_BY_PARENT.get(parent, "SegaS32")}</rbf>')
     button_meta = BUTTONS.get(parent)
     if button_meta:
         names, defaults = button_meta
-        count = names.count(",") + 1
+        count = BUTTON_COUNTS[parent]
         lines.append(
             f'  <buttons names="{names}" default="{defaults}" count="{count}"/>'
         )

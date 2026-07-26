@@ -84,24 +84,35 @@ wire [15:0] r3e = mreg[6'h1f];  // 0x3E/2: color-offset select
 reg  [3:0] sprgroup_shift;
 reg  [3:0] sprgroup_mask;
 reg  [3:0] sprgroup_or;
-always @(*) begin
-    case (r4c[3:0])
-        4'h0: begin sprgroup_shift=14; sprgroup_mask=4'h0; sprgroup_or=4'h1; end
-        4'h1: begin sprgroup_shift=14; sprgroup_mask=4'h1; sprgroup_or=4'h2; end
-        4'h2: begin sprgroup_shift=13; sprgroup_mask=4'h3; sprgroup_or=4'h4; end
-        4'h3: begin sprgroup_shift=12; sprgroup_mask=4'h7; sprgroup_or=4'h8; end
-        4'h4: begin sprgroup_shift=14; sprgroup_mask=4'h1; sprgroup_or=4'h0; end
-        4'h5: begin sprgroup_shift=13; sprgroup_mask=4'h3; sprgroup_or=4'h0; end
-        4'h6: begin sprgroup_shift=12; sprgroup_mask=4'h7; sprgroup_or=4'h0; end
-        4'h7: begin sprgroup_shift=11; sprgroup_mask=4'hf; sprgroup_or=4'h0; end
-        4'h8: begin sprgroup_shift=14; sprgroup_mask=4'h1; sprgroup_or=4'h0; end
-        4'h9: begin sprgroup_shift=13; sprgroup_mask=4'h3; sprgroup_or=4'h0; end
-        4'ha: begin sprgroup_shift=12; sprgroup_mask=4'h7; sprgroup_or=4'h0; end
-        4'hb: begin sprgroup_shift=11; sprgroup_mask=4'hf; sprgroup_or=4'h0; end
-        4'hc: begin sprgroup_shift=13; sprgroup_mask=4'h1; sprgroup_or=4'h0; end
-        4'hd: begin sprgroup_shift=12; sprgroup_mask=4'h3; sprgroup_or=4'h0; end
-        4'he: begin sprgroup_shift=11; sprgroup_mask=4'h7; sprgroup_or=4'h0; end
-        4'hf: begin sprgroup_shift=10; sprgroup_mask=4'hf; sprgroup_or=4'h0; end
+reg        r4c_use_own_palbase;
+reg        r4c_shadow_rmw_en;
+initial begin
+    sprgroup_shift = 4'd10;
+    sprgroup_mask = 4'hf;
+    sprgroup_or = 4'h0;
+    r4c_use_own_palbase = 1'b1;
+    r4c_shadow_rmw_en = 1'b1;
+end
+always @(posedge clk) if (reg_we && reg_addr == 6'h26 && reg_be[0]) begin
+    r4c_use_own_palbase <= (reg_wdata[1:0] == 2'b11);
+    r4c_shadow_rmw_en <= reg_wdata[2];
+    case (reg_wdata[3:0])
+        4'h0: begin sprgroup_shift<=14; sprgroup_mask<=4'h0; sprgroup_or<=4'h1; end
+        4'h1: begin sprgroup_shift<=14; sprgroup_mask<=4'h1; sprgroup_or<=4'h2; end
+        4'h2: begin sprgroup_shift<=13; sprgroup_mask<=4'h3; sprgroup_or<=4'h4; end
+        4'h3: begin sprgroup_shift<=12; sprgroup_mask<=4'h7; sprgroup_or<=4'h8; end
+        4'h4: begin sprgroup_shift<=14; sprgroup_mask<=4'h1; sprgroup_or<=4'h0; end
+        4'h5: begin sprgroup_shift<=13; sprgroup_mask<=4'h3; sprgroup_or<=4'h0; end
+        4'h6: begin sprgroup_shift<=12; sprgroup_mask<=4'h7; sprgroup_or<=4'h0; end
+        4'h7: begin sprgroup_shift<=11; sprgroup_mask<=4'hf; sprgroup_or<=4'h0; end
+        4'h8: begin sprgroup_shift<=14; sprgroup_mask<=4'h1; sprgroup_or<=4'h0; end
+        4'h9: begin sprgroup_shift<=13; sprgroup_mask<=4'h3; sprgroup_or<=4'h0; end
+        4'ha: begin sprgroup_shift<=12; sprgroup_mask<=4'h7; sprgroup_or<=4'h0; end
+        4'hb: begin sprgroup_shift<=11; sprgroup_mask<=4'hf; sprgroup_or<=4'h0; end
+        4'hc: begin sprgroup_shift<=13; sprgroup_mask<=4'h1; sprgroup_or<=4'h0; end
+        4'hd: begin sprgroup_shift<=12; sprgroup_mask<=4'h3; sprgroup_or<=4'h0; end
+        4'he: begin sprgroup_shift<=11; sprgroup_mask<=4'h7; sprgroup_or<=4'h0; end
+        4'hf: begin sprgroup_shift<=10; sprgroup_mask<=4'hf; sprgroup_or<=4'h0; end
     endcase
 end
 
@@ -110,14 +121,23 @@ end
 //   shadow source a: bit15 CLEAR when reg 0x4C bit2 set (RMW shadow sprites)
 //   shadow source b: masked pen == sprshadow (0x7ffe & sprpixmask) — the
 //     shadow pen: itself transparent, shadows whatever wins beneath
-wire [3:0]  spr_group_raw = (spr_pix >> sprgroup_shift) & {12'b0,sprgroup_mask};
+reg  [3:0]  spr_group_raw;
+reg  [15:0] sprpixmask;
+always @(*) begin
+    case (sprgroup_shift)
+        4'd14: begin spr_group_raw = {3'b0, spr_pix[14]} & sprgroup_mask; sprpixmask = 16'h3fff; end
+        4'd13: begin spr_group_raw = {2'b0, spr_pix[14:13]} & sprgroup_mask; sprpixmask = 16'h1fff; end
+        4'd12: begin spr_group_raw = {1'b0, spr_pix[14:12]} & sprgroup_mask; sprpixmask = 16'h0fff; end
+        4'd11: begin spr_group_raw = spr_pix[14:11] & sprgroup_mask; sprpixmask = 16'h07ff; end
+        default: begin spr_group_raw = spr_pix[13:10] & sprgroup_mask; sprpixmask = 16'h03ff; end
+    endcase
+end
 wire [3:0]  spr_group = sprgroup_or | spr_group_raw;
-wire [15:0] sprpixmask = ((16'h1 << sprgroup_shift) - 1) & 16'h3fff;
 wire        spr_transp = (spr_pix & 16'h7fff) == 16'h7fff;
 wire [15:0] sprshadowpen = 16'h7ffe & sprpixmask;
 wire        spr_shadow_pen = !spr_transp &&
                              ((spr_pix & sprpixmask & 16'h7ffe) == sprshadowpen);
-wire        spr_shadow_rmw = r4c[2] && !spr_pix[15];
+wire        spr_shadow_rmw = r4c_shadow_rmw_en && !spr_pix[15];
 wire        spr_shadow_src = spr_shadow_pen | spr_shadow_rmw;
 wire        spr_opaque = !spr_transp && !spr_shadow_pen;   // can win the scan
 
@@ -159,38 +179,66 @@ reg [6:0] ep_spr_s, ep_text_s, ep_nbg0_s, ep_nbg1_s;
 reg [6:0] ep_nbg2_s, ep_nbg3_s, ep_bmp_s, ep_spr_nom_s;
 
 // Winner select (8-way max), evaluated from the candidate snapshot. Keep the
-// priority key and layer selector together through a balanced tree. A serial
-// if-chain put seven 7-bit comparisons ahead of the palette address and was
-// the post-fit 96 MHz critical path. Rank makes every non-zero key unique.
+// priority key and layer selector together through a balanced tournament. In
+// addition to the winner, retain the three opponents it defeated. The largest
+// of those opponents is the runner-up, so the following pipeline stage needs
+// only two comparisons instead of masking the winner and repeating all seven.
+// Rank makes every non-zero key unique.
 function automatic [10:0] max_candidate(input [10:0] a, input [10:0] b);
     max_candidate = (a[10:4] > b[10:4]) ? a : b;
 endfunction
 
-wire [10:0] win_p0 = max_candidate({ep_spr_s,  4'd6}, {ep_text_s, 4'd0});
-wire [10:0] win_p1 = max_candidate({ep_nbg0_s, 4'd1}, {ep_nbg1_s, 4'd2});
-wire [10:0] win_p2 = max_candidate({ep_nbg2_s, 4'd3}, {ep_nbg3_s, 4'd4});
-wire [10:0] win_p3 = max_candidate({ep_bmp_s,  4'd5}, {ep_bg,     4'd7});
-wire [10:0] win_q0 = max_candidate(win_p0, win_p1);
-wire [10:0] win_q1 = max_candidate(win_p2, win_p3);
-wire [10:0] win_max = max_candidate(win_q0, win_q1);
+wire [10:0] cand_spr  = {ep_spr_s,  4'd6};
+wire [10:0] cand_text = {ep_text_s, 4'd0};
+wire [10:0] cand_nbg0 = {ep_nbg0_s, 4'd1};
+wire [10:0] cand_nbg1 = {ep_nbg1_s, 4'd2};
+wire [10:0] cand_nbg2 = {ep_nbg2_s, 4'd3};
+wire [10:0] cand_nbg3 = {ep_nbg3_s, 4'd4};
+wire [10:0] cand_bmp  = {ep_bmp_s,  4'd5};
+wire [10:0] cand_bg   = {ep_bg,     4'd7};
+
+wire p0_left_wins = ep_spr_s  > ep_text_s;
+wire p1_left_wins = ep_nbg0_s > ep_nbg1_s;
+wire p2_left_wins = ep_nbg2_s > ep_nbg3_s;
+wire p3_left_wins = ep_bmp_s  > ep_bg;
+wire [10:0] win_p0  = p0_left_wins ? cand_spr  : cand_text;
+wire [10:0] lose_p0 = p0_left_wins ? cand_text : cand_spr;
+wire [10:0] win_p1  = p1_left_wins ? cand_nbg0 : cand_nbg1;
+wire [10:0] lose_p1 = p1_left_wins ? cand_nbg1 : cand_nbg0;
+wire [10:0] win_p2  = p2_left_wins ? cand_nbg2 : cand_nbg3;
+wire [10:0] lose_p2 = p2_left_wins ? cand_nbg3 : cand_nbg2;
+wire [10:0] win_p3  = p3_left_wins ? cand_bmp  : cand_bg;
+wire [10:0] lose_p3 = p3_left_wins ? cand_bg   : cand_bmp;
+
+wire q0_left_wins = win_p0[10:4] > win_p1[10:4];
+wire q1_left_wins = win_p2[10:4] > win_p3[10:4];
+wire [10:0] win_q0 = q0_left_wins ? win_p0 : win_p1;
+wire [10:0] win_q1 = q1_left_wins ? win_p2 : win_p3;
+wire [10:0] lose_q0_first = q0_left_wins ? lose_p0 : lose_p1;
+wire [10:0] lose_q1_first = q1_left_wins ? lose_p2 : lose_p3;
+wire [10:0] lose_q0_second = q0_left_wins ? win_p1 : win_p0;
+wire [10:0] lose_q1_second = q1_left_wins ? win_p3 : win_p2;
+
+wire final_left_wins = win_q0[10:4] > win_q1[10:4];
+wire [10:0] win_max = final_left_wins ? win_q0 : win_q1;
+wire [10:0] win_loser_first = final_left_wins ? lose_q0_first : lose_q1_first;
+wire [10:0] win_loser_second = final_left_wins ? lose_q0_second : lose_q1_second;
+wire [10:0] win_loser_final = final_left_wins ? win_q1 : win_q0;
 wire [6:0] best = win_max[10:4];
 wire [3:0] bestsel = win_max[3:0]; // 0=text 1..4 nbg 5 bmp 6 spr 7 bg
 
 reg [6:0] best_hold, best2_hold;
 reg [3:0] bestsel_hold, best2sel_hold;
+reg [10:0] runner_first_hold, runner_second_hold, runner_final_hold;
 
-// Blend partner: mask the winner, then use the same balanced max tree.
-wire [10:0] run_p0 = max_candidate({(bestsel_hold != 4'd6) ? ep_spr_s  : 7'd0, 4'd6},
-                                   {(bestsel_hold != 4'd0) ? ep_text_s : 7'd0, 4'd0});
-wire [10:0] run_p1 = max_candidate({(bestsel_hold != 4'd1) ? ep_nbg0_s : 7'd0, 4'd1},
-                                   {(bestsel_hold != 4'd2) ? ep_nbg1_s : 7'd0, 4'd2});
-wire [10:0] run_p2 = max_candidate({(bestsel_hold != 4'd3) ? ep_nbg2_s : 7'd0, 4'd3},
-                                   {(bestsel_hold != 4'd4) ? ep_nbg3_s : 7'd0, 4'd4});
-wire [10:0] run_p3 = max_candidate({(bestsel_hold != 4'd5) ? ep_bmp_s : 7'd0, 4'd5},
-                                   {(bestsel_hold != 4'd7) ? ep_bg    : 7'd0, 4'd7});
-wire [10:0] run_q0 = max_candidate(run_p0, run_p1);
-wire [10:0] run_q1 = max_candidate(run_p2, run_p3);
-wire [10:0] run_max = max_candidate(run_q0, run_q1);
+// The only possible runner-up is one of the three candidates that lost
+// directly to the winner. Resolve those registered opponents here. When all
+// three keys are zero, background was the winner and there is no opaque blend
+// partner; retain the old tree's background selector sentinel in that case.
+wire [10:0] run_pair = max_candidate(runner_first_hold, runner_second_hold);
+wire [10:0] run_opponent_max = max_candidate(run_pair, runner_final_hold);
+wire [10:0] run_max = (run_opponent_max[10:4] == 7'd0)
+                    ? {7'd0, 4'd7} : run_opponent_max;
 wire [6:0] best2 = run_max[10:4];
 wire [3:0] best2sel = run_max[3:0];
 
@@ -224,14 +272,24 @@ wire [19:0] li_nbg1 = {lr_1[7:4], lr_1[9:8], 1'b0, px_nbg1[12:0]};
 wire [19:0] li_nbg2 = {lr_2[7:4], lr_2[9:8], 1'b0, px_nbg2[12:0]};
 wire [19:0] li_nbg3 = {lr_3[7:4], lr_3[9:8], 1'b0, px_nbg3[12:0]};
 wire [19:0] li_bmp  = {lr_b[7:4], lr_b[9:8], 1'b0, px_bmp[12:0]};
-wire [19:0] li_spr  = {(r4c[1:0] == 2'b11) ? r4c[7:4] : sprreg[7:4],
+wire [19:0] li_spr  = {r4c_use_own_palbase ? r4c[7:4] : sprreg[7:4],
                        sprreg[9:8], spr_pix[13:0] & sprpixmask[13:0]};
 wire [19:0] li_bg   = {lr_bg[7:4], lr_bg[9:8], bg_pen};
 
 function automatic [13:0] mk_palidx(input [19:0] li);
-    mk_palidx = {li[19:16], 10'b0}
-              + ((li[13:0] >> li[15:14]) & 14'h3ff0)
-              + {10'b0, li[3:0]};
+    reg [13:0] shifted_pen;
+    begin
+        case (li[15:14])
+            2'd0: shifted_pen = {li[13:4], 4'b0};
+            2'd1: shifted_pen = {1'b0, li[13:5], 4'b0};
+            2'd2: shifted_pen = {2'b0, li[13:6], 4'b0};
+            default: shifted_pen = {3'b0, li[13:7], 4'b0};
+        endcase
+        // shifted_pen has a zero low nibble, so inserting the original low
+        // nibble before the palette-base addition is equivalent to two adds.
+        mk_palidx = {li[19:16], 10'b0}
+                  + (shifted_pen | {10'b0, li[3:0]});
+    end
 endfunction
 
 // Do the variable shift and palette-base addition before the candidate
@@ -476,21 +534,25 @@ always @(posedge clk) begin
     else if (winner_pending) begin
         best_hold <= best;
         bestsel_hold <= bestsel;
+        runner_first_hold <= win_loser_first;
+        runner_second_hold <= win_loser_second;
+        runner_final_hold <= win_loser_final;
         // The candidate snapshot already makes the winner and its palette
         // index stable. Start the registered palette lookup here, two stages
         // before P0, leaving ample latency before first_pal is retained at P2.
         pal_addr_r <= idx_winner;
-        // Register the winning layer's blend control here.  It is then stable
-        // when the runner-up is resolved on the next edge, avoiding a
-        // control-only pipeline stage that would overrun the 12-clock pixel
-        // period in 416-wide mode.
-        wblendreg_hold <= mreg[6'h18 + {2'b0, bestsel}];
+
         winner_pending <= 1'b0;
         second_pending <= 1'b1;
     end
     else if (second_pending) begin
-        // Register the runner tree before the palette-index and blend-control
-        // muxes.  This removes the remaining 96 MHz candidate-to-idx2 path.
+        // bestsel_hold was registered on the preceding edge. Keeping the
+        // dynamic mixer-register lookup here prevents the balanced winner
+        // tree and 64:1 register mux from becoming one 96 MHz timing path.
+        wblendreg_hold <= mreg[6'h18 + {2'b0, bestsel_hold}];
+        // Register the three-opponent runner result before the palette-index
+        // and blend-control muxes. This removes the winner-mask cone and five
+        // redundant 7-bit comparisons from the path toward idx2_hold.
         best2_hold    <= best2;
         best2sel_hold <= best2sel;
         second_pending <= 1'b0;

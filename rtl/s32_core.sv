@@ -16,10 +16,10 @@ module s32_core #(
     parameter SYSTEM32_ONLY = 1'b0
 `endif
 ) (
-    input             clk_sys,      // 48.324 MHz
-    input             clk_ram,      // 96.648 MHz
+    input             clk_sys,      // 48.317307 MHz
+    input             clk_ram,      // 96.634615 MHz
 `ifdef S32_REAL_V25
-    input             clk_v25,      // ~24.162 MHz (clk_sys/2): s80x86 compute domain
+    input             clk_v25,      // ~24.158653 MHz (clk_sys/2): s80x86 compute domain
 `endif
     input             rst,
     // Keep CRT timing alive while game logic is held in ROM-load reset.
@@ -143,14 +143,52 @@ module s32_core #(
     output     [89:0] debug_v25_img     // {sweep_done, first_valid, hash[23:0], first_line[63:0]}
 );
 
-`ifdef S32_GA2_ONLY
-localparam GAME_ONLY = 1'b1;
+`ifdef S32_GOLDENAXE_ONLY
+localparam GOLDENAXE_ONLY = 1'b1;
+localparam GAME_ONLY      = 1'b1;
+`elsif S32_GA2_ONLY
+localparam GOLDENAXE_ONLY = 1'b0;
+localparam GAME_ONLY      = 1'b1;
 `elsif S32_HOLO_ONLY
-localparam GAME_ONLY = 1'b1;
+localparam GOLDENAXE_ONLY = 1'b0;
+localparam GAME_ONLY      = 1'b1;
 `elsif S32_JPARK_ONLY
-localparam GAME_ONLY = 1'b1;
+localparam GOLDENAXE_ONLY = 1'b0;
+localparam GAME_ONLY      = 1'b1;
 `else
-localparam GAME_ONLY = 1'b0;
+localparam GOLDENAXE_ONLY = 1'b0;
+localparam GAME_ONLY      = 1'b0;
+`endif
+
+// Dedicated Golden Axe hardware constants. The MRA descriptor is still loaded
+// and validated, but fixing these board straps at elaboration lets Quartus
+// remove unrelated runtime-select muxes. Other profiles remain descriptor-led.
+`ifdef S32_GOLDENAXE_ONLY
+wire       cfg_multi32           = 1'b0;
+wire       cfg_has_v25           = 1'b1;
+wire       cfg_v25_table         = 1'b0;
+wire       cfg_has_adc           = 1'b0;
+wire       cfg_has_track         = 1'b0;
+wire       cfg_has_ppi           = 1'b1;
+wire       cfg_has_dsp_hle       = 1'b0;
+wire       cfg_dual_pcb          = 1'b0;
+wire [6:0] cfg_prot_sel          = PROT_NONE;
+wire       cfg_sprite_bank_valid = 1'b1;
+wire [1:0] cfg_sprite_bank_mask  = 2'b11;
+wire       cfg_flip_y            = 1'b0;
+`else
+wire       cfg_multi32           = board.multi32;
+wire       cfg_has_v25           = board.has_v25;
+wire       cfg_v25_table         = board.v25_table;
+wire       cfg_has_adc           = board.has_adc;
+wire       cfg_has_track         = board.has_track;
+wire       cfg_has_ppi           = board.has_ppi;
+wire       cfg_has_dsp_hle       = board.has_dsp_hle;
+wire       cfg_dual_pcb          = board.dual_pcb;
+wire [6:0] cfg_prot_sel          = board.prot_sel;
+wire       cfg_sprite_bank_valid = board.sprite_bank_valid;
+wire [1:0] cfg_sprite_bank_mask  = board.sprite_bank_mask;
+wire       cfg_flip_y            = board.flip_y;
 `endif
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
 // it is accidentally paired with a Multi 32 MRA.  The universal source build
@@ -159,7 +197,7 @@ localparam GAME_ONLY = 1'b0;
 // force the System 32 configuration even if a QSF sets a game macro without
 // S32_SYSTEM32_ONLY (previously that mismatch left is_multi32 following the
 // descriptor while the analog/trackball hardware it implies was compiled out).
-wire is_multi32 = (SYSTEM32_ONLY || GAME_ONLY) ? 1'b0 : board.multi32;
+wire is_multi32 = (SYSTEM32_ONLY || GAME_ONLY) ? 1'b0 : cfg_multi32;
 
 // ---------------------------------------------------------------------------
 // CPU + bus adapter
@@ -184,8 +222,14 @@ wire        v60_debug_halted;
 wire        if_req;
 wire [23:0] if_addr;                 // frontier byte address (low 3 bits = intra-line
                                     // offset used to pre-align the returned line)
+`ifdef S32_GOLDENAXE_ONLY
+wire [63:0] if_data;
+wire        if_served;
+`else
 reg  [63:0] if_data;
-reg         if_served;              // held while a fetch result is presented
+reg         if_served;
+`endif
+                                    // held while a fetch result is presented
 wire        if_ack = if_served;     // held (not pulsed) so the ce-gated CPU never
                                     // misses it between its enable ticks
 
@@ -409,9 +453,12 @@ reg [15:0] tm_offsx [0:3], tm_offsy [0:3];
 reg [15:0] tm_pages [0:7];
 reg [15:0] tm_zoomx [0:1], tm_zoomy [0:1];
 reg [15:0] tm_clips [0:19];
+reg [15:0] tm_clips_cdc [0:19];
+reg  [8:0] mix_disp_x_cdc;
 reg [15:0] mix_bg_ctrl;
 integer tm_init_i;
 integer tm_cap_i;
+integer tm_cdc_i;
 initial begin
     tm_mode_416 = 1'b1;
     tm_ext_tilebank = 8'b0;
@@ -429,7 +476,24 @@ initial begin
         tm_scrollfracx[tm_init_i] = 0; tm_scrollfracy[tm_init_i] = 0;
         tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200; // neutral 1.0 zoom default
     end
-    for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) tm_clips[tm_init_i] = 0;
+    for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) begin
+        tm_clips[tm_init_i] = 0;
+        tm_clips_cdc[tm_init_i] = 0;
+    end
+    mix_disp_x_cdc = 0;
+end
+
+// clk_sys is a phase-related divide-by-two of clk_ram. Capture CPU/video
+// controls on clk_ram's falling edge so the following rising-edge consumers
+// have a full half-cycle of setup/hold margin.
+always @(negedge clk_ram) begin
+    // These are sampling registers, not architectural state. They have
+    // explicit power-up values and are overwritten on every falling edge, so
+    // a reset mux only creates a long status[0] -> inverted-clk_ram half-cycle
+    // path across all 329 bits.
+    mix_disp_x_cdc <= hcnt;
+    for (tm_cdc_i = 0; tm_cdc_i < 20; tm_cdc_i = tm_cdc_i + 1)
+        tm_clips_cdc[tm_cdc_i] <= w_clips[tm_cdc_i];
 end
 
 // Launch at the start of the preceding scanline.  This gives the renderer a
@@ -448,7 +512,7 @@ wire tm_render_kick = tm_line_boundary && (tm_next_line <= 9'd223);
 // Holosseum is mounted with ORIENTATION_FLIP_Y.  Keep timing and line-buffer
 // parity in visible-screen order, but render the vertically mirrored source
 // scanline into that bank.
-wire [8:0] tm_source_line = (board.flip_y && render_line <= 9'd223)
+wire [8:0] tm_source_line = (cfg_flip_y && render_line <= 9'd223)
                           ? (9'd223 - render_line) : render_line;
 s32_tile_line_scheduler tile_line_scheduler (
     .clk(clk_ram), .rst(rst),
@@ -495,7 +559,7 @@ always @(posedge clk_ram) begin
             tm_zoomy[tm_cap_i] <= w_zoomy[tm_cap_i];
         end
         for (tm_cap_i = 0; tm_cap_i < 20; tm_cap_i = tm_cap_i + 1)
-            tm_clips[tm_cap_i] <= w_clips[tm_cap_i];
+            tm_clips[tm_cap_i] <= tm_clips_cdc[tm_cap_i];
     end
 end
 
@@ -530,7 +594,7 @@ s32_sprite sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
     // Old MRAs predate bank metadata and therefore retain the original
     // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.
-    .srom_bank_mask(board.sprite_bank_valid ? board.sprite_bank_mask : 2'b11),
+    .srom_bank_mask(cfg_sprite_bank_valid ? cfg_sprite_bank_mask : 2'b11),
     // Publish completed physical frames at VBLANK start, before the line-0
     // prefetch. MAME schedules logical erase/swap/render just after VBLANK
     // ends; GA2 builds its next list during VBLANK, so that trigger stays late.
@@ -621,8 +685,8 @@ always @(posedge clk_ram) begin
             // CRT lines are 0..261. Truncating line 261 before adding produced
             // line 6 instead of the next frame's line 0.
             if (vcnt == 9'd261)
-                fb_rd_y_r <= board.flip_y ? 8'd223 : 8'd0;
-            else if (board.flip_y && vcnt < 9'd223)
+                fb_rd_y_r <= cfg_flip_y ? 8'd223 : 8'd0;
+            else if (cfg_flip_y && vcnt < 9'd223)
                 fb_rd_y_r <= 8'd222 - vcnt[7:0];
             else
                 fb_rd_y_r <= vcnt[7:0] + 8'd1;
@@ -676,8 +740,8 @@ s32_mixer mix0 (
     .reg_we(wr_stb && m_we && is_mix0),
     .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
-    .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-    .display_en(io0_cnt1), .flip_y(board.flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
+    .disp_x(mix_disp_x_cdc), .disp_y(vcnt), .disp_active(~hb & ~vb),
+    .display_en(io0_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
     .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -715,8 +779,8 @@ generate
             .reg_we(wr_stb && m_we && is_mix1),
             .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
-            .disp_x(hcnt), .disp_y(vcnt), .disp_active(~hb & ~vb),
-            .display_en(io1_cnt1), .flip_y(board.flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
+            .disp_x(mix_disp_x_cdc), .disp_y(vcnt), .disp_active(~hb & ~vb),
+            .display_en(io1_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
             .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
             .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
             .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -839,12 +903,19 @@ s32_eeprom93c46 eeprom (
 // extended IO: ADC / trackballs / PPI
 wire adc_bit;
 wire [7:0] trk_q [0:2];
-wire sel_adc   = sel_ioex && (A[5:3] == 3'b010) && board.has_adc;
-wire sel_track = sel_ioex && (A[5:3] <= 3'b010) && board.has_track;
-wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && board.has_ppi;
+wire sel_adc   = sel_ioex && (A[5:3] == 3'b010) && cfg_has_adc;
+wire sel_track = sel_ioex && (A[5:3] <= 3'b010) && cfg_has_track;
+wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && cfg_has_ppi;
 genvar t;                         // declare outside the generate-for (Quartus 17.0)
 generate
-    if (GAME_ONLY) begin : g_game_no_analog
+    if (GOLDENAXE_ONLY) begin : g_goldenaxe_no_analog
+        // Golden Axe has no MSM6253 ADC or uPD4701 trackball board.
+        assign adc_bit = 1'b1;
+        for (t = 0; t < 3; t = t + 1) begin : tracks
+            assign trk_q[t] = 8'hff;
+        end
+    end
+    else if (GAME_ONLY) begin : g_game_no_analog
         // The trackball counters (sonic) stay compiled out of the dedicated
         // release, but the MSM6253 ADC is tiny and the gun/positional games on
         // this profile (alien3, jpark: descriptor has_adc=1) read their aim
@@ -887,7 +958,7 @@ generate
                 .clk(clk_sys), .rst(rst),
                 .delta_valid(trk_dv[t]), .dx(trk_dx[t]), .dy(trk_dy[t]),
                 .cs(m_req && sel_ioex && m_be[0] &&
-                    board.has_track && A[5:3] == t[2:0]), // B4: 0x40/48/50
+                    cfg_has_track && A[5:3] == t[2:0]), // B4: 0x40/48/50
                 .we(m_we), .addr(A[2:1]),
                 .rdata(trk_q[t]), .buttons(trk_btn[t])
             );
@@ -946,7 +1017,7 @@ generate
     end
     else begin : g_other_protection
         s32_prot_hle prot (
-            .clk(clk_sys), .rst(rst), .prot_sel(board.prot_sel),
+            .clk(clk_sys), .rst(rst), .prot_sel(cfg_prot_sel),
             .cpu_wr(m_req && m_we && (sel_wram || sel_prot_a)),
             .cpu_addr(A), .cpu_wdata(m_wdata),
             .vblank(vbl_start),
@@ -958,7 +1029,7 @@ generate
         );
 
         s32_prot_brival brival (
-            .clk(clk_sys), .rst(rst), .enable(board.prot_sel == PROT_BRIVAL),
+            .clk(clk_sys), .rst(rst), .enable(cfg_prot_sel == PROT_BRIVAL),
             .cpu_wr(m_req && m_we && sel_prot_a),
             .cpu_addr(A), .cpu_wdata(m_wdata),
             .cpu_rd(m_req && !m_we && sel_wram), .cpu_be(m_be),
@@ -968,7 +1039,7 @@ generate
         );
 
         s32_arescue_dsp dsp (
-            .clk(clk_sys), .rst(rst), .enable(board.has_dsp_hle),
+            .clk(clk_sys), .rst(rst), .enable(cfg_has_dsp_hle),
             .cs(m_req && sel_prot_a && A[15:4] == 0), .we(m_we),
             .addr(A[2:1]), .wdata(m_wdata), .rdata(dsp_q)
         );
@@ -985,7 +1056,7 @@ generate
     end
     else begin : g_dualpcb
         s32_dualpcb dual (
-            .clk(clk_sys), .enable(board.dual_pcb),
+            .clk(clk_sys), .enable(cfg_dual_pcb),
             .cs_ram(m_req && sel_dual && !A[15]),
             // MAME serves the dual-PCB identity only at 0x818000-0x818003; the
             // rest of the 0x818000-0x81FFFF window reads open-bus (audit R20
@@ -1016,7 +1087,17 @@ wire        v25_first_valid;
 wire [63:0] v25_first_data;
 wire [15:3] v25_first_addr;
 
-// ---- MCU image checksum sweep (bring-up diagnostic, permanent) -------------
+`ifdef S32_RELEASE_MINIMAL
+// Release profiles start the V25 immediately. The full-image readback/hash is
+// bring-up telemetry only; eliminating it removes the p5 requester mux/state
+// and shortens core loading by roughly 4 ms without changing game-visible RAM.
+wire        sweep_active = 1'b0;
+wire        sweep_done   = 1'b1;
+wire [12:0] sweep_line   = 13'd0;
+wire        sweep_req_r  = 1'b0;
+wire [23:0] sweep_hash   = 24'd0;
+`else
+// ---- MCU image checksum sweep (bring-up diagnostic) ------------------------
 // After every reset release on a V25 board, read the whole 64 KiB program
 // image back through the SAME SDRAM port 5 the V25 fetches from, folding it
 // into a position-dependent 24-bit hash (rotate-left-1 then XOR of the three
@@ -1037,7 +1118,7 @@ always @(posedge clk_sys) begin
         sweep_hash <= 24'd0;
     end
     else if (!sweep_done && !sweep_active) begin
-        if (board.has_v25) begin
+        if (cfg_has_v25) begin
             sweep_active <= 1'b1;
             sweep_line   <= 13'd0;
             sweep_hash   <= 24'd0;
@@ -1067,6 +1148,7 @@ always @(posedge clk_sys) begin
         end
     end
 end
+`endif
 
 s32_v25_cpu v25 (
     .clk_v25(clk_v25),
@@ -1075,11 +1157,11 @@ s32_v25_cpu v25 (
 s32_v25 v25 (
 `endif
 `ifdef S32_REAL_V25
-    .clk(clk_sys), .rst(rst), .enable(board.has_v25 && sweep_done),
+    .clk(clk_sys), .rst(rst), .enable(cfg_has_v25 && sweep_done),
 `else
-    .clk(clk_sys), .rst(rst), .enable(board.has_v25),
+    .clk(clk_sys), .rst(rst), .enable(cfg_has_v25),
 `endif
-    .table_sel(board.v25_table),
+    .table_sel(cfg_v25_table),
     .prg_wr(v25_prg_wr), .prg_waddr(v25_prg_waddr), .prg_wdata(v25_prg_wdata),
 `ifdef S32_REAL_V25
     .rom_req(v25_p5_req), .rom_addr(v25_rom_addr),
@@ -1091,7 +1173,7 @@ s32_v25 v25 (
     .debug_first_fetch_data(v25_first_data),
     .debug_first_fetch_addr(v25_first_addr),
 `endif
-    .cs(m_req && sel_v25 && board.has_v25 && m_be[0]), .we(m_we),
+    .cs(m_req && sel_v25 && cfg_has_v25 && m_be[0]), .we(m_we),
     .addr(A[11:1]), .wdata(m_wdata[7:0]), .rdata(v25_q)
 );
 
@@ -1120,19 +1202,57 @@ assign sdr_p5_addr = '0;
 //   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
 //   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.
 // ---------------------------------------------------------------------------
+`ifdef S32_GOLDENAXE_ONLY
+wire        rom_req_r;
+wire [23:1] rom_addr_r;
+`else
 reg        rom_req_r;
 reg [23:1] rom_addr_r;
+`endif
 // Transaction-acked flag (the read-mux ack register below).  Forward-declared
 // here so the icache lookup can suppress re-arming a completed ROM read while
 // the V60 bus still holds m_req; the driving logic lives in the read-mux block.
 reg        ack_r;
+`ifdef S32_GOLDENAXE_ONLY
+wire       prot_rom_grant = 1'b0;
+`else
 reg        prot_rom_grant;
+`endif
 wire [23:1] prot_p0_addr = {3'b000, prot_rom_addr[20:3], 2'b00};
 assign prot_rom_ack = prot_rom_grant && sdr_p0_ack;
 assign sdr_p0_req  = prot_rom_grant ? prot_rom_req : rom_req_r;
 assign sdr_p0_addr = prot_rom_grant ? {2'b00, prot_p0_addr[21:1]} :
                                        {2'b00, rom_addr_r[21:1]};
 
+`ifdef S32_GOLDENAXE_ONLY
+// Golden Axe-only area cache. The generic asynchronous cache below provides a
+// one-clk_sys hit, but its two variable-index read paths flatten 2,464 cache
+// bits into registers and very wide muxes in Quartus 17. This implementation
+// gives the dedicated profile one arbitrated synchronous lookup port. Because
+// the V60 advances only on ce_cpu (one clk_sys in three), the extra raw clock
+// of lookup latency remains inside one architectural CPU interval.
+wire        rom_ready;
+wire [15:0] rom_word_r;
+s32_ga_rom_cache ga_rom_cache (
+    .clk(clk_sys),
+    .rst(rst),
+    .invalidate(1'b0),
+    .if_req(if_req),
+    .if_line_addr((if_addr[23:20] == 4'hf)
+                  ? {1'b0, if_addr[19:3]} : if_addr[20:3]),
+    .if_offset(if_addr[2:0]),
+    .if_data(if_data),
+    .if_ack(if_served),
+    .data_req(m_req && !m_we && (sel_rom || sel_romhi) && !ack_r),
+    .data_addr(sel_romhi ? {1'b0, A[19:0]} : A[20:0]),
+    .data_data(rom_word_r),
+    .data_ack(rom_ready),
+    .rom_req(rom_req_r),
+    .rom_addr(rom_addr_r),
+    .rom_data(sdr_p0_dout),
+    .rom_ack(sdr_p0_ack)
+);
+`else
 reg  [63:0] icache_data [0:31];
 reg  [12:0] icache_tag  [0:31];      // addr[20:8]
 reg  [31:0] icache_valid;
@@ -1266,6 +1386,7 @@ always @(posedge clk_sys) begin
         end
     end
 end
+`endif
 
 // ---------------------------------------------------------------------------
 // CPU read mux + ack
@@ -1322,18 +1443,18 @@ always @(posedge clk_sys) begin
                 // Open-bus outside the comm RAM (A[15]=0) and the 4-byte id
                 // window (A[15] && A[14:2]==0); the module holds stale rdata
                 // when neither chip-select fires (audit R20 IO-10a).
-                sel_dual:    rmux <= (board.dual_pcb &&
+                sel_dual:    rmux <= (cfg_dual_pcb &&
                                       (!A[15] || A[14:2] == 13'd0)) ? dual_q
                                                                     : 16'hffff;
                 sel_v25:     if (GAME_ONLY)
                                  // Open-bus when this board has no V25 (holo,
                                  // spidman): MAME leaves 0xA00000 unmapped
                                  // (audit R20 PF-7).
-                                 rmux <= board.has_v25 ? {8'hff, v25_q} : 16'hffff;
+                                 rmux <= cfg_has_v25 ? {8'hff, v25_q} : 16'hffff;
                              else
-                                 rmux <= board.has_v25 ? {8'hff, v25_q} :
-                                         board.has_dsp_hle ? dsp_q : 16'hffff;
-                sel_prot_a:  rmux <= board.has_dsp_hle ? dsp_q : 16'hffff;
+                                 rmux <= cfg_has_v25 ? {8'hff, v25_q} :
+                                         cfg_has_dsp_hle ? dsp_q : 16'hffff;
+                sel_prot_a:  rmux <= cfg_has_dsp_hle ? dsp_q : 16'hffff;
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
                 sel_ioex:    if (GAME_ONLY)
@@ -1370,7 +1491,7 @@ reg         dbg_v25_mb_nonzero, dbg_v25_wake;
 reg         v25_dbg_ce_s1, v25_dbg_ce_s2, v25_dbg_ce_s3;
 reg         v25_dbg_io_s1, v25_dbg_io_s2;
 reg         v25_dbg_unm_s1, v25_dbg_unm_s2;
-wire        v25_dbg_rd_sample = m_req && !m_we && sel_v25 && board.has_v25 &&
+wire        v25_dbg_rd_sample = m_req && !m_we && sel_v25 && cfg_has_v25 &&
                                 m_be[0] && !ack_r && rd_wait;
 always @(posedge clk_sys) begin
     if (rst) begin
@@ -1521,6 +1642,228 @@ always @(posedge clk_sys) begin
         if (sdr_p0_ack && !debug_first_rom_seen) begin
             debug_first_rom_seen <= 1'b1;
             debug_first_rom_r    <= sdr_p0_dout;
+        end
+    end
+end
+
+endmodule
+//============================================================================
+// Golden Axe main-ROM cache: 32 direct-mapped 8-byte lines.
+//
+// A single synchronous lookup port is sufficient because instruction fetches
+// have priority and the V60 data bus holds a request until acknowledge. The
+// whole line is committed after the fourth SDRAM beat, avoiding partial writes
+// so Quartus can implement {tag,data} as four 32x20 MLAB lanes. Valid bits stay
+// outside the memory so reset/invalidation remains a one-cycle operation.
+//============================================================================
+module s32_ga_rom_cache (
+    input              clk,
+    input              rst,
+    input              invalidate,
+
+    input              if_req,
+    input       [20:3] if_line_addr,
+    input        [2:0] if_offset,
+    output reg  [63:0] if_data,
+    output reg         if_ack,
+
+    input              data_req,
+    input       [20:0] data_addr,
+    output reg  [15:0] data_data,
+    output reg         data_ack,
+
+    output reg         rom_req,
+    output reg  [23:1] rom_addr,
+    input       [15:0] rom_data,
+    input              rom_ack
+);
+
+// 32 x 77 = 2,464 bits. Cyclone V MLABs support a synchronous 32-word read;
+// keeping the validity vector separate avoids a reset loop on the RAM itself.
+(* ramstyle = "MLAB" *) reg [76:0] cache_mem [0:31]; // {tag[12:0], data[63:0]}
+reg [76:0] cache_q;
+reg [31:0] cache_valid;
+
+reg        lookup_pending;
+reg        lookup_fetch;
+reg  [4:0] lookup_index;
+reg [12:0] lookup_tag;
+reg [17:0] lookup_line_addr;
+reg  [2:0] lookup_if_offset;
+reg  [1:0] lookup_data_word;
+
+reg        filling;
+reg        fill_discard;
+reg        fill_fetch;
+reg  [4:0] fill_index;
+reg [12:0] fill_tag;
+reg [17:0] fill_line_addr;
+reg  [2:0] fill_if_offset;
+reg  [1:0] fill_data_word;
+reg  [1:0] fill_word;
+reg [63:0] fill_data;
+
+wire choose_fetch = if_req && !if_ack;
+wire choose_data  = !choose_fetch && data_req && !data_ack;
+wire launch_lookup = !lookup_pending && !filling && (choose_fetch || choose_data);
+wire [4:0] lookup_mem_addr = lookup_pending ? lookup_index :
+                              choose_fetch ? if_line_addr[7:3] : data_addr[7:3];
+wire [63:0] completed_line = {rom_data, fill_data[47:0]};
+wire cache_commit = filling && rom_ack && (fill_word == 2'd3) &&
+                    !fill_discard && !invalidate && !rst;
+
+function automatic [15:0] select_word(
+    input [63:0] line,
+    input  [1:0] word_sel
+);
+begin
+    case (word_sel)
+        2'd0: select_word = line[15:0];
+        2'd1: select_word = line[31:16];
+        2'd2: select_word = line[47:32];
+        default: select_word = line[63:48];
+    endcase
+end
+endfunction
+
+// Synchronous read plus one full-line write port. There is no asynchronous
+// array read and no partial array write, the two shapes that flattened the old
+// cache into ALMs in Quartus 17.
+always @(posedge clk) begin
+    cache_q <= cache_mem[lookup_mem_addr];
+    if (cache_commit)
+        cache_mem[fill_index] <= {fill_tag, completed_line};
+end
+
+always @(posedge clk) begin
+    if (rst) begin
+        cache_valid      <= 32'd0;
+        lookup_pending   <= 1'b0;
+        lookup_fetch     <= 1'b0;
+        lookup_index     <= 5'd0;
+        lookup_tag       <= 13'd0;
+        lookup_line_addr <= 18'd0;
+        lookup_if_offset <= 3'd0;
+        lookup_data_word <= 2'd0;
+        filling          <= 1'b0;
+        fill_discard     <= 1'b0;
+        fill_fetch       <= 1'b0;
+        fill_index       <= 5'd0;
+        fill_tag         <= 13'd0;
+        fill_line_addr   <= 18'd0;
+        fill_if_offset   <= 3'd0;
+        fill_data_word   <= 2'd0;
+        fill_word        <= 2'd0;
+        fill_data        <= 64'd0;
+        if_data          <= 64'd0;
+        if_ack           <= 1'b0;
+        data_data        <= 16'hffff;
+        data_ack         <= 1'b0;
+        rom_req          <= 1'b0;
+        rom_addr         <= 23'd0;
+    end
+    else begin
+        rom_req <= 1'b0;
+        if (!if_req)   if_ack   <= 1'b0;
+        if (!data_req) data_ack <= 1'b0;
+
+        if (invalidate) begin
+            cache_valid    <= 32'd0;
+            lookup_pending <= 1'b0;
+            if_ack          <= 1'b0;
+            data_ack        <= 1'b0;
+            if (filling) begin
+                if (rom_ack) begin
+                    filling      <= 1'b0;
+                    fill_discard <= 1'b0;
+                end
+                else begin
+                    fill_discard <= 1'b1;
+                end
+            end
+            else begin
+                fill_discard <= 1'b0;
+            end
+        end
+        else if (filling) begin
+            if (rom_ack) begin
+                if (fill_discard) begin
+                    // Drain one response from an invalidated transaction and
+                    // abandon the rest of that line. A held requester retries.
+                    filling      <= 1'b0;
+                    fill_discard <= 1'b0;
+                end
+                else begin
+                    case (fill_word)
+                        2'd0: fill_data[15:0]  <= rom_data;
+                        2'd1: fill_data[31:16] <= rom_data;
+                        2'd2: fill_data[47:32] <= rom_data;
+                        default: fill_data[63:48] <= rom_data;
+                    endcase
+                    if (fill_word == 2'd3) begin
+                        cache_valid[fill_index] <= 1'b1;
+                        filling <= 1'b0;
+                        if (fill_fetch) begin
+                            if_data <= completed_line >> {fill_if_offset, 3'b000};
+                            if_ack  <= 1'b1;
+                        end
+                        else begin
+                            data_data <= select_word(completed_line, fill_data_word);
+                            data_ack  <= 1'b1;
+                        end
+                    end
+                    else begin
+                        fill_word <= fill_word + 1'd1;
+                        rom_addr  <= {3'b000, fill_line_addr, fill_word + 2'd1};
+                        rom_req   <= 1'b1;
+                    end
+                end
+            end
+        end
+        else if (lookup_pending) begin
+            lookup_pending <= 1'b0;
+            if (cache_valid[lookup_index] && cache_q[76:64] == lookup_tag) begin
+                if (lookup_fetch) begin
+                    if_data <= cache_q[63:0] >> {lookup_if_offset, 3'b000};
+                    if_ack  <= 1'b1;
+                end
+                else begin
+                    data_data <= select_word(cache_q[63:0], lookup_data_word);
+                    data_ack  <= 1'b1;
+                end
+            end
+            else begin
+                filling        <= 1'b1;
+                fill_discard   <= 1'b0;
+                fill_fetch     <= lookup_fetch;
+                fill_index     <= lookup_index;
+                fill_tag       <= lookup_tag;
+                fill_line_addr <= lookup_line_addr;
+                fill_if_offset <= lookup_if_offset;
+                fill_data_word <= lookup_data_word;
+                fill_word      <= 2'd0;
+                fill_data      <= 64'd0;
+                rom_addr       <= {3'b000, lookup_line_addr, 2'b00};
+                rom_req        <= 1'b1;
+            end
+        end
+        else if (launch_lookup) begin
+            lookup_pending <= 1'b1;
+            lookup_fetch   <= choose_fetch;
+            if (choose_fetch) begin
+                lookup_index     <= if_line_addr[7:3];
+                lookup_tag       <= if_line_addr[20:8];
+                lookup_line_addr <= if_line_addr;
+                lookup_if_offset <= if_offset;
+                lookup_data_word <= 2'd0;
+            end
+            else begin
+                lookup_index     <= data_addr[7:3];
+                lookup_tag       <= data_addr[20:8];
+                lookup_line_addr <= data_addr[20:3];
+                lookup_if_offset <= 3'd0;
+                lookup_data_word <= data_addr[2:1];
+            end
         end
     end
 end

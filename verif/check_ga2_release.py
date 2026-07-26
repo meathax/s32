@@ -6,6 +6,23 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
+common_qsf = (ROOT / "Arcade-SegaSystem32.qsf").read_text(encoding="utf-8")
+goldenaxe_qsf = (ROOT / "s32GoldenAxe.qsf").read_text(encoding="utf-8")
+assert goldenaxe_qsf.startswith(common_qsf.rstrip() + "\n")
+for macro in (
+    "S32_GA2_ONLY=1",
+    "S32_GOLDENAXE_ONLY=1",
+    "S32_REAL_V25=1",
+    "S32_V60_NO_FP=1",
+    "S32_RELEASE_MINIMAL=1",
+    "S32_JT12_MLAB_SHIFTS=1",
+    "S32_V25_MLAB_FIFO=1",
+):
+    assert f'VERILOG_MACRO "{macro}"' in goldenaxe_qsf, \
+        f"Golden Axe revision is missing {macro}"
+    assert f'VERILOG_MACRO "{macro}"' not in common_qsf, \
+        f"shared QSF unexpectedly forces {macro}"
+
 matches = []
 for path in (ROOT / "mra").glob("*.mra"):
     tree = ET.parse(path)
@@ -15,6 +32,17 @@ for path in (ROOT / "mra").glob("*.mra"):
 assert len(matches) == 1, f"expected exactly one GA2 MRA, found {len(matches)}"
 path, tree = matches[0]
 root = tree.getroot()
+
+assert root.findtext("rbf") == "s32GoldenAxe", "GA2 MRA must load s32GoldenAxe.rbf"
+for regional_path in (ROOT / "mra").glob("Golden Axe The Revenge of Death Adder (*.mra"):
+    regional_tree = ET.parse(regional_path)
+    assert regional_tree.findtext("rbf") == "s32GoldenAxe", \
+        f"{regional_path.name} must load s32GoldenAxe.rbf"
+    buttons = regional_tree.getroot().find("buttons")
+    assert buttons is not None, f"{regional_path.name} is missing button metadata"
+    assert buttons.get("names") == "Attack,Jump,Magic,-,-,-,Start,Coin,Test,Service"
+    assert buttons.get("default") == "A,B,X,Start,Select,R,L"
+    assert buttons.get("count") == "3"
 
 assert root.findtext("name") == "Golden Axe: The Revenge of Death Adder (World, Rev B)"
 rom = root.find("rom[@index='0']")

@@ -1,9 +1,9 @@
 //============================================================================
 // Sprite vblank edge-detect regression (audit R24 SP-8).
 //
-// On hardware the sprite engine runs on clk_ram (96.648 MHz) while its vblank
+// On hardware the sprite engine runs on clk_ram (96.634615 MHz) while its vblank
 // input is the end-of-vblank pulse from s32_video, which is one clk_sys
-// (48.324 MHz) wide — i.e. TWO consecutive clk_ram samples.  The R20 SP-3
+// (48.317307 MHz) wide — i.e. TWO consecutive clk_ram samples.  The R20 SP-3
 // "vblank seen mid-render" latch must treat that 2-cycle pulse as a SINGLE
 // frame event.  Before the edge-detect fix it re-latched the same pulse on its
 // second sample (the FSM had already left R_IDLE), producing a spurious second

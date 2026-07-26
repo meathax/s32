@@ -9,17 +9,17 @@
 // decoder is consuming an opcode/prefix byte.
 //
 // Core remains in the clk_sys domain and advances only on a synchronous
-// fractional clock enable.  The reduced ratio 2500/12081 converts the nominal
-// 48.324 MHz clk_sys to exactly 10.000 MHz average V25 cadence.  Pulses are one
-// clk_sys period wide and separated by four or five periods; no fabric clock
-// is generated.  The as-built PLL frequency (48.317307 MHz) gives 9.998615 MHz,
-// a -0.01385% error from the original 10 MHz V25.
+// fractional clock enable.  The ratio 5001/12081 on clk_v25 converts the actual
+// 24.158653 MHz PLL output to 10.000614 MHz average V25 cadence. Pulses are one
+// clk_v25 period wide and separated by two or three periods; no fabric clock
+// is generated. This is +0.00615% from the original 10 MHz clock and is closer
+// than the previous 5000/12081 increment (-0.01385%).
 
 `default_nettype none
 
 module s32_v25_cpu (
-    input  wire        clk,          // clk_sys (48.324 MHz): V60-side mailbox + p5 bridge
-    input  wire        clk_v25,      // ~24.162 MHz (clk_sys/2): the s80x86 compute domain
+    input  wire        clk,          // clk_sys (48.317307 MHz): V60-side mailbox + p5 bridge
+    input  wire        clk_v25,      // ~24.158653 MHz (clk_sys/2): the s80x86 compute domain
     input  wire        rst,
     input  wire        enable,
     input  wire        pause,        // OSD pause (clk_sys-domain level)
@@ -59,14 +59,14 @@ module s32_v25_cpu (
     output reg  [15:3] debug_first_fetch_addr
 );
 
-// The s80x86 now runs on clk_v25 = clk_sys/2 (~24.162 MHz), which halves its
+// The s80x86 now runs on clk_v25 = clk_sys/2 (~24.158653 MHz), which halves its
 // fabric timing requirement so the large core meets timing with real margin.
 // The fractional enable keeps the EXACT same 10 MHz average V25 cadence: on the
-// half-rate clock the increment is doubled (5000/12081 * 24.162 = 9.9986 MHz),
-// identical to the original 2500/12081 * 48.324.  Enable pulses are one clk_v25
+// half-rate clock uses 5001/12081 * 24.158653 = 10.000614 MHz,
+// within +0.00615% of the original clock. Enable pulses are one clk_v25
 // period wide, separated by two or three periods -- cycle-accuracy is unchanged.
 localparam [13:0] V25_CE_MODULUS = 14'd12081;
-localparam [13:0] V25_CE_INCREMENT = 14'd5000;
+localparam [13:0] V25_CE_INCREMENT = 14'd5001;
 
 // clk_v25-domain reset: asserts asynchronously with rst, deasserts only on a
 // clk_v25 edge.  rst is a clk_sys-domain level and clk_v25 is a phase-locked
@@ -266,7 +266,11 @@ wire [15:3] cache_rom_addr;
 wire [63:0] cache_rom_data;
 wire        cache_rom_ack;
 
+`ifdef S32_GOLDENAXE_ONLY
+s32_v25_rom_line_buffer program_cache (
+`else
 s32_v25_rom_cache program_cache (
+`endif
     .clk(clk_v25), .rst(rst_v25), .invalidate(prg_wr_v25),
     .cpu_req(cache_req), .cpu_addr(cache_addr),
     .cpu_data(cache_data), .cpu_ack(cache_ack),
@@ -387,16 +391,19 @@ assign rdata = dpram_v60_q;
 //
 // Byte lanes: even offsets ride data_wdata[7:0] (bytesel[0]); odd offsets ride
 // data_wdata[15:8] (bytesel[1]).  PRC (0xEB) and IDB (0xFF) are odd offsets, so
-// they are always reached through the high lane.  RAM/SFR stores are split into
-// even/odd byte-lane arrays so each is a single-read-port inference.
+// they are always reached through the high lane. RAM and ordinary SFR bytes use
+// the byte-enabled synchronous internal-data memory below.
 reg  [7:0] v25_idb;                  // Internal Data Base (reset 0xFF)
 reg  [7:0] v25_prc;                  // Processor Control  (reset 0x4E, RAMEN=1)
 wire       v25_ramen  = v25_prc[6];
-reg  [7:0] v25_iram_lo [0:127];      // internal RAM, even bytes
-reg  [7:0] v25_iram_hi [0:127];      // internal RAM, odd bytes
-reg  [7:0] v25_sfr_lo  [0:127];      // SFR read-back store, even offsets
-reg  [7:0] v25_sfr_hi  [0:127];      // SFR read-back store, odd offsets (ex PRC/IDB)
-reg [15:0] v25_int_q;                // registered internal read data
+// Store the RAM and SFR pages in one 256x16 byte-enabled synchronous memory.
+// The previous four 128x8 arrays lived in this large CPU process; Quartus 17
+// could not recognize their synchronous-read shape and implemented all 4096
+// bits as 4355 logic registers plus the variable-index read muxes (~2214 ALMs).
+// The dedicated wrapper below presents the same one-cycle read contract while
+// forcing its two byte lanes into MLABs rather than consuming scarce M10Ks.
+wire [15:0] v25_int_mem_q;
+reg   [1:0] v25_int_special_q;       // 1=PRC high byte, 2=IDB high byte
 
 wire        data_int_area = (data_addr[19:9] == {v25_idb, 3'b111});
 wire        data_int_ram  = data_int_area & ~data_addr[8] & v25_ramen;
@@ -404,13 +411,6 @@ wire        data_int_sfr  = data_int_area &  data_addr[8];
 wire  [6:0] int_word      = data_addr[7:1];      // word index within the area
 wire  [7:0] int_off_hi    = {int_word, 1'b1};    // odd byte offset
 
-`ifdef SIMULATION
-integer v25_ii;
-initial for (v25_ii = 0; v25_ii < 128; v25_ii = v25_ii + 1) begin
-    v25_iram_lo[v25_ii] = 8'h00; v25_iram_hi[v25_ii] = 8'h00;
-    v25_sfr_lo[v25_ii]  = 8'h00; v25_sfr_hi[v25_ii]  = 8'h00;
-end
-`endif
 
 // -------------------------------------------------------------------------
 // Single-target CPU bus arbiter. External ROM responses are retained across
@@ -428,6 +428,26 @@ localparam [3:0]
 reg [3:0] bus_state;
 reg [15:0] instr_rdata_r;
 reg [15:0] data_rdata_r;
+
+wire       v25_int_selected = data_int_ram || data_int_sfr;
+wire       v25_int_cycle = v25_ce && (bus_state == BUS_IDLE) && data_access &&
+                           !data_io && v25_int_selected;
+wire       v25_int_prc_access = data_int_sfr && (int_off_hi == 8'heb);
+wire       v25_int_idb_access = data_int_sfr && (int_off_hi == 8'hff);
+wire [1:0] v25_int_mem_be = {
+    data_bytesel[1] && !(v25_int_prc_access || v25_int_idb_access),
+    data_bytesel[0]
+};
+
+s32_v25_internal_dmem int_dmem (
+    .clock   (clk_v25),
+    .address ({data_int_sfr, int_word}),
+    .data    (data_wdata),
+    .byteena (v25_int_mem_be),
+    .rden    (v25_int_cycle && !data_we),
+    .wren    (v25_int_cycle &&  data_we),
+    .q       (v25_int_mem_q)
+);
 
 assign instr_rdata = instr_rdata_r;
 assign data_rdata  = data_rdata_r;
@@ -460,7 +480,7 @@ always @(posedge clk_v25 or posedge rst_v25) begin
         debug_last_unmapped_addr <= 20'd0;
         v25_prc                 <= 8'h4e;   // RAMEN=1 from reset
         v25_idb                 <= 8'hff;   // internal area at 0xFFE00-0xFFFFF
-        v25_int_q               <= 16'h0000;
+        v25_int_special_q       <= 2'd0;
     end else begin
         // Requests and BRAM enables are one clk_v25 pulse. CPU acknowledgements
         // change only on V25 CE edges and remain visible throughout CE gaps.
@@ -505,34 +525,16 @@ always @(posedge clk_v25 or posedge rst_v25) begin
                             // V25 on-chip internal RAM / SFRs — the real fix for
                             // the ga2/arabfgt runtime-protection corruption.
                             if (data_we) begin
-                                if (data_int_ram) begin
-                                    if (data_bytesel[0])
-                                        v25_iram_lo[int_word] <= data_wdata[7:0];
-                                    if (data_bytesel[1])
-                                        v25_iram_hi[int_word] <= data_wdata[15:8];
-                                end else begin
-                                    // SFR store; PRC (0xEB) / IDB (0xFF) are odd
-                                    // offsets, captured on the high lane.
-                                    if (data_bytesel[0])
-                                        v25_sfr_lo[int_word] <= data_wdata[7:0];
-                                    if (data_bytesel[1]) begin
-                                        if      (int_off_hi == 8'heb) v25_prc <= data_wdata[15:8];
-                                        else if (int_off_hi == 8'hff) v25_idb <= data_wdata[15:8];
-                                        else v25_sfr_hi[int_word] <= data_wdata[15:8];
-                                    end
+                                if (data_int_sfr && data_bytesel[1]) begin
+                                    // PRC and IDB are architectural registers,
+                                    // not bytes in the SFR read-back memory.
+                                    if      (v25_int_prc_access) v25_prc <= data_wdata[15:8];
+                                    else if (v25_int_idb_access) v25_idb <= data_wdata[15:8];
                                 end
                                 data_ack <= 1'b1;          // writes complete now
                             end else begin
-                                if (data_int_ram)
-                                    v25_int_q <= {v25_iram_hi[int_word],
-                                                  v25_iram_lo[int_word]};
-                                else
-                                    v25_int_q <= {
-                                        (int_off_hi == 8'heb) ? v25_prc :
-                                        (int_off_hi == 8'hff) ? v25_idb :
-                                                                v25_sfr_hi[int_word],
-                                        v25_sfr_lo[int_word]
-                                    };
+                                v25_int_special_q <= v25_int_prc_access ? 2'd1 :
+                                                     v25_int_idb_access ? 2'd2 : 2'd0;
                                 bus_state <= BUS_D_INT_WAIT;
                             end
                         end else if (data_is_rom) begin
@@ -610,7 +612,12 @@ always @(posedge clk_v25 or posedge rst_v25) begin
                 end
 
                 BUS_D_INT_WAIT: begin
-                    data_rdata_r <= v25_int_q;   // internal RAM / SFR read data
+                    data_rdata_r <= {
+                        (v25_int_special_q == 2'd1) ? v25_prc :
+                        (v25_int_special_q == 2'd2) ? v25_idb :
+                                                     v25_int_mem_q[15:8],
+                        v25_int_mem_q[7:0]
+                    };
                     data_ack     <= 1'b1;
                     bus_state    <= BUS_IDLE;
                 end
@@ -620,6 +627,94 @@ always @(posedge clk_v25 or posedge rst_v25) begin
         end
     end
 end
+
+endmodule
+
+// V25 internal data memory: 128 RAM words followed by 128 SFR read-back words.
+// It is logically one 256x16 byte-enabled synchronous memory. Two physical
+// 256x8 lanes are used so Quartus 17 can map partial writes into Cyclone V MLABs
+// without read/modify/write logic or M10K consumption.
+module s32_v25_internal_dmem (
+    input  wire        clock,
+    input  wire  [7:0] address,
+    input  wire [15:0] data,
+    input  wire  [1:0] byteena,
+    input  wire        rden,
+    input  wire        wren,
+    output wire [15:0] q
+);
+
+`ifdef ALTERA_RESERVED_QIS
+wire [7:0] q_lo;
+wire [7:0] q_hi;
+
+altsyncram lo_ram (
+    .clock0(clock), .address_a(address), .data_a(data[7:0]),
+    .wren_a(wren && byteena[0]), .rden_a(rden), .q_a(q_lo),
+    .aclr0(1'b0), .addressstall_a(1'b0), .byteena_a(1'b1),
+    .clocken0(1'b1), .clocken1(1'b1), .clocken2(1'b1), .clocken3(1'b1),
+    .eccstatus()
+);
+defparam
+    lo_ram.operation_mode = "SINGLE_PORT",
+    lo_ram.intended_device_family = "Cyclone V",
+    lo_ram.lpm_type = "altsyncram",
+    lo_ram.numwords_a = 256,
+    lo_ram.widthad_a = 8,
+    lo_ram.width_a = 8,
+    lo_ram.width_byteena_a = 1,
+    lo_ram.outdata_reg_a = "UNREGISTERED",
+    lo_ram.power_up_uninitialized = "FALSE",
+    lo_ram.ram_block_type = "MLAB",
+    lo_ram.read_during_write_mode_port_a = "NEW_DATA_NO_NBE_READ";
+
+altsyncram hi_ram (
+    .clock0(clock), .address_a(address), .data_a(data[15:8]),
+    .wren_a(wren && byteena[1]), .rden_a(rden), .q_a(q_hi),
+    .aclr0(1'b0), .addressstall_a(1'b0), .byteena_a(1'b1),
+    .clocken0(1'b1), .clocken1(1'b1), .clocken2(1'b1), .clocken3(1'b1),
+    .eccstatus()
+);
+defparam
+    hi_ram.operation_mode = "SINGLE_PORT",
+    hi_ram.intended_device_family = "Cyclone V",
+    hi_ram.lpm_type = "altsyncram",
+    hi_ram.numwords_a = 256,
+    hi_ram.widthad_a = 8,
+    hi_ram.width_a = 8,
+    hi_ram.width_byteena_a = 1,
+    hi_ram.outdata_reg_a = "UNREGISTERED",
+    hi_ram.power_up_uninitialized = "FALSE",
+    hi_ram.ram_block_type = "MLAB",
+    hi_ram.read_during_write_mode_port_a = "NEW_DATA_NO_NBE_READ";
+
+assign q = {q_hi, q_lo};
+`else
+reg [7:0] mem_lo [0:255];
+reg [7:0] mem_hi [0:255];
+reg [7:0] q_lo_r;
+reg [7:0] q_hi_r;
+assign q = {q_hi_r, q_lo_r};
+
+integer int_mem_i;
+initial begin
+    q_lo_r = 8'h00;
+    q_hi_r = 8'h00;
+    for (int_mem_i = 0; int_mem_i < 256; int_mem_i = int_mem_i + 1) begin
+        mem_lo[int_mem_i] = 8'h00;
+        mem_hi[int_mem_i] = 8'h00;
+    end
+end
+
+always @(posedge clock) begin
+    if (rden) begin
+        q_lo_r <= mem_lo[address];
+        q_hi_r <= mem_hi[address];
+    end
+    if (wren && byteena[0]) mem_lo[address] <= data[7:0];
+    if (wren && byteena[1]) mem_hi[address] <= data[15:8];
+end
+`endif
 
 endmodule
 

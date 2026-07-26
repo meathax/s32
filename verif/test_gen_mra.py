@@ -33,7 +33,7 @@ class ButtonMetadataTests(unittest.TestCase):
         self.assertEqual(names.split(","),
                          ["Attack", "Jump", "-", "-", "-", "-", "Start", "Coin", "Test", "Service"])
         self.assertEqual(defaults.split(","),
-                         ["A", "B", "-", "-", "-", "-", "Start", "Select", "R", "L"])
+                         ["A", "B", "Start", "Select", "R", "L"])
 
     def test_all_spiderman_mras_expose_button_metadata(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
@@ -43,7 +43,7 @@ class ButtonMetadataTests(unittest.TestCase):
             self.assertIsNotNone(buttons, path.name)
             self.assertEqual(buttons.attrib["names"], BUTTONS["spidman"][0])
             self.assertEqual(buttons.attrib["default"], BUTTONS["spidman"][1])
-            self.assertEqual(buttons.attrib["count"], "10")
+            self.assertEqual(buttons.attrib["count"], "2")
 
 
 class OptimizedLayoutTests(unittest.TestCase):

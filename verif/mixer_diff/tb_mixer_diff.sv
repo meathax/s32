@@ -16,13 +16,17 @@ reg [5:0] layer_off = 0;
 reg [15:0] bg_ctrl = 0;
 reg [13:0] px [0:5];
 reg [15:0] spr_pix = 16'hffff;
+reg reg_we = 0;
+reg [5:0] reg_addr = 0;
+reg [15:0] reg_wdata = 0;
+reg [1:0] reg_be = 0;
 wire [13:0] pal_addr;
 reg [15:0] pal_data = 0;
 wire [23:0] rgb;
 
 s32_mixer dut (
     .clk(clk), .rst(rst),
-    .reg_we(1'b0), .reg_addr(6'd0), .reg_wdata(16'd0), .reg_be(2'b00),
+    .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_be(reg_be),
     .reg_rdata(), .reg_raddr(6'd0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1),
     .display_en(1'b1), .flip_y(1'b0), .layer_off(layer_off), .bg_ctrl(bg_ctrl),
@@ -51,9 +55,56 @@ integer fd;
 integer scan_result;
 integer count = 0;
 integer errors = 0;
+integer top2_checks = 0;
 integer pos;
 integer i;
 string vector_path;
+
+reg [10:0] ref_first;
+reg [10:0] ref_second;
+
+task automatic consider_candidate(input [6:0] key, input [3:0] selector);
+    reg [10:0] candidate;
+begin
+    candidate = {key, selector};
+    if (key > ref_first[10:4]) begin
+        ref_second = ref_first;
+        ref_first = candidate;
+    end
+    else if (key > ref_second[10:4]) begin
+        ref_second = candidate;
+    end
+end
+endtask
+
+// Check the priority pipeline independently of the final RGB oracle. This
+// catches runner-up selection errors even when the winning layer does not
+// enable blending and the second palette lookup cannot affect the pixel.
+always @(negedge clk) if (dut.second_pending) begin
+    // Background is the legacy no-partner sentinel when every opponent key is
+    // zero. All non-zero keys include the unique layer rank.
+    ref_first = {7'd0, 4'd7};
+    ref_second = {7'd0, 4'd7};
+    consider_candidate(dut.ep_spr_s,  4'd6);
+    consider_candidate(dut.ep_text_s, 4'd0);
+    consider_candidate(dut.ep_nbg0_s, 4'd1);
+    consider_candidate(dut.ep_nbg1_s, 4'd2);
+    consider_candidate(dut.ep_nbg2_s, 4'd3);
+    consider_candidate(dut.ep_nbg3_s, 4'd4);
+    consider_candidate(dut.ep_bmp_s,  4'd5);
+    consider_candidate(dut.ep_bg,     4'd7);
+    top2_checks = top2_checks + 1;
+    if ({dut.best_hold, dut.bestsel_hold} !== ref_first ||
+        {dut.best2, dut.best2sel} !== ref_second) begin
+        errors = errors + 1;
+        if (errors <= 20)
+            $display("MIXER TOP2 mismatch check=%0d first=%02x/%0d want=%02x/%0d second=%02x/%0d want=%02x/%0d",
+                     top2_checks, dut.best_hold, dut.bestsel_hold,
+                     ref_first[10:4], ref_first[3:0],
+                     dut.best2, dut.best2sel,
+                     ref_second[10:4], ref_second[3:0]);
+    end
+end
 
 task automatic unpack_vector;
 begin
@@ -99,6 +150,16 @@ initial begin
         if (scan_result == 1) begin
             @(negedge clk);
             unpack_vector();
+            // The vector loader sets the RAM directly for speed. Replay 0x4C
+            // through the real write port so its registered decode mirrors
+            // hardware, where software can only update it via reg_we.
+            reg_we = 1'b1;
+            reg_addr = 6'h26;
+            reg_wdata = dut.mreg[6'h26];
+            reg_be = 2'b01;
+            @(negedge clk);
+            reg_we = 1'b0;
+            reg_be = 2'b00;
             toggle_x = ~toggle_x;
             disp_x = toggle_x ? 9'd510 : 9'd511;
             repeat (16) @(posedge clk);
@@ -120,10 +181,14 @@ initial begin
         end
     end
     $fclose(fd);
+    if (top2_checks != count) begin
+        errors = errors + 1;
+        $display("MIXER TOP2 FAIL checks=%0d vectors=%0d", top2_checks, count);
+    end
     if (count == 0)
         $display("MIXER DIFF FAIL no vectors");
     else if (errors == 0)
-        $display("MIXER DIFF PASS cases=%0d", count);
+        $display("MIXER DIFF PASS cases=%0d top2=%0d", count, top2_checks);
     else
         $display("MIXER DIFF FAIL cases=%0d errors=%0d", count, errors);
     $finish;

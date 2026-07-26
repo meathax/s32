@@ -109,7 +109,6 @@ assign SDRAM_DQ = dq_oe ? dq_out : 16'hZZZZ;
 
 // init sequencer
 reg [15:0] init_cnt = 16'hffff;
-wire       init_done = (init_cnt == 0);
 
 // refresh: 8192 rows / 64 ms @96.6MHz -> every ~755 cycles
 reg [9:0]  ref_cnt;
@@ -318,7 +317,7 @@ always @(posedge clk) begin
         ack_stretch <= 0;
         rr_next <= 3'd0;
     end
-    else if (!init_done) begin
+    else if (!ready) begin
         init_cnt <= init_cnt - 1'd1;
         dqm      <= 2'b11;
         // init: wait >100us, PRE-all, 8x REF, MRS (JEDEC)

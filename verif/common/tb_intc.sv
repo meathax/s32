@@ -150,7 +150,7 @@ initial begin
     ctl_write(3'd3, 2'b10, 16'hf700);
 
     // Timer 1 uses the independent 50 MHz/16 source.  N=1 is 256 source
-    // ticks, or about 3959 clocks at 48.324 MHz; bound the fractional phase
+    // ticks, or about 3958 clocks at 48.317307 MHz; bound the fractional phase
     // to one host clock around the exact ratio.
     ctl_write(3'd5, 2'b11, 16'h0001);
     timer1_clocks = 0;

@@ -34,6 +34,17 @@ wire signed [19:0] mp_r_w  = {{4{mp_r[15]}},  mp_r};
 // multipcm add_route(1,"sleft") / add_route(0,"sright") — stream 1 -> left,
 // stream 0 -> right — the same cross as the YM).  mp channels were previously
 // routed straight, mirroring the MultiPCM stereo image on Multi 32.
+`ifdef S32_GOLDENAXE_ONLY
+// The dedicated Golden Axe revision is fixed to a single-screen System 32
+// board. Remove the Multi 32 routing cone at preprocessing time instead of
+// relying on cross-module constant propagation through is_multi32.
+wire signed [19:0] mix_l = (fm1_l_w <<< 1) + fm1_l_w
+                         + (fm2_l_w <<< 1) + fm2_l_w
+                         + (rf_l_w <<< 2);
+wire signed [19:0] mix_r = (fm1_r_w <<< 1) + fm1_r_w
+                         + (fm2_r_w <<< 1) + fm2_r_w
+                         + (rf_r_w <<< 2);
+`else
 wire signed [19:0] mix_l = is_multi32
     ? (fm1_r_w <<< 1) + fm1_r_w + (mp_r_w <<< 3) - mp_r_w
     : (fm1_l_w <<< 1) + fm1_l_w + (fm2_l_w <<< 1) + fm2_l_w
@@ -42,11 +53,41 @@ wire signed [19:0] mix_r = is_multi32
     ? (fm1_l_w <<< 1) + fm1_l_w + (mp_l_w <<< 3) - mp_l_w
     : (fm1_r_w <<< 1) + fm1_r_w + (fm2_r_w <<< 1) + fm2_r_w
       + (rf_r_w <<< 2);
+`endif
 
+`ifdef S32_GOLDENAXE_ONLY
+// Exact unsigned divide-by-10 from Hacker's Delight, applied to the magnitude
+// and signed afterward so negative results truncate toward zero exactly like
+// SystemVerilog signed `/ 10`. The complete input magnitude is 0..524288.
+// This shift/add network prevents Quartus 17 from inferring the two general
+// lpm_divide blocks produced by the runtime-selectable `/10` versus `/20` path.
+function automatic signed [19:0] divide_by_10_exact(input logic signed [19:0] sample);
+    logic        negative;
+    logic [19:0] magnitude;
+    logic [19:0] quotient;
+    logic [19:0] remainder;
+    begin
+        negative  = sample[19];
+        magnitude = negative ? (~sample + 20'd1) : sample;
+        quotient  = (magnitude >> 1) + (magnitude >> 2);
+        quotient  = quotient + (quotient >> 4);
+        quotient  = quotient + (quotient >> 8);
+        quotient  = quotient + (quotient >> 16);
+        quotient  = quotient >> 3;
+        remainder = magnitude - (quotient << 3) - (quotient << 1);
+        quotient  = quotient + ((remainder + 20'd6) >> 4);
+        divide_by_10_exact = negative ? -$signed(quotient) : $signed(quotient);
+    end
+endfunction
+`endif
 function automatic signed [15:0] scale_and_clip(input logic signed [19:0] sample);
     logic signed [19:0] scaled;
     begin
+`ifdef S32_GOLDENAXE_ONLY
+        scaled = divide_by_10_exact(sample);
+`else
         scaled = is_multi32 ? (sample / 20'sd20) : (sample / 20'sd10);
+`endif
         if (scaled > AUDIO_MAX)      scale_and_clip = 16'sh7fff;
         else if (scaled < AUDIO_MIN) scale_and_clip = 16'sh8000;
         else                         scale_and_clip = scaled[15:0];

@@ -137,8 +137,8 @@ and the MIF assignment/search path in the QIP.
 
 - The System 32 port adds a synchronous `ce` input to every stateful module and
   to both the Microcode template and generated artifact. The wrapper uses the
-  reduced fractional ratio 2500/12081 for a 10 MHz average rate from nominal
-  48.324 MHz. No enable pulse is connected to a clock pin, and bus ACKs remain
+  fractional ratio 5001/12081 for a 10.000614 MHz average rate from the
+  generated 24.158653 MHz V25 compute clock. No enable pulse is connected to a clock pin, and bus ACKs remain
   asserted across skipped cycles until a CE edge consumes them.
 - The upstream core exposes a unified data/I/O transaction interface with
   `d_io` indicating I/O space, plus a separate instruction bus.  The separate

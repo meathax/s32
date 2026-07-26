@@ -12,6 +12,7 @@ wire c_req, c_we, c_ack; wire [31:0] c_addr, c_wdata, c_rdata; wire [1:0] c_size
 wire m_req, m_we, m_ack; wire [23:1] m_addr; wire [15:0] m_wdata, m_rdata; wire [1:0] m_be;
 s32_v60 #(.START_PC(32'h0)) cpu (
     .clk(clk), .ce(1'b1), .rst(rst),
+    .if_req(), .if_addr(), .if_data(64'd0), .if_ack(1'b0),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr), .bus_size(c_size),
     .bus_wdata(c_wdata), .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(1'b1), .irq_vector(8'h00), .irq_ack(), .nmi_n(1'b1), .dbg_pc(), .dbg_halted());

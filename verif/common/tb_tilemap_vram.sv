@@ -312,10 +312,14 @@ initial begin
     // TEXT name and glyph are two distinct synchronous VRAM reads.
     cpu_write(16'h0000, 16'h0402); // palette 2, character 2
     cpu_write(16'h0020, 16'h00f0); // char 2, row 0: x0 pen F
+    // $1FF5C bit 8 is reserved.  It must not become a fifth text-page bit and
+    // redirect the name fetch from word $0000 to word $8000.
+    cpu_write(16'hffae, 16'h0100);
     cpu_write(16'hff81, 16'h002f); // only TEXT enabled
     start_render;
     expect_first_pixel(3'd0, 14'h202f);
     wait_done;
+    cpu_write(16'hffae, 16'h0000);
 
     // 4bpp bitmap words are little-endian nibble streams. Exercise all four
     // pixels rather than allowing a uniform test word to hide lane reversal.

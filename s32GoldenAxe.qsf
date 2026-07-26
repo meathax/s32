@@ -1,0 +1,129 @@
+# --------------------------------------------------------------------------
+#
+# MiSTer project
+#
+# WARNING WARNING WARNING:
+# Do not add files to project in Quartus IDE! It will mess this file!
+# Add the files manually to files.qip file.
+#
+# --------------------------------------------------------------------------
+
+set_global_assignment -name TOP_LEVEL_ENTITY sys_top
+
+set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
+
+set_global_assignment -name GENERATE_RBF_FILE ON
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name SAVE_DISK_SPACE OFF
+# Release builds are intentionally rebuilt from a clean database.  Disabling
+# Smart Recompile prevents a stale placement from being reused after a crashed
+# fit, which is especially fragile for the dense Golden Axe II/V25 profile.
+set_global_assignment -name SMART_RECOMPILE OFF
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP "-40"
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 100
+set_global_assignment -name POWER_PRESET_COOLING_SOLUTION "23 MM HEAT SINK WITH 200 LFPM AIRFLOW"
+set_global_assignment -name POWER_BOARD_THERMAL_MODEL "NONE (CONSERVATIVE)"
+# Qualify release timing at all process/voltage/temperature corners, including
+# the fast-corner hold checks the single-corner flow skipped (audit R20 PF-5).
+set_global_assignment -name TIMEQUEST_MULTICORNER_ANALYSIS ON
+set_global_assignment -name OPTIMIZE_POWER_DURING_FITTING OFF
+set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
+set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
+# The Golden Axe II profile is area-dense; prioritize a legal Cyclone V
+# placement while retaining the clock paths needed by the game core.
+set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE AREA"
+set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
+set_global_assignment -name ALLOW_POWER_UP_DONT_CARE OFF
+set_global_assignment -name QII_AUTO_PACKED_REGISTERS NORMAL
+set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION OFF
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF
+set_global_assignment -name OPTIMIZATION_TECHNIQUE AREA
+set_global_assignment -name MUX_RESTRUCTURE ON
+set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
+set_global_assignment -name AUTO_DELAY_CHAINS_FOR_HIGH_FANOUT_INPUT_PINS ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA ON
+set_global_assignment -name ADV_NETLIST_OPT_SYNTH_WYSIWYG_REMAP ON
+set_global_assignment -name SYNTH_GATED_CLOCK_CONVERSION ON
+set_global_assignment -name PRE_MAPPING_RESYNTHESIS ON
+set_global_assignment -name ROUTER_CLOCKING_TOPOLOGY_ANALYSIS ON
+set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
+set_global_assignment -name ECO_OPTIMIZE_TIMING ON
+set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
+set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
+# Seed 2 was the best of the archived legal fits and is the deterministic
+# first-choice seed for the dedicated release pipeline.
+set_global_assignment -name SEED 2
+# Quartus 17.0.2 has crashed in l_run_heap_expansion_algorithm while routing
+# this 99%-full real-V25 image with parallel fitter workers.  A single fitter
+# worker is slower but avoids that nondeterministic router failure.
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 1
+
+# This revision deliberately targets single-screen Sega System 32.  It keeps
+# the future Multi 32 RTL path in source, but compiles out the second palette /
+# mixer and sizes work RAM to the board-correct 64 KiB so SegaS32.rbf fits the
+# Cyclone V memory budget.  A future Multi 32 revision must omit this macro.
+set_global_assignment -name VERILOG_MACRO "S32_SYSTEM32_ONLY=1"
+
+# files.qip retains the real-V25 source for compatibility builds. Its upstream
+# Flags module requires this compile-time choice even when S32_REAL_V25 is off;
+# defining it alone does not instantiate V25 hardware.
+set_global_assignment -name VERILOG_MACRO "S80X86_PSEUDO_286_INT=0"
+
+# --- Real V25 opt-in (V25-game compatibility builds) --------------------------
+# Uncomment to instantiate the cycle-accurate NEC V25 (s80x86, already in
+# files.qip) for the protected V25 games (ga2, arabfgt) in place of the static
+# HLE mailbox.  Enabling it adds ~a CPU of logic, so re-run fit + timing.  The
+# path elaborates with the current profile and is integration-tested in sim
+# (verif/common/tb_core_v25int.sv: real V25 fetches program via SDRAM p5 and
+# round-trips the wake mailbox to the V60 in-core).  This is the candidate fix
+# for the V25 games' missing character-select sprites, which the HLE's static
+# tables cannot supply dynamically.
+# Per-game revisions add their hardware macros in a thin game QSF. For example,
+# s32GoldenAxe.qsf enables the real V25 and Golden Axe-only area reductions.
+# Keeping those choices out of this common revision preserves every other game
+# path for future dedicated builds.
+
+#set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
+
+#enable it only if 8bit indexed mode is used in core
+#set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
+
+#do not enable DEBUG_NOHDMI in release!
+#set_global_assignment -name VERILOG_MACRO "MISTER_DEBUG_NOHDMI=1"
+
+# disable bilinear filtering when downscaling
+set_global_assignment -name VERILOG_MACRO "MISTER_DOWNSCALE_NN=1"
+
+# Holosseum's native image is at most 416x224. Disable only scaler output modes
+# smaller than the source image to remove the remaining input-line RAM and
+# downscale routing; normal HDMI upscale and direct video remain available.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_DOWNSCALE=1"
+
+# disable adaptive scanline filtering
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
+
+#use only 1MB per frame for scaler to free ~21MB DDR3 RAM
+#set_global_assignment -name VERILOG_MACRO "MISTER_SMALL_VBUF=1"
+
+# Disable YC / Composite output to save some resources
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
+
+# Disable ALSA audio output to save some resources
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+
+source sys/sys.tcl
+source sys/sys_analog.tcl
+source files.qip
+
+# Golden Axe: The Revenge of Death Adder dedicated revision.
+# Generated by tools/sync-goldenaxe-qsf.ps1; edit the shared QSF above.
+set_global_assignment -name VERILOG_MACRO "S32_GA2_ONLY=1"
+set_global_assignment -name VERILOG_MACRO "S32_GOLDENAXE_ONLY=1"
+set_global_assignment -name VERILOG_MACRO "S32_REAL_V25=1"
+set_global_assignment -name VERILOG_MACRO "S32_V60_NO_FP=1"
+set_global_assignment -name VERILOG_MACRO "S32_RELEASE_MINIMAL=1"
+set_global_assignment -name VERILOG_MACRO "S32_JT12_MLAB_SHIFTS=1"
+set_global_assignment -name VERILOG_MACRO "S32_V25_MLAB_FIFO=1"

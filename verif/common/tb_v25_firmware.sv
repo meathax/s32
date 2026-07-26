@@ -28,6 +28,9 @@ wire debug_io_seen;
 wire [15:0] debug_last_io_addr;
 wire debug_unmapped_seen;
 wire [19:0] debug_last_unmapped_addr;
+wire debug_first_fetch_valid;
+wire [63:0] debug_first_fetch_data;
+wire [15:3] debug_first_fetch_addr;
 wire rom_req;
 wire [15:3] rom_addr;
 reg [63:0] rom_data = 64'hffffffffffffffff;
@@ -42,7 +45,10 @@ s32_v25_cpu dut (
     .debug_io_seen(debug_io_seen),
     .debug_last_io_addr(debug_last_io_addr),
     .debug_unmapped_seen(debug_unmapped_seen),
-    .debug_last_unmapped_addr(debug_last_unmapped_addr)
+    .debug_last_unmapped_addr(debug_last_unmapped_addr),
+    .debug_first_fetch_valid(debug_first_fetch_valid),
+    .debug_first_fetch_data(debug_first_fetch_data),
+    .debug_first_fetch_addr(debug_first_fetch_addr)
 );
 
 reg [7:0] raw [0:65535];
@@ -198,11 +204,11 @@ initial begin
     enable = 1'b1;
 
     // The s80x86 now runs on clk_v25 = clk/2, so one accumulator period (12081
-    // clk_v25 edges) contains exactly 5000 enables (5000/12081), gaps of two or
+    // clk_v25 edges) contains exactly 5001 enables (5001/12081), gaps of two or
     // three clk_v25 -- the same 10 MHz average as the former 2500/12081 on clk.
     // The rst/enable synchronizers delay the accumulator start by a few clk_v25
     // after enable rises, so align the window to the first CE pulse: by the
-    // accumulator arithmetic ANY 12081 consecutive clk_v25 hold exactly 5000.
+    // accumulator arithmetic ANY 12081 consecutive clk_v25 hold exactly 5001.
     ce_pulses = 0;
     ce_last_cycle = -1;
     for (cycles = 0; cycles < 200 && ce_last_cycle < 0; cycles = cycles + 1) begin
@@ -230,11 +236,11 @@ initial begin
             ce_pulses = ce_pulses + 1;
         end
     end
-    if (ce_pulses != 5000) begin
-        $display("V25_FIRMWARE FAIL: CE pulses=%0d expected 5000/12081", ce_pulses);
+    if (ce_pulses != 5001) begin
+        $display("V25_FIRMWARE FAIL: CE pulses=%0d expected 5001/12081", ce_pulses);
         $fatal(1);
     end
-    $display("V25_FIRMWARE CE: PASS (5000/12081 on clk_v25, gaps 2 or 3)");
+    $display("V25_FIRMWARE CE: PASS (5001/12081 on clk_v25, gaps 2 or 3)");
 
     // Poll in blocks rather than continuously occupying the V60 port.  The
     // 50 MHz test clock gives a 10.347 MHz virtual CPU; two million clk_sys
@@ -326,6 +332,9 @@ initial begin
     $display("V25_FIRMWARE trace: io_seen=%0d last_io=%04x unmapped=%0d last_mem=%05x",
              debug_io_seen, debug_last_io_addr,
              debug_unmapped_seen, debug_last_unmapped_addr);
+    $display("V25_FIRMWARE first_fetch: valid=%0d addr=%04x data=%016x",
+             debug_first_fetch_valid, {debug_first_fetch_addr, 3'b000},
+             debug_first_fetch_data);
     $finish;
 end
 

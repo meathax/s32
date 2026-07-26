@@ -528,8 +528,8 @@ reg [4:0] pending;
 reg [23:0] t0_cnt, t1_cnt;
 reg        t0_run, t1_run;
 reg [23:0] t1_acc;
-// round((3.125 MHz / 48.324 MHz) * 2^24)
-localparam [23:0] T1_STEP = 24'd1084943;
+// round((3.125 MHz / 48.317307 MHz) * 2^24)
+localparam [23:0] T1_STEP = 24'd1085094;
 wire [24:0] t1_sum = {1'b0, t1_acc} + {1'b0, T1_STEP};
 wire        t1_tick = t1_sum[24];
 
@@ -602,7 +602,7 @@ always @(posedge clk) begin
                     n = {(be[1] ? wdata[11:8] : ctl[9][3:0]),
                          (be[0] ? wdata[7:0]  : ctl[8])};
                     if (n != 0) begin
-                        // period in clk_sys ticks = 0x800*N / (xtal/2) * 48.324MHz.
+                        // period in clk_sys ticks = 0x800*N / (xtal/2) * 48.317307MHz.
                         // System 32 xtal=32.2159MHz -> ratio 3 exactly -> N*0x1800.
                         // Multi 32 xtal=32MHz (16.0MHz source) -> N*0x1800*32.2159/32
                         // = N*6185, i.e. +N*41 (0.67% longer). audit R20 IO-5

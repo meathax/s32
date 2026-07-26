@@ -29,6 +29,11 @@ module jt12_sh_rst #(parameter width=5, stages=32, rstval=1'b0 )
    	output		[width-1:0]	drop
 );
 
+`ifdef S32_JT12_MLAB_SHIFTS
+// These short shift histories fit MLAB according to the archived Quartus
+// memory report. The Golden Axe profile uses this to release thirteen M10Ks.
+(* ramstyle = "MLAB" *)
+`endif
 reg [stages-1:0] bits[width-1:0];
 wire [width-1:0] din_mx = rst ? {width{rstval[0]}} : din;
 

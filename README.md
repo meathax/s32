@@ -69,9 +69,10 @@ traces against MAME cover the implemented arcade instruction set.
 ## Core architecture and the V60 data path
 
 The top level separates a `clk_sys` domain (CPU, bus, I/O, sound and most video)
-from a 2× `clk_ram` domain (SDRAM and sprite datapath). The PLL requests about
-48.324 MHz for `clk_sys` and 96.648 MHz for `clk_ram`; fractional clock enables
-derive the original board rates. ROMs stream through the MiSTer HPS loader into
+from a 2× `clk_ram` domain (SDRAM and sprite datapath). The generated PLL runs
+`clk_sys` at 48.317307 MHz, `clk_ram` at 96.634615 MHz, and the real V25 compute
+domain at 24.158653 MHz; fractional clock enables derive the original board
+rates. ROMs stream through the MiSTer HPS loader into
 SDRAM. The V60 bus decoder arbitrates work RAM, VRAM, palette, I/O, protection,
 sound and ROM accesses. Tilemaps and the sprite engine feed the priority mixer;
 sprite pixels are rendered into DDR3-backed line buffers so SDRAM ROM traffic
@@ -89,21 +90,45 @@ program addresses while writing them.
 
 ## Building from source
 
-Quartus Lite 17.0 is the supported toolchain. On Windows, point
+Quartus Prime Lite 17.0.2 Build 602 is the pinned toolchain. On Windows, point
 `QUARTUS_ROOT` at the installation and run the audited build driver:
 
 ```bat
 set QUARTUS_ROOT=D:\Q17
-tools\build.bat
+tools\build-goldenaxe.bat
 ```
 
-On Linux or in the CI Quartus container, run `tools/build.sh`. Both drivers
-clean stale databases, regenerate the PLL, synthesize once, retry fitter
-crashes, sweep fitter seeds, run multicorner timing analysis, and stage
-`releases/SegaS32.rbf` only when fit, non-negative timing slack, report
-freshness, and RBF freshness all pass. The optional `S32_FIT_SEEDS` and
-`S32_FIT_RETRIES` environment variables control the search. A merely generated
-RBF is not considered deployable.
+This builds the dedicated `s32GoldenAxe` revision and stages
+`releases/s32GoldenAxe.rbf`. Golden Axe's MRAs select that RBF. The common
+`Arcade-SegaSystem32.qsf` retains the complete hardware source list and each
+game revision adds a thin QSF containing only its compile-time profile, so
+future per-game cores can prune different hardware without deleting shared
+support.
+
+The Golden Axe profile is intentionally area-focused. It fixes the single-
+screen System 32 routing at compile time, removes release-only debug telemetry,
+CPU turbo selection and unused V60 floating-point hardware, and uses a
+synchronous MLAB-backed V60 ROM cache instead of the generic asynchronous
+register/mux cache. Small JT12 histories, V25 FIFOs and the V25 internal data
+store are also directed to MLABs to preserve scarce M10K blocks. These changes
+are conditional; the generic source paths remain available for future
+per-game revisions.
+
+The audited driver takes an exclusive repository build lock, rejects other
+Quartus/Qsys compiler processes, validates the exact toolchain and host
+resources, cleans stale databases, regenerates the PLL, fingerprints all map
+inputs, retries only classified compiler crashes, and sweeps fitter seeds
+starting with the best archived seed (2). It runs multicorner timing and stages
+an RBF only when the map, fit, STA, assembler, input hashes, report freshness,
+seed, non-negative slack, and RBF freshness all agree. The optional
+`S32_FIT_SEEDS`, `S32_MAP_RETRIES`, and `S32_FIT_RETRIES` environment variables
+are range-checked and printed by preflight. A merely generated RBF is not
+considered deployable.
+
+The old Linux/Docker compile entrypoints fail fast because they cannot reproduce
+the qualified Quartus 17.0.2 Windows flow. Public CI performs source/profile
+checks and simulation only; release RBFs are produced locally through
+`tools\build-goldenaxe.bat`.
 
 Useful checks that do not build an RBF are:
 
@@ -119,10 +144,12 @@ python -m unittest discover -s verif -p "test_*.py"
 - A matching MAME ROM set. ROMs remain the user's responsibility and are not
   included here.
 
-Copy `SegaS32.rbf` to `_Arcade/cores/` and the matching `.mra` files to
+Copy `s32GoldenAxe.rbf` to `_Arcade/cores/` and the Golden Axe `.mra` files to
 `_Arcade/`, then launch a title from the MiSTer arcade menu. The deployment
 helper accepts the MiSTer host at runtime; no host, password, token, or SSH key
-is stored in the repository.
+is stored in the repository. After a qualified build,
+`tools\deploy-goldenaxe.ps1 -MisterHost root@192.168.0.69` performs a
+hash-verified deployment.
 
 ## Licence and credits
 

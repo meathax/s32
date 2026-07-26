@@ -1,0 +1,145 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$BuildScript
+)
+
+$ErrorActionPreference = "Stop"
+$resolvedScript = (Resolve-Path -LiteralPath $BuildScript).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $resolvedScript) "..")).Path
+
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
+    $digest = $sha.ComputeHash($bytes)
+}
+finally {
+    $sha.Dispose()
+}
+$key = ([BitConverter]::ToString($digest) -replace "-", "").Substring(0, 16)
+$mutexName = "Local\SegaS32QuartusBuild-$key"
+$mutex = [Threading.Mutex]::new($false, $mutexName)
+$acquired = $false
+$buildExitCode = 1
+$startedUtc = [DateTime]::UtcNow
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$logPath = Join-Path $repoRoot "build-$stamp-$PID.log"
+$pidPath = Join-Path $repoRoot ".s32-build.pid"
+$token = [Guid]::NewGuid().ToString("N")
+$priorHeld = [Environment]::GetEnvironmentVariable("S32_BUILD_LOCK_HELD", "Process")
+$priorToken = [Environment]::GetEnvironmentVariable("S32_BUILD_LOCK_TOKEN", "Process")
+
+function Append-Log([string]$Text) {
+    [IO.File]::AppendAllText(
+        $logPath,
+        $Text + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+try {
+    try {
+        $acquired = $mutex.WaitOne(0)
+    }
+    catch [Threading.AbandonedMutexException] {
+        $acquired = $true
+    }
+    if (-not $acquired) {
+        throw "Another Sega System 32 Quartus build is already active in $repoRoot."
+    }
+
+    $gitHead = "unavailable"
+    $gitDirty = "unknown"
+    try {
+        $headText = & git -C $repoRoot rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $headText) {
+            $gitHead = ($headText | Select-Object -First 1).Trim()
+        }
+        $dirtyText = @(& git -C $repoRoot status --porcelain --untracked-files=normal 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            $gitDirty = if ($dirtyText.Count -gt 0) { "true" } else { "false" }
+        }
+    }
+    catch {
+        $gitHead = "unavailable"
+        $gitDirty = "unknown"
+    }
+
+    Append-Log "Sega System 32 Quartus build"
+    Append-Log "StartedUtc: $($startedUtc.ToString('o'))"
+    Append-Log "Host: $env:COMPUTERNAME"
+    Append-Log "PowerShellPid: $PID"
+    Append-Log "Script: $resolvedScript"
+    Append-Log "RepoRoot: $repoRoot"
+    Append-Log "Mutex: $mutexName"
+    Append-Log "GitHead: $gitHead"
+    Append-Log "GitDirty: $gitDirty"
+    Append-Log ""
+
+    $pidMetadata = [ordered]@{
+        PowerShellPid = $PID
+        StartedUtc = $startedUtc.ToString("o")
+        Script = $resolvedScript
+        RepoRoot = $repoRoot
+        Mutex = $mutexName
+        LogPath = $logPath
+        GitHead = $gitHead
+        GitDirty = $gitDirty
+    }
+    $pidTemp = "$pidPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText(
+            $pidTemp,
+            ([pscustomobject]$pidMetadata | ConvertTo-Json -Depth 3) + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $pidTemp -Destination $pidPath -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $pidTemp -Force -ErrorAction SilentlyContinue
+    }
+
+    $env:S32_BUILD_LOCK_HELD = "1"
+    $env:S32_BUILD_LOCK_TOKEN = $token
+    Write-Host "Build lock acquired. Persistent log: $logPath"
+
+    $commandLine = [char]34 + $resolvedScript + [char]34
+    & $env:ComSpec /d /c $commandLine 2>&1 |
+        Tee-Object -FilePath $logPath -Append
+    $buildExitCode = $LASTEXITCODE
+    Append-Log ""
+    Append-Log "FinishedUtc: $([DateTime]::UtcNow.ToString('o'))"
+    Append-Log "NativeExitCode: $buildExitCode"
+}
+catch {
+    try {
+        Append-Log "FAILED: $($_.Exception.Message)"
+        Append-Log "FinishedUtc: $([DateTime]::UtcNow.ToString('o'))"
+        Append-Log "NativeExitCode: $buildExitCode"
+    }
+    catch {
+    }
+    Write-Error $_
+    $buildExitCode = 1
+}
+finally {
+    if ($null -eq $priorHeld) {
+        Remove-Item Env:S32_BUILD_LOCK_HELD -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:S32_BUILD_LOCK_HELD = $priorHeld
+    }
+    if ($null -eq $priorToken) {
+        Remove-Item Env:S32_BUILD_LOCK_TOKEN -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:S32_BUILD_LOCK_TOKEN = $priorToken
+    }
+    if ($acquired) {
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        $mutex.ReleaseMutex()
+    }
+    $mutex.Dispose()
+}
+
+exit $buildExitCode

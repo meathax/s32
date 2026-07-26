@@ -21,7 +21,7 @@ module s32_video (
     output            vblank_end    // pulse: line 0 start   (IRQ source 1)
 );
 
-// dot clock CE: /6 of 48.324 = 8.054 (416 mode); /7.5 -> approximate /15 of
+// dot clock CE: /6 of 48.317307 = 8.054 (416 mode); /7.5 -> approximate /15 of
 // 96.6 for 320 mode; here fractional accumulator for exactness.
 reg [7:0] ce_acc;
 wire [7:0] ce_add = mode_active ? 8'd40 : 8'd32; // 40/240=1/6 ; 32/240=/7.5
@@ -31,7 +31,9 @@ always @(posedge clk) begin
         logic [8:0] s;
         s = ce_acc + ce_add;
         ce_pix <= (s >= 9'd240);
-        ce_acc <= (s >= 9'd240) ? s - 9'd240 : s[7:0];
+        // s is at most 279, so the wrapped result is 0..39.  Work on the
+        // explicit low byte to avoid an implicit 9-to-8-bit truncation.
+        ce_acc <= (s >= 9'd240) ? (s[7:0] - 8'd240) : s[7:0];
     end
 end
 

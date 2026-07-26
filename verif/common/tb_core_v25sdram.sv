@@ -306,12 +306,21 @@ initial begin
     $display("V25_SDRAM v60_pc=%08x v25dbg={ce=%0h wake=%b mbnz=%b unm=%b io=%b rdcnt=%02x mblast=%02x}",
              dbg_pc_w, dbg_v25_w[23:20], dbg_v25_w[19], dbg_v25_w[18],
              dbg_v25_w[17], dbg_v25_w[16], dbg_v25_w[15:8], dbg_v25_w[7:0]);
+`ifndef S32_RELEASE_MINIMAL
     $display("V25_SDRAM sweep_done=%b hash=%06x (exp 83aa29) first_valid=%b first_line=%016x (exp ffffff0000040002)",
              dbg_v25img_w[89], dbg_v25img_w[87:64], dbg_v25img_w[88], dbg_v25img_w[63:0]);
     if (dbg_v25img_w[87:64] !== 24'h83AA29) begin
         $display("V25_SDRAM FAIL: image sweep hash mismatch");
         dbg_v25img_fail = 1;
     end
+`else
+    $display("V25_SDRAM release-minimal sweep_done=%b hash=%06x first_valid=%b first_line=%016x (exp ffffff0000040002)",
+             dbg_v25img_w[89], dbg_v25img_w[87:64], dbg_v25img_w[88], dbg_v25img_w[63:0]);
+    if (dbg_v25img_w[89] !== 1'b1 || dbg_v25img_w[87:64] !== 24'h000000) begin
+        $display("V25_SDRAM FAIL: release-minimal sweep was not compiled out");
+        dbg_v25img_fail = 1;
+    end
+`endif
     if (dbg_v25img_w[63:0] !== 64'hFFFF_FF00_0004_0002) begin
         $display("V25_SDRAM FAIL: first fetched line mismatch");
         dbg_v25img_fail = 1;

@@ -51,16 +51,36 @@ set_multicycle_path -hold -end -from [get_clocks SDRAM_CLK] \
 
 }
 
-# The V60/V70 core is clock-enabled at most every second clk_sys edge (every
-# third edge in System 32 mode).  Restrict the exception to internal CPU
-# register-to-register paths so asynchronous IRQ/bus inputs remain single-cycle.
-set v60_regs [get_registers -nowarn {*|s32_v60:v60|*}]
-if {[s32_require [expr {[get_collection_size $v60_regs] > 0}] \
-        "V60 registers for the CPU clock-enable constraint"]} {
-    set_multicycle_path -setup 2 -from $v60_regs -to $v60_regs
-    set_multicycle_path -hold  1 -from $v60_regs -to $v60_regs
+# The dedicated Golden Axe profile compiles out CPU Turbo and uses a fixed
+# 16.10795 MHz NCO. Its CE pulses are separated by at least one idle clk_sys
+# edge, so internal V60 register-to-register paths have a real two-cycle
+# requirement. Universal revisions retain Turbo and must remain single-cycle.
+set s32_revision ""
+if {[llength [info commands get_current_revision]] > 0} {
+    set s32_revision [get_current_revision]
 }
+set s32_ga_fixed_ce [string equal $s32_revision "s32GoldenAxe"]
 
+if {$s32_ga_fixed_ce} {
+    set v60_regs [get_registers -nowarn {*|s32_v60:v60|*}]
+    if {[s32_require [expr {[get_collection_size $v60_regs] > 0}] "V60 registers for the Golden Axe fixed-CE constraint"]} {
+        set_multicycle_path -setup 2 -from $v60_regs -to $v60_regs
+        set_multicycle_path -hold 1 -from $v60_regs -to $v60_regs
+
+        # Generic V60 builds retain the optional FP state machine. The Golden
+        # Axe no-FP profile normally has no fp_a registers; absence is expected,
+        # not a reason to abort map/STA.
+        set v60_fp_a [get_registers -nowarn {*|s32_v60:v60|fp_a[*]}]
+        if {[get_collection_size $v60_fp_a] > 0} {
+            set_multicycle_path -setup 3 -from $v60_fp_a -to $v60_regs
+            set_multicycle_path -hold 2 -from $v60_fp_a -to $v60_regs
+        } else {
+            post_message -type info "s32 SDC: Golden Axe no-FP profile has no fp_a registers"
+        }
+    }
+} else {
+    post_message -type info "s32 SDC: revision '$s32_revision' retains single-cycle V60 timing"
+}
 # Sprite words 0..6 are loaded at least two fetch clocks before decode; word 7
 # is intentionally excluded because clip commands consume it on the very next
 # decode edge.  x0/y0 are latched before the scale/row/pixel states consume
@@ -81,7 +101,7 @@ if {[s32_require [expr {[get_collection_size $sprite_deferred_sources] > 0 && \
     set_multicycle_path -hold  1 -from $sprite_deferred_sources -to $sprite_regs
 }
 
-# The NEC V25 (s80x86) runs on clk_v25 = outclk3 (clk_sys/2, ~24.162 MHz) so its
+# The NEC V25 (s80x86) runs on clk_v25 = outclk3 (clk_sys/2, 24.158653 MHz) so its
 # large core meets timing with real margin.  Its two crossings to the clk_sys/
 # clk_ram world -- the SDRAM p5 line fetch and the V60-side mailbox port -- are
 # handled in RTL by two-flop toggle synchronisers (s32_v25_cpu) and a true-dual-

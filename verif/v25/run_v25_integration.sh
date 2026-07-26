@@ -43,6 +43,7 @@ verilator \
     -Wno-SYNCASYNCNET -Wno-MULTIDRIVEN -Wno-BLKANDNBLK -Wno-CASEOVERLAP \
     -Wno-LATCH -Wno-COMBDLY \
     +define+SIMULATION +define+S32_SYSTEM32_ONLY +define+S32_GA2_ONLY \
+    +define+S32_GOLDENAXE_ONLY +define+S32_RELEASE_MINIMAL \
     +define+S32_REAL_V25 +define+S80X86_PSEUDO_286_INT=0 \
     "-DMICROCODE_ROM_PATH=\"$mc\"" \
     --top-module tb_core_v25int --Mdir "$build_dir/obj_dir" -o Vtb_core_v25int \

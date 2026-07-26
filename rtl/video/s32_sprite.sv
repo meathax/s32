@@ -143,8 +143,8 @@ typedef enum logic [4:0] {
     R_INDTAB, R_INDTABP, R_INDTABW,
     R_ROW, R_ROWDATA, R_ROWDATAW,
     R_RAMDATA, R_RAMDATAP, R_RAMDATAW,
-    R_PIXEL, R_EMIT, R_ROWEND,
-    R_NEXT, R_DONE, R_DELAY
+    R_PIXEL, R_EMIT, R_SCAN,
+    R_PIXEL_DATA, R_DONE, R_DELAY
 } rst_t;
 rst_t rs;
 
@@ -245,6 +245,8 @@ reg        [9:0]  pixel_sx_px;
 reg        [2:0]  pixel_piw, pixel_piw_last;
 reg        [9:0]  pixel_wordi;
 reg        [7:0]  pixel_pen8;
+reg        [23:0] pixel_byteaddr;
+reg        [23:0] scan_byteaddr;
 
 // Width is latched at buffer swap; a live write cannot alter this pass.
 wire [8:0] hpix = ctl_latched[6][0] ? 9'd416 : 9'd320;
@@ -776,10 +778,7 @@ always @(posedge clk) begin
             logic [2:0]  piw, piw_last;// position within the 32-bit word
             logic [9:0]  wordi;        // source 32-bit word index
             logic [23:0] byteaddr;
-            logic [23:4] need;
             logic        scan_pending;
-            logic [23:0] access_byteaddr;
-            logic        scan_end;
             logic signed [15:0] clip_x_min, clip_x_max;
 
             scrx = d_flipx ? (x0 + $signed({4'b0000, d_dstw})
@@ -792,20 +791,9 @@ always @(posedge clk) begin
             piw      = d_bpp8 ? {1'b0, sx_px[1:0]} : sx_px[2:0];
             piw_last = d_bpp8 ? 3'd3 : 3'd7;
             wordi    = d_bpp8 ? {2'b0, sx_px[9:2]} : {3'b0, sx_px[9:3]};
-            // byte address: row pitch was registered once in R_ROW.
             byteaddr = row_byte_base
                      + (d_bpp8 ? {14'b0, sx_px} : {15'b0, sx_px[9:1]});
             scan_pending = end_scan_word < wordi;
-            access_byteaddr = scan_pending
-                            ? row_byte_base + {12'b0, end_scan_word, 2'b00}
-                            : byteaddr;
-            // Sprite RAM is 0x20000 bytes and wraps independently of the ROM
-            // bank.  Both sources use the same 16-byte pixrow cache layout.
-            need = d_fromram ? {7'b0, access_byteaddr[16:4]}
-                             : {d_bank_eff, access_byteaddr[21:4]};
-            scan_end = d_bpp8
-                     ? (pixrow[{access_byteaddr[3:2], 5'b11000} +: 8] == 8'hff)
-                     : (pixrow[{access_byteaddr[3:2], 5'b11000} +: 4] == 4'hf);
 
             // MAME clips the trailing xtarget before its source loop. Keep
             // leading off-screen traversal (which advances zoom), but stop as
@@ -819,45 +807,80 @@ always @(posedge clk) begin
                 yacc <= yacc + ystep;
                 rs <= R_ROW;
             end
-            else if (!rowtag_v || need != rowtag) begin
-                rowbase <= need;
-                if (d_fromram) begin
-                    ram_fetch_base <= {access_byteaddr[16:4], 3'b000};
-                    rs <= R_RAMDATA;
-                end
-                else begin
-                    rs <= R_ROWDATA;
-                end
-            end
             // Destination-oriented zoom can jump over complete source words.
-            // Test every skipped word's final pen, exactly like MAME's
-            // sequential source loop, before allowing the next output pixel.
+            // Register the skipped-word address before the cache lookup and
+            // dynamic pixrow select. This keeps end_scan_word out of the
+            // 96.6 MHz cache/mux path while preserving MAME's sequential
+            // end-code scan.
             else if (scan_pending) begin
-                if (!d_opaque && scan_end) begin
-                    fb_wr_end <= 1'b1;
-                    debug_activity[17] <= 1'b1;
-                    dy <= dy + 1'd1;
-                    yacc <= yacc + ystep;
-                    rs <= R_ROW;
-                end
-                else end_scan_word <= end_scan_word + 1'd1;
+                scan_byteaddr <= row_byte_base
+                               + {12'b0, end_scan_word, 2'b00};
+                rs <= R_SCAN;
             end
             else begin
-                pixel_scrx    <= scrx;
-                pixel_sx_px   <= sx_px;
-                pixel_piw     <= piw;
-                pixel_piw_last<= piw_last;
-                pixel_wordi   <= wordi;
-                // Register the selected source byte at the cache/address
-                // boundary. Keeping the 16:1 pixrow mux out of R_EMIT
-                // prevents the pen select, transparency tests, and write
-                // qualifier from forming one 96.6 MHz combinational path.
-                // This is cycle-neutral: R_PIXEL already precedes R_EMIT.
-                pixel_pen8    <= pixrow[{byteaddr[3:0], 3'b000} +: 8];
-                rs <= R_EMIT;
+                pixel_scrx     <= scrx;
+                pixel_sx_px    <= sx_px;
+                pixel_piw      <= piw;
+                pixel_piw_last <= piw_last;
+                pixel_wordi    <= wordi;
+                pixel_byteaddr <= byteaddr;
+                rs <= R_PIXEL_DATA;
             end
         end
 
+        // Check the final pen of a source word skipped by destination zoom.
+        // scan_byteaddr is registered in R_PIXEL so the cache tag comparison
+        // and variable pixrow select do not feed back from end_scan_word in
+        // the same fast-clock cycle.
+        R_SCAN: begin
+            logic [23:4] need;
+            logic        scan_end;
+            need = d_fromram ? {7'b0, scan_byteaddr[16:4]}
+                             : {d_bank_eff, scan_byteaddr[21:4]};
+            scan_end = d_bpp8
+                     ? (pixrow[{scan_byteaddr[3:2], 5'b11000} +: 8] == 8'hff)
+                     : (pixrow[{scan_byteaddr[3:2], 5'b11000} +: 4] == 4'hf);
+            if (!rowtag_v || need != rowtag) begin
+                rowbase <= need;
+                if (d_fromram) begin
+                    ram_fetch_base <= {scan_byteaddr[16:4], 3'b000};
+                    rs <= R_RAMDATA;
+                end
+                else rs <= R_ROWDATA;
+            end
+            else if (!d_opaque && scan_end) begin
+                fb_wr_end <= 1'b1;
+                debug_activity[17] <= 1'b1;
+                dy <= dy + 1'd1;
+                yacc <= yacc + ystep;
+                rs <= R_ROW;
+            end
+            else begin
+                end_scan_word <= end_scan_word + 1'd1;
+                rs <= R_PIXEL;
+            end
+        end
+
+        // Cache-check and register the selected source byte. Separating this
+        // 16:1 mux from xacc/byte-address calculation removes the remaining
+        // accumulator-to-pen critical path. R_EMIT remains the output stage.
+        R_PIXEL_DATA: begin
+            logic [23:4] need;
+            need = d_fromram ? {7'b0, pixel_byteaddr[16:4]}
+                             : {d_bank_eff, pixel_byteaddr[21:4]};
+            if (!rowtag_v || need != rowtag) begin
+                rowbase <= need;
+                if (d_fromram) begin
+                    ram_fetch_base <= {pixel_byteaddr[16:4], 3'b000};
+                    rs <= R_RAMDATA;
+                end
+                else rs <= R_ROWDATA;
+            end
+            else begin
+                pixel_pen8 <= pixrow[{pixel_byteaddr[3:0], 3'b000} +: 8];
+                rs <= R_EMIT;
+            end
+        end
         R_EMIT: begin
             logic [3:0]  pen4;
             logic [7:0]  pen8, pix, trans_now;

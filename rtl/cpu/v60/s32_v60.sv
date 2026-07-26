@@ -300,6 +300,7 @@ reg [15:0] dec_res;            // result awaiting memory write-back
 // single-precision FP group (0x5C/0x5F: CMPF/MOVFS/NEGFS/ABSFS/SCLFS/ADDFS/
 // SUBFS/MULFS/DIVFS/CVTWS/CVTSW).  op7a-style F2 decode: op1 = ReadAM value,
 // op2 = ReadAM (CMPF) / WriteAM (MOVFS/CVTWS/CVTSW) / ReadAMAddress RMW (rest).
+`ifndef S32_V60_NO_FP
 reg [31:0] fp_a, fp_b;         // operand float bit patterns (a=op1, b=op2)
 reg [31:0] fp_res;             // packed binary32 result awaiting writeback
 reg [49:0] fdiv_rem;           // FDIV restoring-division partial remainder
@@ -309,6 +310,7 @@ reg [5:0]  fdiv_cnt;           // FDIV bit counter
 reg        fdiv_sign;          // FDIV result sign
 reg signed [15:0] fdiv_exp;    // FDIV result exponent (unbiased)
 reg        fp_op2_reg;         // op2 destination is a register (else memory)
+`endif
 
 // 0x5B/0x5D bit string / bit field state (V60-10)
 reg [31:0] bam_base;           // BAM: byte base address
@@ -343,7 +345,9 @@ typedef enum logic [6:0] {
     S_BF_INS1, S_BF_INS2, S_BF_INSRD, S_BF_INSWR,
     S_BS_SCH1, S_BS_SCHRD, S_BS_SCHB, S_BS_SCHW,
     S_BS_MOV1, S_BS_MOV2, S_BS_MOVS, S_BS_MOVD, S_BS_MOVB, S_BS_MOVF,
+`ifndef S32_V60_NO_FP
     S_FP_OP2, S_FP_LD, S_FP_EXEC, S_FP_DIV, S_FP_WB,
+`endif
     S_EXC_PUSH1, S_EXC_EXTRA, S_EXC_CODE, S_EXC_PUSH2, S_EXC_VEC, S_EXC_JMP,
     S_TASK_LD_NEXT, S_TASK_LD_ACK, S_TASK_ST_NEXT, S_TASK_ST_ACK,
     S_TASI1, S_TASI2,
@@ -417,9 +421,10 @@ endfunction
 
 // sign/zero helpers per dim
 function automatic [7:0] bin2bcd(input [6:0] v);   // 0-99 -> packed BCD
-    logic [6:0] t, o;
-    t = v / 7'd10; o = v % 7'd10;
-    bin2bcd = {t[3:0], o[3:0]};
+    logic [6:0] q, r;
+    q = v / 7'd10;
+    r = v - (q * 7'd10);
+    bin2bcd = {q[3:0], r[3:0]};
 endfunction
 
 // C-style truncating divide-by-8 of a signed bit offset (MAME bamoffset/8)
@@ -611,8 +616,10 @@ always @* begin
         S_BF_INS2:
             rf_raddr_a = fb[5'd2 + len1 + len2][4:0];
         S_TASK_ST_NEXT:
-            if (task_phase >= 6'd5) rf_raddr_a = task_phase - 6'd5;
+            if (task_phase >= 6'd5) rf_raddr_a = task_phase[4:0] - 5'd5;
+`ifndef S32_V60_NO_FP
         S_FP_LD:   rf_raddr_b = op2[4:0];   // FP RMW register-operand read
+`endif
         S_EXEC: begin
             rf_raddr_a = ((cur_op == 8'ha6) || (cur_op == 8'hb6))
                          ? op2[4:0] + 5'd1 : op1[4:0];
@@ -634,6 +641,13 @@ function automatic [31:0] disp_of(input [4:0] base, input [1:0] sz);
 endfunction
 function automatic [4:0] disp_len(input [1:0] sz);
     disp_len = (sz==2'd0) ? 5'd1 : (sz==2'd1) ? 5'd2 : 5'd4;
+endfunction
+
+// Total bytes consumed by the two same-width displacement fields plus the
+// addressing-mode byte.  Explicit constants avoid constructing a six-bit
+// intermediate only to truncate it back to the five-bit fetch-buffer length.
+function automatic [4:0] double_disp_len(input [1:0] sz);
+    double_disp_len = (sz==2'd0) ? 5'd3 : (sz==2'd1) ? 5'd5 : 5'd9;
 endfunction
 
 // immediate length by dim
@@ -742,8 +756,8 @@ else if (ce) begin
                 // the fb[] register inputs risks eating that margin.  The extra realign
                 // tick on 5-8 byte instructions costs ~0.5 cyc/instr, well worth the
                 // combinational headroom.  Revisit only with a real STA report.
-                logic [2:0] s;
-                s = (delta >= 4) ? 3'd4 : delta[2:0];
+                logic [4:0] s;
+                s = (delta >= 32'd4) ? 5'd4 : delta[4:0];
                 if (!fb_realigning) begin
                     for (int i = 0; i < 24; i++) fb_prev[i] <= fb[i];
                     fb_prev_base  <= fb_base;
@@ -751,10 +765,10 @@ else if (ce) begin
                 end
                 for (int i = 0; i < 24; i++)
                     if (i + s < 24) fb[i] <= fb[i + s];
-                fb_base  <= fb_base + {29'b0, s};
-                fb_valid <= fb_valid - {2'b0, s};
-                fb_wr    <= fb_wr - {2'b0, s};   // frontier shifts down with the window
-                fb_realigning <= (delta > 4);
+                fb_base  <= fb_base + {27'b0, s};
+                fb_valid <= fb_valid - s;
+                fb_wr    <= fb_wr - s;   // frontier shifts down with the window
+                fb_realigning <= (delta > 32'd4);
             end
             else begin
                 fb_realigning <= 0;
@@ -857,30 +871,37 @@ else if (ce) begin
             else begin pc <= pc + 1; st <= S_FILL; st_after_fill<=S_DECODE; end
         end
 
-        // 0x6B/0x7B are holes in MAME's authoritative primary dispatch
-        // table, not branch-condition encodings.  Enter the reserved-
-        // instruction vector rather than silently treating condition B as
-        // false and continuing after the displacement.
-        8'h6b, 8'h7b: begin
-            exc_vector <= 8'd8;
-            exc_pushval <= psw;
-            st <= S_EXC_PUSH1;
-        end
-
         // ---- Bcc disp8 (0x60-0x6a,0x6c-0x6f) / disp16 equivalent ----
+        // 0x6B/0x7B are holes in MAME's authoritative primary dispatch
+        // table, not branch-condition encodings.  Decode the holes inside the
+        // corresponding family so the casez items remain mutually exclusive.
         8'b0110_????: begin
-            if (cond_true(opcode[3:0]))
-                 pc <= pc + {{24{fb[1][7]}}, fb[1]};
-            else pc <= pc + 2;
-            st <= S_FILL; st_after_fill <= S_DECODE;
+            if (opcode == 8'h6b) begin
+                exc_vector <= 8'd8;
+                exc_pushval <= psw;
+                st <= S_EXC_PUSH1;
+            end
+            else begin
+                if (cond_true(opcode[3:0]))
+                     pc <= pc + {{24{fb[1][7]}}, fb[1]};
+                else pc <= pc + 2;
+                st <= S_FILL; st_after_fill <= S_DECODE;
+            end
         end
         8'b0111_????: begin
             logic [15:0] bd16;
-            bd16 = fb16(1);
-            if (cond_true(opcode[3:0]))
-                 pc <= pc + {{16{bd16[15]}}, bd16};
-            else pc <= pc + 3;
-            st <= S_FILL; st_after_fill <= S_DECODE;
+            if (opcode == 8'h7b) begin
+                exc_vector <= 8'd8;
+                exc_pushval <= psw;
+                st <= S_EXC_PUSH1;
+            end
+            else begin
+                bd16 = fb16(1);
+                if (cond_true(opcode[3:0]))
+                     pc <= pc + {{16{bd16[15]}}, bd16};
+                else pc <= pc + 3;
+                st <= S_FILL; st_after_fill <= S_DECODE;
+            end
         end
 
         // ---- BSR disp16 (0x48): push return, branch ----
@@ -1121,6 +1142,17 @@ else if (ce) begin
             endcase
         end
         8'h5c, 8'h5f: begin
+`ifdef S32_V60_NO_FP
+            // Golden Axe never executes the optional floating-point groups.
+            // Keep their architectural fallback while removing the entire
+            // decode/data path from this dedicated build.
+            exc_vector <= 8'd8;
+            exc_pushval <= psw;
+            st <= S_EXC_PUSH1;
+            // synthesis translate_off
+            $display("V60: reserved FP opcode %02x at %08x", opcode, pc);
+            // synthesis translate_on
+`else
             // single-precision FP group (op2.hxx / op5.hxx).  Second byte is the
             // sub-opcode; op1 is decoded as a value (ReadAM), op2 later per role.
             // Unhandled sub-opcodes still take the reserved-instruction vector
@@ -1144,6 +1176,7 @@ else if (ce) begin
                 $display("V60: unimplemented FP group %02x sub %02x at %08x", opcode, fb[1], pc);
                 // synthesis translate_on
             end
+`endif
         end
 
         // ---- privileged / system ----
@@ -1348,7 +1381,7 @@ else if (ce) begin
                     dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                     dbus_addr <= pc + d1t;
                     ea_addr <= d2t;      // second disp follows first
-                    ea_len  <= 5'd1 + {disp_len(modreg[1:0]), 1'b0}; // 1 + 2*len
+                    ea_len  <= double_disp_len(modreg[1:0]); // 1 + 2*len
                     st <= S_EA_IND2;
                 end
                 default: begin
@@ -1366,7 +1399,7 @@ else if (ce) begin
                 dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                 dbus_addr <= rf_rdata_a + d1t;
                 ea_addr  <= d2t;
-                ea_len   <= 5'd1 + {disp_len(modtop[1:0]), 1'b0};
+                ea_len   <= double_disp_len(modtop[1:0]);
                 st <= S_EA_IND2;
             end
             3'd3: begin             // Register direct
@@ -1607,7 +1640,7 @@ else if (ce) begin
                 default: rotc_val <= {rotc_val[30:0], f_cy};
             endcase
             f_cy <= msb;
-            rotc_cnt <= rotc_cnt - 1;
+            rotc_cnt <= rotc_cnt - 8'sd1;
         end
         else begin
             logic [1:0] d2l;
@@ -1622,7 +1655,7 @@ else if (ce) begin
                 default: rotc_val <= {f_cy, rotc_val[31:1]};
             endcase
             f_cy <= ls;
-            rotc_cnt <= rotc_cnt + 1;
+            rotc_cnt <= rotc_cnt + 8'sd1;
         end
     end
 
@@ -2327,6 +2360,7 @@ else if (ce) begin
         end
     end
 
+`ifndef S32_V60_NO_FP
     // ------------------------------------------------------------------
     // single-precision FP group (0x5C/0x5F).  op1 already decoded as a value;
     // set up op2 per its role, then load/compute/write.
@@ -2396,6 +2430,7 @@ else if (ce) begin
             dbus_req <= 0; dbus_we <= 0; st <= S_NEXT;
         end
     end
+`endif
 
     // ------------------------------------------------------------------
     // BAM: bit addressing modes for the 0x5B/0x5D groups (MAME BAMTable1/2
@@ -2462,7 +2497,7 @@ else if (ce) begin
                 dbus_req <= 1; dbus_we <= 0; dbus_size <= 2'd2;
                 dbus_addr <= rf_rdata_a + bdt;
                 bam_off  <= bdt2;
-                bam_fill_len(5'd1 + {disp_len(modtop[1:0]), 1'b0});
+                bam_fill_len(double_disp_len(modtop[1:0]));
                 st <= S_BAM_IND;
             end
             3'd4: begin             // autoincrement (+1 strings, +4 fields)
@@ -3897,8 +3932,8 @@ function automatic [31:0] shl_res(input [31:0] v, input [7:0] cnt, input [1:0] d
     logic [31:0] x;
     c = cnt;
     x = dimext(v, d);
-    if (c >= 0) x = x << c;
-    else        x = x >> (-c);
+    if (c >= 0) x = x << $unsigned(c);
+    else        x = x >> $unsigned(-c);
     shl_res = x;
 endfunction
 function automatic [31:0] sha_res(input [31:0] v, input [7:0] cnt, input [1:0] d);
@@ -3906,8 +3941,8 @@ function automatic [31:0] sha_res(input [31:0] v, input [7:0] cnt, input [1:0] d
     logic signed [31:0] x;
     c = cnt;
     x = (d==2'd0) ? {{24{v[7]}},v[7:0]} : (d==2'd1) ? {{16{v[15]}},v[15:0]} : v;
-    if (c >= 0) x = x <<< c;
-    else        x = x >>> (-c);
+    if (c >= 0) x = x <<< $unsigned(c);
+    else        x = x >>> $unsigned(-c);
     sha_res = x;
 endfunction
 // SHA left-shift overflow (MAME SHIFTLEFT_OV op12.hxx): OV is set when the top
@@ -3925,8 +3960,9 @@ function automatic sha_left_ov(input [31:0] v, input [7:0] cnt, input [1:0] d);
     if (c <= 0)      sha_left_ov = 1'b0;              // right shift / zero: no OV
     else if (c > w)  sha_left_ov = (dimext(v,d) != 0);// count > width: MAME's macro is UB here (bitsize-count<0); any nonzero value overflowed
     else begin       // 1 <= count <= width: exact MAME SHIFTLEFT_OV mask (count==width uses the full-width mask, matching MAME's count==bitsize case, e.g. SHA.B #8,-1 -> OV=0)
-        field = (dimext(v,d) >> (w - c)) & ((32'd1 << c) - 1);  // top `count` bits
-        ones  = (32'd1 << c) - 1;
+        field = (dimext(v,d) >> $unsigned(w - c)) &
+                ((32'd1 << $unsigned(c)) - 1);  // top `count` bits
+        ones  = (32'd1 << $unsigned(c)) - 1;
         sha_left_ov = sgn(v,d) ? (field != ones) : (field != 32'd0);
     end
 endfunction
@@ -4021,6 +4057,7 @@ task automatic md_finish;
     endcase
 endtask
 
+`ifndef S32_V60_NO_FP
 // ===========================================================================
 //  Single-precision (binary32) FP group (0x5C/0x5F).  Behavioral contract is
 //  MAME op2.hxx/op5.hxx, which use host `float` — round-to-nearest-even, with
@@ -4156,8 +4193,9 @@ function automatic [31:0] fp_add(input [31:0] x, input [31:0] y);
             d  = ex - ey;
             if (d >= 16'sd27) begin by = 27'd0; sticky = (my != 0); end
             else begin
-                by     = {my, 3'b000} >> d;
-                sticky = (({my, 3'b000} & ((27'd1 << d) - 27'd1)) != 27'd0);
+                by     = {my, 3'b000} >> $unsigned(d);
+                sticky = (({my, 3'b000} &
+                          ((27'd1 << $unsigned(d)) - 27'd1)) != 27'd0);
             end
             by[0] = by[0] | sticky;
             if (sx == sy) begin
@@ -4299,7 +4337,7 @@ task automatic cvt_s_w(input [31:0] x, input [2:0] mode,
             // and integral, so no rounding is involved.
             if (e >= 16'sd63) intp = 32'd0;
             else begin
-                big  = {40'd0, m} << (e - 16'sd23);
+                big  = {40'd0, m} << $unsigned(e - 16'sd23);
                 intp = big[31:0];
             end
             iv = s ? (~intp + 32'd1) : intp;
@@ -4310,10 +4348,10 @@ task automatic cvt_s_w(input [31:0] x, input [2:0] mode,
         end
         else begin
             sh = 16'sd23 - e;                               // fraction bit count
-            if (sh <= 0) begin intp = m << (-sh); fracbits = 32'd0; frac_nz = 1'b0; end
+            if (sh <= 0) begin intp = m << $unsigned(-sh); fracbits = 32'd0; frac_nz = 1'b0; end
             else begin
-                intp = 32'({24'd0, m} >> sh);
-                fracbits = ({8'd0, m} << (16'sd32 - sh));   // fractional bits in high part
+                intp = 32'({24'd0, m} >> $unsigned(sh));
+                fracbits = ({8'd0, m} << $unsigned(16'sd32 - sh)); // fractional bits in high part
                 frac_nz = (fracbits != 32'd0);
             end
             roundup = 1'b0;
@@ -4458,5 +4496,6 @@ task automatic fp_exec;
         endcase
     end
 endtask
+`endif
 
 endmodule

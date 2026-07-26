@@ -75,7 +75,7 @@ assign layer_off_o = layer_off;
 // single-bit external + $1FF00[10] form (audit R20 TM-3).  Computed at the NBG
 // tile fetch (T_PIX) where `lay` (0..3) is valid — the only consumer.
 function automatic [1:0] tilebank_of(input [2:0] l);
-    tilebank_of = is_multi32 ? (2'b11 & (ext_tilebank >> {l[1:0], 1'b0}))
+    tilebank_of = is_multi32 ? ext_tilebank[{l[1:0], 1'b0} +: 2]
                              : {ext_tilebank[0], r1ff00[10]};
 endfunction
 
@@ -121,8 +121,9 @@ s32_tilemap_scale_div scale_div (
 );
 
 wire [8:0] hpix = mode_416 ? 9'd416 : 9'd320;
-wire tile_flipx = r1ff00[9] ^ ((lay < 4) ? r1ff00[lay] : 1'b0);
-wire tile_flipy = r1ff00[9] ^ (((lay < 4) ? r1ff00[lay] : 1'b0) & ~r1ff00[8]);
+wire [3:0] lay_idx = {1'b0, lay};
+wire tile_flipx = r1ff00[9] ^ ((lay < 4) ? r1ff00[lay_idx] : 1'b0);
+wire tile_flipy = r1ff00[9] ^ (((lay < 4) ? r1ff00[lay_idx] : 1'b0) & ~r1ff00[8]);
 wire [31:0] nacc_zoom = xacc + xstep;
 wire [9:0] nsx_zoom = nacc_zoom[29:20];
 wire [8:0] text_srcx = r1ff00[9] ? (9'd511 - x[8:0]) : x[8:0];
@@ -159,8 +160,9 @@ function automatic clip_vis(input [8:0] xx, input [8:0] yy,
     clip_vis = !en || ((|hit) ^ outp);
 endfunction
 
-// text layer name address: page from $1FF5C bits 7:4 (<<11 words)
-wire [15:0] text_page_base = {(r1ff5c >> 4) & 16'h001f, 11'b0};
+// text layer name address: page from $1FF5C bits 7:4 (<<11 words).  Bit 8 is
+// reserved and must not alias the text name table into the upper half of VRAM.
+wire [15:0] text_page_base = {1'b0, r1ff5c[7:4], 11'b0};
 // text char gfx base: bank bits 2:0 of $1FF5C, 16 words/char
 wire [15:0] text_bank_base = {r1ff5c[2:0], 13'b0};
 
@@ -204,8 +206,8 @@ always @(posedge clk) begin
                     logic signed [10:0] ydest;
                     logic signed [10:0] xcenter;
                     logic signed [10:0] ycenter;
-                    fx = r1ff00[9] ^ r1ff00[lay];
-                    fy = r1ff00[9] ^ (r1ff00[lay] & ~r1ff00[8]);
+                    fx = r1ff00[9] ^ r1ff00[lay_idx];
+                    fy = r1ff00[9] ^ (r1ff00[lay_idx] & ~r1ff00[8]);
                     zy = (zoomy[lay][11:0] < 12'h080) ? 12'h080 : zoomy[lay][11:0];
                     zx = (zoomx[lay][11:0] < 12'h080) ? 12'h080 : zoomx[lay][11:0];
                     scale_zx <= zx;
@@ -250,12 +252,13 @@ always @(posedge clk) begin
                     use_rowsel <= 0;
                     rowscroll_add <= 0;
                     // rowscroll/rowselect fetch for NBG2/3
-                    if (!r1ff04[lay+2] && (r1ff04[lay-2] | r1ff04[lay])) begin
+                    if (!r1ff04[lay_idx+4'd2] &&
+                        (r1ff04[lay_idx-4'd2] | r1ff04[lay_idx])) begin
                         // Rowselect is a distinct table at +0x200. If row
                         // scroll is off, fetch rowselect directly here.
                         vram_addr <= {r1ff04[15:10], 10'b0} +
                                      (lay == 3 ? 16'h0100 : 16'h0000) +
-                                     (r1ff04[lay-2] ? 16'h0000 : 16'h0200) +
+                                     (r1ff04[lay_idx-4'd2] ? 16'h0000 : 16'h0200) +
                                      {7'b0, ylookup};
                         tst <= T_ROWTAB1;
                     end
@@ -299,10 +302,10 @@ always @(posedge clk) begin
             tst <= T_ROWTAB2;
         end
         T_ROWTAB2: begin
-            if (r1ff04[lay-2] && !r1ff04[lay+2])
+            if (r1ff04[lay_idx-4'd2] && !r1ff04[lay_idx+4'd2])
                 rowscroll_add <= vram_rdata & 16'h3ff;
-            if (r1ff04[lay] && !r1ff04[lay+2]) begin
-                if (r1ff04[lay-2]) begin
+            if (r1ff04[lay_idx] && !r1ff04[lay_idx+4'd2]) begin
+                if (r1ff04[lay_idx-4'd2]) begin
                     vram_addr <= {r1ff04[15:10], 10'b0} + 16'h0200 +
                                  (lay == 3 ? 16'h0100 : 16'h0000) +
                                  {7'b0, (tile_flipy ? (9'd223-line) : line)};
@@ -378,7 +381,7 @@ always @(posedge clk) begin
                 pen = row[{nib[3:1], 3'b000} + (nib[0] ? 3'd0 : 3'd4) +: 4];
             end
             lb_we    <= 1'b1;
-            lb_layer <= lay + 1;   // NBG0 = layer1
+            lb_layer <= lay + 3'd1;   // NBG0 = layer1
             lb_x     <= x[8:0];
             // clip window: $1FF02 bit (11+bg) enable / (6+bg) clip-out;
             // $1FF06 nibble bg selects rects 0-3

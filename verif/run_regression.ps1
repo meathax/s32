@@ -187,6 +187,22 @@ function Run-HdlTest {
     Assert-Marker $output $Marker $Name
 }
 
+function Run-HdlCompile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string[]]$Sources,
+        [Parameter(Mandatory = $true)][string]$Marker,
+        [string[]]$Defines = @()
+    )
+
+    $library = New-WorkLibrary $Name
+    $arguments = @("-sv", "-work", $library)
+    foreach ($define in $Defines) { $arguments += "+define+$define" }
+    $arguments += Resolve-Sources $Sources
+    [void](Invoke-NativeCapture $script:Vlog $arguments "vlog ($Name)")
+    $script:Summary.Add($Marker)
+    Write-RunLine $Marker
+}
 function Run-SoundZ80Test {
     $name = "t30_soundsys_z80"
     $library = New-WorkLibrary $name
@@ -274,7 +290,9 @@ function Run-JT12ResetTest {
         }
     }
     $sources = @($jt12Sources) + (Resolve-Sources @("verif/common/tb_jt12_reset.sv"))
-    [void](Invoke-NativeCapture $script:Vlog (@("-sv", "-work", $library) + $sources) "vlog ($name)")
+    [void](Invoke-NativeCapture $script:Vlog (@(
+        "-sv", "-work", $library, "+define+S32_JT12_MLAB_SHIFTS"
+    ) + $sources) "vlog ($name)")
 
     $testDirectory = Split-Path -Parent $library
     $output = @(Invoke-NativeCapture $script:Vsim @(
@@ -287,7 +305,7 @@ function Run-JT12ResetTest {
 }
 
 function Write-Tier {    param([int]$Number, [string]$Description)
-    Write-RunLine ("`n[{0}/35] {1}" -f $Number, $Description)
+    Write-RunLine ("`n[{0}/38] {1}" -f $Number, $Description)
 }
 
 function Run-Differential {
@@ -419,13 +437,23 @@ try {
     Run-HdlTest "t07_v60_strfs" "tb_v60_strfs" ($V60Sources + "verif/v60/tb_v60_strfs.sv") "V60 STRFS PASS"
     Run-HdlTest "t07_v60_fp" "tb_v60_fp" ($V60Sources + "verif/v60/tb_v60_fp.sv") "V60 FP PASS"
     Run-HdlTest "t07_v60_fpdecode" "tb_v60_fpdecode" ($V60Sources + "verif/v60/tb_v60_fpdecode.sv") "V60 FPDECODE PASS"
+    Run-HdlTest "t07_v60_no_fp" "tb_v60_no_fp" ($V60Sources + "verif/v60/tb_v60_no_fp.sv") "V60 NO-FP PASS" @("S32_V60_NO_FP")
 
-    Write-Tier 8 "Holo release contract + GA2 compatibility boot path"
+    Write-Tier 8 "release contracts + exact Golden Axe profile boot/cache"
     $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_holo_release.py") "Holo release MRA check")
     Assert-Marker $releaseOutput "HOLO RELEASE MRA PASS" "Holo release MRA check"
     $ga2MraOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 compatibility MRA check")
     Assert-Marker $ga2MraOutput "GA2 COMPAT MRA PASS" "GA2 compatibility MRA check"
-    Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY") @("-novopt")
+    Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @(
+        "SIMULATION", "S32_GOLDENAXE_ONLY", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY",
+        "S32_V60_NO_FP", "S32_RELEASE_MINIMAL"
+    ) @("-novopt")
+    Run-HdlTest "t08_ga_rom_cache" "tb_ga_rom_cache" @(
+        "rtl/s32_pkg.sv", "rtl/s32_core.sv", "verif/common/tb_ga_rom_cache.sv"
+    ) "PASS: Golden Axe ROM cache directed/reference tests passed" @(
+        "SIMULATION", "S32_GOLDENAXE_ONLY", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY",
+        "S32_V60_NO_FP", "S32_RELEASE_MINIMAL"
+    )
 
     Write-Tier 9 "framebuffer interface directed test (runs / shadow RMW / erase / read)"
     Run-HdlTest "t09_fb_if" "tb_fb_if" @("rtl/mem/s32_fb_if.sv", "verif/common/tb_fb_if.sv") "FB IF PASS"
@@ -493,8 +521,11 @@ try {
     Write-Tier 24 "byte-wide true-dual-port BRAM timing / hold / collision semantics"
     Run-HdlTest "t24_byte_dpram" "tb_byte_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_byte_dpram.sv") "BYTE DPRAM PASS"
 
-    Write-Tier 25 "V25 HLE mailbox BRAM timing / wakeup / protection overlays"
+    Write-Tier 25 "V25 mailbox BRAM + production MLAB FIFO profile"
     Run-HdlTest "t25_v25_dpram" "tb_v25_dpram" @("rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv", "rtl/prot/s32_prot.sv", "verif/common/tb_v25_dpram.sv") "V25 DPRAM PASS"
+    Run-HdlCompile "t25_v25_mlab_fifo" @(
+        "rtl/cpu/v25/s80x86/rtl/Fifo.sv"
+    ) "V25 MLAB FIFO COMPILE PASS" @("S32_V25_MLAB_FIFO")
 
     Write-Tier 26 "SDRAM CL2 capture / row-open ROM write throughput / burst ordering"
     Run-HdlTest "t26_sdram" "tb_sdram" @("rtl/mem/sdram.sv", "verif/common/tb_sdram.sv") "SDRAM CAPTURE PASS"
@@ -507,10 +538,16 @@ try {
     Write-Tier 28 "interrupt controller reset / source+ack collision / timers / doorbell"
     Run-HdlTest "t28_intc" "tb_intc" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_intc.sv") "INTC PASS"
 
-    Write-Tier 29 "audio route arithmetic width / stereo mapping / saturation"
+    Write-Tier 29 "audio route arithmetic + generic/Golden Axe differential"
     Run-HdlTest "t29_audio_mix" "tb_audio_mix" @("rtl/audio/s32_audio_mix.sv", "verif/common/tb_audio_mix.sv") "AUDIO MIX PASS"
+    Run-HdlTest "t29_audio_mix_diff_generic" "tb_audio_mix_diff" @(
+        "rtl/audio/s32_audio_mix.sv", "verif/common/tb_audio_mix_diff.sv"
+    ) "PASS: audio mixer differential checks=20012"
+    Run-HdlTest "t29_audio_mix_diff_ga" "tb_audio_mix_diff" @(
+        "rtl/audio/s32_audio_mix.sv", "verif/common/tb_audio_mix_diff.sv"
+    ) "PASS: audio mixer differential checks=20012" @("S32_GOLDENAXE_ONLY")
 
-    Write-Tier 30 "sound map/bank/IRQ/CNT2 reset + production T80 RF5C68 boot"
+    Write-Tier 30 "sound map/T80 boot + production JT12 MLAB-shift reset"
     Run-HdlTest "t30_soundsys_bus" "tb_soundsys_bus" @(
         "rtl/s32_pkg.sv", "rtl/video/s32_big_dpram.sv",
         "rtl/audio/s32_rf5c68.sv", "rtl/audio/s32_multipcm.sv",

@@ -1,6 +1,7 @@
 # Root-level local audit/build transcripts
 /*.log
 /*.err.log
+/*.pid
 
 /audit.md
 # Scratch/reference material used during design research — not part of the core.
@@ -9,6 +10,7 @@ undefined/
 scratch/
 roms/
 /docs/
+/reference/
 *.tmp
 
 # Build outputs (Quartus / simulation), for later development phases

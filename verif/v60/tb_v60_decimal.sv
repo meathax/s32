@@ -24,6 +24,7 @@ wire [1:0]  m_be;
 
 s32_v60 #(.START_PC(32'h00000000)) cpu (
     .clk(clk), .ce(1'b1), .rst(rst),
+    .if_req(), .if_addr(), .if_data(64'd0), .if_ack(1'b0),
     .bus_req(c_req), .bus_we(c_we), .bus_addr(c_addr), .bus_size(c_size),
     .bus_wdata(c_wdata), .bus_rdata(c_rdata), .bus_ack(c_ack),
     .irq_n(1'b1), .irq_vector(8'h00), .irq_ack(), .nmi_n(1'b1),
@@ -87,9 +88,28 @@ task check16(input [15:0] got, input [15:0] want, input [63:0] name);
     end
 endtask
 
+function automatic [7:0] ref_bin2bcd(input [6:0] v);
+    integer q, r;
+    begin
+        q = v / 10;
+        r = v % 10;
+        ref_bin2bcd = {q[3:0], r[3:0]};
+    end
+endfunction
+
 integer i;
 initial begin
     for (i = 0; i < 32768; i = i + 1) ram[i] = 16'h0000;
+
+    // Exhaust the helper's complete seven-bit input space.  The optimized
+    // implementation shares one /10 quotient and derives the remainder.
+    for (i = 0; i < 128; i = i + 1) begin
+        if (cpu.bin2bcd(i[6:0]) !== ref_bin2bcd(i[6:0])) begin
+            errors = errors + 1;
+            $display("  FAIL bin2bcd(%0d) got=%02x want=%02x",
+                     i, cpu.bin2bcd(i[6:0]), ref_bin2bcd(i[6:0]));
+        end
+    end
 
     pc_a = 0;
     movw_imm_reg(32'h0000_F000, 5'd31);              // SP

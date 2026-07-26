@@ -61,15 +61,24 @@ vvp /tmp/s32_v60_fp | grep -q "V60 FP PASS" && echo "V60 FP: PASS" || { echo "V6
 iverilog -g2012 -o /tmp/s32_v60_fpdecode \
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_fpdecode.sv
 vvp /tmp/s32_v60_fpdecode | grep -q "V60 FPDECODE PASS" && echo "V60 FPDECODE: PASS" || { echo "V60 FPDECODE: FAIL"; exit 1; }
-echo "[8/35] GA2 release-profile boot path (V25 wakeup / VRAM+palette / sprite list / vblank IRQ)"
+iverilog -g2012 -DS32_V60_NO_FP -o /tmp/s32_v60_no_fp \
+  rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_no_fp.sv
+vvp /tmp/s32_v60_no_fp | grep -q "V60 NO-FP PASS" && echo "V60 NO-FP: PASS" || { echo "V60 NO-FP: FAIL"; exit 1; }
+echo "[8/35] release contracts + exact Golden Axe profile boot/cache"
 python3 verif/check_holo_release.py | grep -q "HOLO RELEASE MRA PASS" || { echo "HOLO RELEASE MRA: FAIL"; exit 1; }
 python3 verif/check_ga2_release.py | grep -q "GA2 COMPAT MRA PASS" || { echo "GA2 COMPAT MRA: FAIL"; exit 1; }
-iverilog -g2012 -DSIMULATION -DS32_SYSTEM32_ONLY -DS32_GA2_ONLY -o /tmp/s32_ga2 \
+iverilog -g2012 -DSIMULATION -DS32_GOLDENAXE_ONLY -DS32_SYSTEM32_ONLY -DS32_GA2_ONLY \
+  -DS32_V60_NO_FP -DS32_RELEASE_MINIMAL -o /tmp/s32_ga2 \
   rtl/s32_pkg.sv rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv \
   rtl/video/*.sv rtl/audio/s32_rf5c68.sv rtl/audio/s32_multipcm.sv \
   rtl/audio/s32_audio_mix.sv rtl/audio/s32_soundsys.sv rtl/io/s32_io.sv rtl/prot/s32_prot.sv \
   verif/common/jt12_stub.v rtl/s32_core.sv verif/common/tb_core_ga2path.sv
 vvp /tmp/s32_ga2 | grep -q "GA2 PATH PASS" && echo "GA2 PATH: PASS" || { echo "GA2 PATH: FAIL"; exit 1; }
+iverilog -g2012 -DSIMULATION -DS32_GOLDENAXE_ONLY -DS32_SYSTEM32_ONLY -DS32_GA2_ONLY \
+  -DS32_V60_NO_FP -DS32_RELEASE_MINIMAL -s tb_ga_rom_cache -o /tmp/s32_ga_rom_cache \
+  rtl/s32_pkg.sv rtl/s32_core.sv verif/common/tb_ga_rom_cache.sv
+vvp /tmp/s32_ga_rom_cache | grep -q "PASS: Golden Axe ROM cache directed/reference tests passed" && \
+  echo "GOLDEN AXE ROM CACHE: PASS" || { echo "GOLDEN AXE ROM CACHE: FAIL"; exit 1; }
 echo "[9/35] framebuffer interface directed test (runs / shadow RMW / erase / read)"
 iverilog -g2012 -o /tmp/s32_fbif rtl/mem/s32_fb_if.sv verif/common/tb_fb_if.sv
 vvp /tmp/s32_fbif | grep -q "FB IF PASS" && echo "FB IF: PASS" || { echo "FB IF: FAIL"; exit 1; }
@@ -138,11 +147,14 @@ echo "[24/35] byte-wide true-dual-port BRAM timing / hold / collision semantics"
 iverilog -g2012 -s tb_byte_dpram -o /tmp/s32_byte_dpram \
   rtl/video/s32_big_dpram.sv verif/common/tb_byte_dpram.sv
 vvp /tmp/s32_byte_dpram | grep -q "BYTE DPRAM PASS" && echo "BYTE DPRAM: PASS" || { echo "BYTE DPRAM: FAIL"; exit 1; }
-echo "[25/35] V25 HLE mailbox BRAM timing / wakeup / protection overlays"
+echo "[25/35] V25 mailbox BRAM + production MLAB FIFO profile"
 iverilog -g2012 -s tb_v25_dpram -o /tmp/s32_v25_dpram \
   rtl/s32_pkg.sv rtl/video/s32_big_dpram.sv rtl/prot/s32_prot.sv \
   verif/common/tb_v25_dpram.sv
 vvp /tmp/s32_v25_dpram | grep -q "V25 DPRAM PASS" && echo "V25 DPRAM: PASS" || { echo "V25 DPRAM: FAIL"; exit 1; }
+iverilog -g2012 -DS32_V25_MLAB_FIFO -s Fifo -o /tmp/s32_v25_mlab_fifo \
+  rtl/cpu/v25/s80x86/rtl/Fifo.sv
+echo "V25 MLAB FIFO COMPILE: PASS"
 echo "[26/35] SDRAM CL2 centred input capture / first-word freshness / burst ordering"
 iverilog -g2012 -s tb_sdram -o /tmp/s32_sdram \
   rtl/mem/sdram.sv verif/common/tb_sdram.sv
@@ -160,17 +172,33 @@ echo "[28/35] interrupt controller reset / source+ack collision / timers / doorb
 iverilog -g2012 -s tb_intc -o /tmp/s32_intc \
   rtl/s32_pkg.sv rtl/io/s32_io.sv verif/common/tb_intc.sv
 vvp /tmp/s32_intc | grep -q "INTC PASS" && echo "INTC: PASS" || { echo "INTC: FAIL"; exit 1; }
-echo "[29/35] audio route arithmetic width / stereo mapping / saturation"
+echo "[29/35] audio route arithmetic + generic/Golden Axe differential"
 iverilog -g2012 -s tb_audio_mix -o /tmp/s32_audio_mix \
   rtl/audio/s32_audio_mix.sv verif/common/tb_audio_mix.sv
 vvp /tmp/s32_audio_mix | grep -q "AUDIO MIX PASS" && echo "AUDIO MIX: PASS" || { echo "AUDIO MIX: FAIL"; exit 1; }
-echo "[30/35] sound map/bank/IRQ/CNT2 reset"
+iverilog -g2012 -s tb_audio_mix_diff -o /tmp/s32_audio_mix_diff_generic \
+  rtl/audio/s32_audio_mix.sv verif/common/tb_audio_mix_diff.sv
+vvp /tmp/s32_audio_mix_diff_generic | grep -q "PASS: audio mixer differential checks=20012" && \
+  echo "AUDIO MIX DIFFERENTIAL (GENERIC): PASS" || { echo "AUDIO MIX DIFFERENTIAL (GENERIC): FAIL"; exit 1; }
+iverilog -g2012 -DS32_GOLDENAXE_ONLY -s tb_audio_mix_diff -o /tmp/s32_audio_mix_diff_ga \
+  rtl/audio/s32_audio_mix.sv verif/common/tb_audio_mix_diff.sv
+vvp /tmp/s32_audio_mix_diff_ga | grep -q "PASS: audio mixer differential checks=20012" && \
+  echo "AUDIO MIX DIFFERENTIAL (GOLDEN AXE): PASS" || { echo "AUDIO MIX DIFFERENTIAL (GOLDEN AXE): FAIL"; exit 1; }
+echo "[30/35] sound map + production JT12 MLAB-shift reset"
 iverilog -g2012 -DSIMULATION -o /tmp/s32_soundsys_bus \
   rtl/s32_pkg.sv rtl/video/s32_big_dpram.sv \
   rtl/audio/s32_rf5c68.sv rtl/audio/s32_multipcm.sv \
   rtl/audio/s32_audio_mix.sv rtl/audio/s32_soundsys.sv \
   verif/common/jt12_stub.v verif/common/tb_soundsys_bus.sv
 vvp /tmp/s32_soundsys_bus | grep -q "SOUNDSYS BUS PASS" && echo "SOUNDSYS BUS: PASS" || { echo "SOUNDSYS BUS: FAIL"; exit 1; }
+jt12_sources=$(sed -n 's/.*"\([^"]*\)".*/rtl\/audio\/jt12\/\1/p' rtl/audio/jt12/jt12.qip)
+# QIP paths contain no whitespace; intentional splitting supplies one source per argument.
+# shellcheck disable=SC2086
+iverilog -g2012 -DS32_JT12_MLAB_SHIFTS -s tb_jt12_reset -o /tmp/s32_jt12_reset \
+  $jt12_sources verif/common/tb_jt12_reset.sv
+vvp /tmp/s32_jt12_reset | grep -q "JT12 RESET PASS" && echo "JT12 MLAB-SHIFT RESET: PASS" || \
+  { echo "JT12 MLAB-SHIFT RESET: FAIL"; exit 1; }
+unset jt12_sources
 echo "[31/35] MAME-backed MultiPCM descriptor / pitch / pan / loop / ACK semantics"
 iverilog -g2012 -o /tmp/s32_multipcm \
   rtl/audio/s32_multipcm.sv verif/common/tb_multipcm.sv
