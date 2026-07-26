@@ -18,6 +18,11 @@
 //    +P1LEN<n>=<n>   event length in frames, default 1
 //    +P1MASK<n>=<h>  P1A bits to pull low: L/R/U/D=80/40/20/10,
 //                    B3/B2/B1 (Magic/Jump/Attack)=04/02/01
+//    +ARABPERFAT=<f>  first Arabian Fight frame-boundary performance sample
+//    +ARABPERFN=<n>   consecutive samples; each must be at FE4244/FE4248
+//    +ARABHEAVYAT=<f> first field in the heavy-sprite recurrence window
+//    +ARABHEAVYN=<n>  consecutive fields to inspect (default 6)
+//    +ARABHEAVYMIN=<n> required fields with >=1400 sprite draw runs (default 3)
 //
 //  This is a diagnostic, not a pass/fail tier: it reports boot progress
 //  (PC movement, RAM/VRAM/palette/sprite/io write counts, IRQs taken,
@@ -36,9 +41,18 @@ always #5.175 clk_ram = ~clk_ram;
 always @(posedge clk_sys) clk_v25 <= ~clk_v25;
 
 // clock enables
+// +CPUDIV=<1..3> is a simulation-only cause-isolation control. The production
+// System 32 cadence is 3; 2/1 deliberately overclock the V60 to prove whether
+// a visible failure is caused by missed CPU-side frame work rather than video.
 reg ce_cpu = 0;  reg [1:0] cdiv = 0;
+integer cpu_div;
+initial begin
+    if (!$value$plusargs("CPUDIV=%d", cpu_div)) cpu_div = 3;
+    if (cpu_div < 1 || cpu_div > 3)
+        $fatal(1, "ROMBOOT CPUDIV must be 1..3, got %0d", cpu_div);
+end
 always @(posedge clk_sys) begin
-    cdiv <= (cdiv == 2) ? 2'd0 : cdiv + 1'd1;
+    cdiv <= (cdiv == cpu_div - 1) ? 2'd0 : cdiv + 1'd1;
     ce_cpu <= (cdiv == 0);
 end
 reg ce_z80 = 0;  reg [2:0] zdiv = 0;
@@ -651,6 +665,14 @@ integer sprlog;
 initial if (!$value$plusargs("SPRLOG=%d", sprlog)) sprlog = 0;
 reg [31:0] spr_px_cnt, spr_px_latch;
 reg [31:0] spr_draw_seen;            // fb_wr_start pulses this frame (# runs)
+integer arab_heavy_at, arab_heavy_n, arab_heavy_min;
+integer arab_heavy_samples = 0, arab_heavy_count = 0;
+reg arab_heavy_done = 0;
+initial begin
+    if (!$value$plusargs("ARABHEAVYAT=%d", arab_heavy_at)) arab_heavy_at = -1;
+    if (!$value$plusargs("ARABHEAVYN=%d", arab_heavy_n)) arab_heavy_n = 6;
+    if (!$value$plusargs("ARABHEAVYMIN=%d", arab_heavy_min)) arab_heavy_min = 3;
+end
 always @(posedge clk_ram) begin
     if (core.sprite.fb_wr_valid) spr_px_cnt <= spr_px_cnt + 1'd1;
     if (core.sprite.fb_wr_start) spr_draw_seen <= spr_draw_seen + 1'd1;
@@ -668,6 +690,23 @@ always @(posedge clk_sys) begin
         // (0=R_IDLE means render finished; 5..23 = still walking list = overran).
         if (sprlog) $display("[spr] f=%0d disp_buf=%0d rs=%0d px=%0d runs=%0d",
             cur_frame, core.sprite.disp_buf, core.sprite.rs, spr_px_cnt, spr_draw_seen);
+        if (arab_heavy_at >= 0 && cur_frame >= arab_heavy_at &&
+            cur_frame < arab_heavy_at + arab_heavy_n) begin
+            arab_heavy_samples = arab_heavy_samples + 1;
+            if (spr_draw_seen >= 1400) arab_heavy_count = arab_heavy_count + 1;
+            $display("[arab-heavy] f=%0d runs=%0d heavy=%0d count=%0d",
+                cur_frame, spr_draw_seen, spr_draw_seen >= 1400,
+                arab_heavy_count);
+            if (cur_frame == arab_heavy_at + arab_heavy_n - 1) begin
+                arab_heavy_done = 1'b1;
+                if (arab_heavy_count < arab_heavy_min)
+                    $fatal(1, "ARABIAN FIGHT HEAVY FAIL: only %0d/%0d fields reached 1400 runs (need %0d)",
+                        arab_heavy_count, arab_heavy_samples, arab_heavy_min);
+                else
+                    $display("ARABIAN FIGHT HEAVY PASS: %0d/%0d fields reached 1400 runs (need %0d)",
+                        arab_heavy_count, arab_heavy_samples, arab_heavy_min);
+            end
+        end
         spr_px_latch <= spr_px_cnt;
         spr_px_cnt   <= 0;
         spr_draw_seen <= 0;
@@ -1124,9 +1163,14 @@ always @(posedge clk_sys) begin
 end
 
 integer frames, f, p1_ev;
+integer arab_perf_at, arab_perf_n;
+integer arab_perf_samples = 0, arab_perf_misses = 0;
+reg arab_perf_done = 0;
 reg playmagic = 0, playfight = 0;
 initial begin
     if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
+    if (!$value$plusargs("ARABPERFAT=%d", arab_perf_at)) arab_perf_at = -1;
+    if (!$value$plusargs("ARABPERFN=%d", arab_perf_n)) arab_perf_n = 13;
     playmagic = $test$plusargs("PLAYMAGIC");
     playfight = $test$plusargs("PLAYFIGHT");
     // Model the long board ROM-load reset: this fully flushes the production
@@ -1193,6 +1237,27 @@ initial begin
             if (f >= 700 && (f % 25) < 5) in_p1a_r[0] = 1'b0;           // Button1 attack
         end
         repeat (804000) @(posedge clk_sys);
+        if (arab_perf_at >= 0 && f >= arab_perf_at &&
+            f < arab_perf_at + arab_perf_n) begin
+            arab_perf_samples = arab_perf_samples + 1;
+            if (core.v60.dbg_pc != 32'h00fe4244 &&
+                core.v60.dbg_pc != 32'h00fe4248)
+                arab_perf_misses = arab_perf_misses + 1;
+            $display("[arab-perf] f=%0d pc=%08x idle=%0d misses=%0d",
+                f, core.v60.dbg_pc,
+                core.v60.dbg_pc == 32'h00fe4244 ||
+                core.v60.dbg_pc == 32'h00fe4248,
+                arab_perf_misses);
+            if (f == arab_perf_at + arab_perf_n - 1) begin
+                arab_perf_done = 1'b1;
+                if (arab_perf_misses != 0)
+                    $fatal(1, "ARABIAN FIGHT PERF FAIL: %0d/%0d frame markers missed the idle loop",
+                        arab_perf_misses, arab_perf_samples);
+                else
+                    $display("ARABIAN FIGHT PERF PASS: %0d/%0d frame markers reached the idle loop",
+                        arab_perf_samples, arab_perf_samples);
+            end
+        end
         $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
             f, core.v60.dbg_pc, core.v60.dbg_halted,
             n_wram_wr, n_vram_wr, n_pal_wr, n_spr_wr, n_io_wr, n_intc_wr,
@@ -1262,6 +1327,12 @@ initial begin
         $fatal(1, "ROMBOOT P1 start was never returned on SERVICE12 bit 4");
     if (p1_event_count > 0 && p1a_active_samples == 0)
         $fatal(1, "ROMBOOT P1 digital event was never returned on P1A");
+    if (arab_perf_at >= 0 && !arab_perf_done)
+        $fatal(1, "ARABIAN FIGHT PERF window was not completed: at=%0d frames=%0d samples=%0d",
+            arab_perf_at, arab_perf_n, arab_perf_samples);
+    if (arab_heavy_at >= 0 && !arab_heavy_done)
+        $fatal(1, "ARABIAN FIGHT HEAVY window was not completed: at=%0d fields=%0d samples=%0d",
+            arab_heavy_at, arab_heavy_n, arab_heavy_samples);
 `ifdef S32_REAL_FB_SIM
     if (fb_deadline_fail)
         $fatal(1, "GA2 production framebuffer reported a service deadline failure");

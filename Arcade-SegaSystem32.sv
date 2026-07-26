@@ -241,7 +241,14 @@ wire [15:0] cpu_ce_inc = 16'd21848;
 // consecutive clk_sys edges.
 wire [1:0]  cpu_turbo   = status[16:15];             // 0=Normal,1=x2,2=x3,3=x4
 wire [2:0]  cpu_mult    = {1'b0, cpu_turbo} + 3'd1;  // 1..4
-wire [20:0] cpu_ce_full = (is_multi32 ? 21'd27127 : 21'd21848) * cpu_mult;
+wire [20:0] cpu_ce_base = is_multi32 ? 21'd27127 : 21'd21848;
+// Arabian Fight overruns its per-field object work because this non-pipelined
+// V60 model retires the attract loop at 12.49 clocks/instruction.  Give only
+// that board a measured 3/2 Normal-rate compensation; explicit Turbo choices
+// and every other title retain their existing behavior.
+wire [20:0] cpu_ce_full = cpu_ce_base * cpu_mult +
+                         ((active_board.v25_table && cpu_turbo == 2'd0)
+                          ? (cpu_ce_base >> 1) : 21'd0);
 wire [15:0] cpu_ce_inc  = (cpu_ce_full > 21'd65535) ? 16'd65535 : cpu_ce_full[15:0];
 `endif
 always @(posedge clk_sys) begin
