@@ -1,4 +1,4 @@
-Built cores avalible at https://www.patreon.com/cw/Meathax
+Built cores avalible (for free) at https://www.patreon.com/cw/Meathax
 
 # This core is 100% AI coded
 # Sega System 32 / Multi 32 for MiSTer FPGA
