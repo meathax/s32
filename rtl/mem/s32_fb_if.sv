@@ -69,10 +69,9 @@ module s32_fb_if #(
 // a synchronous 64-bit flush read port.  Keeping this out of flops removes the
 // 8,192-register run buffer and its large read mux from the integrated map.
 reg [511:0] run_msk;               // which pixels this run actually wrote
-// Two fetched/composed lines. Scanout reads one bank while DDR fills the
+// Two fetched/composed lines. Scanout reads one M10K bank while DDR fills the
 // other, allowing the next line to be requested near the start of the current
 // line instead of racing the renderer during the short horizontal blank.
-reg [63:0]  line_buf [0:255];      // 2 x (512 px = 128 x 64-bit words)
 reg [8:0]   run_x0, run_xe;        // min / max written x
 reg [7:0]   run_y;
 reg [1:0]   run_bufsel;
@@ -84,14 +83,12 @@ reg         run_any;               // at least one pixel written
 // waits one clk_ram edge after disp_x changes before snapshotting all layer
 // pixels, so registering this read both aligns sprites with the tile layers
 // and prevents a deep clk_sys -> clk_ram path through the priority logic.
-reg [63:0] rd_word;
 reg  [1:0] rd_lane;
 reg        display_bank;
 reg        fill_bank;
 reg        line_ready;
-reg  [8:0] rd_x_d;
-wire       rd_line_start = (rd_x == 9'd0) && (rd_x_d != 9'd0);
-wire       scan_bank = (rd_line_start && line_ready) ? fill_bank : display_bank;
+wire       rd_line_publish = (rd_x == 9'd0) && line_ready;
+wire       scan_bank = rd_line_publish ? fill_bank : display_bank;
 
 // Resolve Alien 3's alternating player fields while the preceding field is
 // fetched from DDR, before acknowledging the completed line to scanout.
@@ -99,8 +96,8 @@ wire       scan_bank = (rd_line_start && line_ready) ? fill_bank : display_bank;
 // remains when a shadow RMW crosses an erased pixel.  For 0x7fff, retain the
 // preceding field's pixel while applying the newest field's shadow flag.  This
 // makes both player HUD/sight fields solid without dropping shadow semantics.
-// Keeping the composed result in line_buf removes both the second line RAM and
-// the transparency compare from the 96.6 MHz pixel-read path.
+// Keeping the composed result in the inactive line RAM removes both a second
+// scanout RAM and the transparency compare from the 96.6 MHz pixel-read path.
 function automatic [63:0] compose_line_word(
     input [63:0] newest,
     input [63:0] prior
@@ -128,26 +125,11 @@ function automatic [63:0] compose_line_word(
     end
 endfunction
 
-always @(posedge clk) begin
-    if (rst) begin
-        rd_word <= 64'd0;
-        rd_lane <= 2'd0;
-        rd_x_d <= 9'd0;
-    end
-    else begin
-        rd_word <= line_buf[{scan_bank, rd_x[8:2]}];
-        rd_lane <= rd_x[1:0];
-        rd_x_d <= rd_x;
-    end
-end
 reg rd_dual_latched;
-assign rd_pix = (rd_lane == 2'd0) ? rd_word[15:0]  :
-                (rd_lane == 2'd1) ? rd_word[31:16] :
-                (rd_lane == 2'd2) ? rd_word[47:32] : rd_word[63:48];
 
 // DDR engine
 typedef enum logic [3:0] { D_IDLE, D_WR_PF, D_WR, D_ER, D_RD, D_RD_W,
-                           D_RD_ALT, D_RD_ALT_W,
+                           D_RD_ALT, D_RD_ALT_W, D_RD_ALT_FLUSH,
                            D_SH_R, D_SH_RW, D_SH_W } dstate_t;
 dstate_t dst = D_IDLE;
 
@@ -159,6 +141,55 @@ reg [7:0]  dbe;
 reg [6:0]  beat, beats;
 reg [6:0]  rbeat;
 reg [1:0]  rd_buf_alt_latched;
+reg [63:0] compose_prior;
+reg  [6:0] compose_addr;
+reg        compose_valid;
+
+// Each bank is a true 128x64 simple-dual-port RAM. During the second Alien 3
+// field fetch, the inactive bank's read port feeds a one-beat RMW pipeline;
+// the active bank remains dedicated to scanout. Keeping the bank select
+// outside the memory array prevents Quartus from flattening the two lines into
+// 16,384 registers and more than 12,000 ALUTs.
+wire       compose_state = (dst == D_RD_ALT_W) ||
+                           (dst == D_RD_ALT_FLUSH);
+wire [6:0] line_raddr0 = (compose_state && !fill_bank) ? rbeat
+                                                       : rd_x[8:2];
+wire [6:0] line_raddr1 = (compose_state &&  fill_bank) ? rbeat
+                                                       : rd_x[8:2];
+wire [63:0] line_q0, line_q1;
+wire [63:0] fill_line_q = fill_bank ? line_q1 : line_q0;
+wire        line_direct_we = (dst == D_RD_W) && DDRAM_DOUT_READY;
+wire        line_compose_we = compose_state && compose_valid;
+wire        line_we = line_direct_we || line_compose_we;
+wire [6:0]  line_waddr = line_compose_we ? compose_addr : rbeat;
+wire [63:0] line_wdata = line_compose_we
+                       ? compose_line_word(fill_line_q, compose_prior)
+                       : DDRAM_DOUT;
+wire        line_we0 = line_we && !fill_bank;
+wire        line_we1 = line_we &&  fill_bank;
+
+s32_fb_line_ram line_ram0 (
+    .clk(clk), .wr_en(line_we0), .wr_addr(line_waddr),
+    .wr_data(line_wdata), .rd_addr(line_raddr0), .rd_q(line_q0)
+);
+s32_fb_line_ram line_ram1 (
+    .clk(clk), .wr_en(line_we1), .wr_addr(line_waddr),
+    .wr_data(line_wdata), .rd_addr(line_raddr1), .rd_q(line_q1)
+);
+
+wire [63:0] rd_word = scan_bank ? line_q1 : line_q0;
+assign rd_pix = (rd_lane == 2'd0) ? rd_word[15:0]  :
+                (rd_lane == 2'd1) ? rd_word[31:16] :
+                (rd_lane == 2'd2) ? rd_word[47:32] : rd_word[63:48];
+
+always @(posedge clk) begin
+    if (rst) begin
+        rd_lane <= 2'd0;
+    end
+    else begin
+        rd_lane <= rd_x[1:0];
+    end
+end
 
 function automatic [28:0] pix_addr(input [1:0] buf_i, input [7:0] y,
                                    input [6:0] x_word);
@@ -269,12 +300,18 @@ always @(posedge clk) begin
         display_bank <= 1'b0;
         fill_bank <= 1'b1;
         line_ready <= 1'b0;
+        compose_prior <= 64'd0;
+        compose_addr <= 7'd0;
+        compose_valid <= 1'b0;
     end
     else begin
+        // A one-cycle valid pulse makes the alternate-field RMW pipeline safe
+        // even when DDR inserts gaps between DOUT_READY beats.
+        compose_valid <= 1'b0;
         // Publish a completely fetched line only at the raster boundary. The
         // bank that is still being displayed is never modified underneath the
         // mixer, even if DDR completes very early in the preceding scanline.
-        if (rd_line_start && line_ready) begin
+        if (rd_line_publish) begin
             display_bank <= fill_bank;
             line_ready <= 1'b0;
         end
@@ -376,7 +413,6 @@ always @(posedge clk) begin
         end
         D_RD_W: begin
             if (DDRAM_DOUT_READY) begin
-                line_buf[{fill_bank, rbeat}] <= DDRAM_DOUT;
                 rbeat <= rbeat + 1'd1;
                 if (rbeat == 7'd127) begin
                     if (rd_dual_latched) begin
@@ -400,16 +436,21 @@ always @(posedge clk) begin
         end
         D_RD_ALT_W: begin
             if (DDRAM_DOUT_READY) begin
-                line_buf[{fill_bank, rbeat}] <= compose_line_word(
-                                                line_buf[{fill_bank, rbeat}],
-                                                DDRAM_DOUT);
+                compose_prior <= DDRAM_DOUT;
+                compose_addr <= rbeat;
+                compose_valid <= 1'b1;
                 rbeat <= rbeat + 1'd1;
                 if (rbeat == 7'd127) begin
-                    line_ready <= 1'b1;
-                    rd_ack <= 1'b1;
-                    dst <= D_IDLE;
+                    // The final current/prior pair is written on the following
+                    // edge after the synchronous RAM read has arrived.
+                    dst <= D_RD_ALT_FLUSH;
                 end
             end
+        end
+        D_RD_ALT_FLUSH: begin
+            line_ready <= 1'b1;
+            rd_ack <= 1'b1;
+            dst <= D_IDLE;
         end
         default: dst <= D_IDLE;
         endcase
@@ -419,6 +460,83 @@ always @(posedge clk) begin
         if (!er_req) er_ack <= 1'b0;
     end
 end
+
+endmodule
+
+// ---------------------------------------------------------------------------
+// 128 x 64 fetched-line RAM. Port A writes complete DDR words while port B is
+// used either by scanout or by the inactive-bank composition pipeline.
+// ---------------------------------------------------------------------------
+module s32_fb_line_ram (
+    input              clk,
+    input              wr_en,
+    input       [6:0]  wr_addr,
+    input      [63:0]  wr_data,
+    input       [6:0]  rd_addr,
+    output     [63:0]  rd_q
+);
+
+`ifdef ALTERA_RESERVED_QIS
+altsyncram ram (
+    .clock0(clk),
+    .address_a(wr_addr),
+    .data_a(wr_data),
+    .wren_a(wr_en),
+
+    .clock1(clk),
+    .address_b(rd_addr),
+    .q_b(rd_q),
+
+    .aclr0(1'b0),
+    .aclr1(1'b0),
+    .addressstall_a(1'b0),
+    .addressstall_b(1'b0),
+    .byteena_a(1'b1),
+    .clocken0(1'b1),
+    .clocken1(1'b1),
+    .clocken2(1'b1),
+    .clocken3(1'b1),
+    .eccstatus(),
+    .rden_a(1'b1),
+    .rden_b(1'b1)
+);
+defparam
+    ram.numwords_a = 128,
+    ram.widthad_a = 7,
+    ram.width_a = 64,
+    ram.numwords_b = 128,
+    ram.widthad_b = 7,
+    ram.width_b = 64,
+    ram.address_reg_b = "CLOCK1",
+    ram.clock_enable_input_a = "BYPASS",
+    ram.clock_enable_input_b = "BYPASS",
+    ram.clock_enable_output_b = "BYPASS",
+    ram.intended_device_family = "Cyclone V",
+    ram.lpm_type = "altsyncram",
+    ram.operation_mode = "DUAL_PORT",
+    ram.outdata_aclr_b = "NONE",
+    ram.outdata_reg_b = "UNREGISTERED",
+    ram.power_up_uninitialized = "TRUE",
+    ram.read_during_write_mode_mixed_ports = "DONT_CARE",
+    ram.width_byteena_a = 1;
+`else
+reg [63:0] mem [0:127];
+reg [63:0] rd_q_r;
+assign rd_q = rd_q_r;
+
+integer __line_init;
+initial begin
+    rd_q_r = 64'd0;
+    for (__line_init = 0; __line_init < 128; __line_init = __line_init + 1)
+        mem[__line_init] = 64'd0;
+end
+
+always @(posedge clk) begin
+    rd_q_r <= mem[rd_addr];
+    if (wr_en)
+        mem[wr_addr] <= wr_data;
+end
+`endif
 
 endmodule
 
