@@ -1367,6 +1367,7 @@ initial begin
             arab_entry_started = 1'b1;
             $display("[arab-entry] start f=%0d n1sx=%04x x=%0d jump=%0d raw=%0d",
                 f, core.tm_scrollx[1], arab_entry_x0, arab_jump_x, arab_raw_x);
+            $fflush();
         end
         if (arabentry && arab_entry_started && !arab_entry_done &&
             core.tm_zoomx[1] == 16'h0400 && core.tm_scrollx[1] >= 16'h0659) begin
@@ -1391,6 +1392,7 @@ initial begin
             else
                 $display("ARABIAN FIGHT ENTRY PASS: neutral-input player advanced %0d pixels between scene markers",
                     arab_entry_dx);
+            $fflush();
         end
         if (arab_perf_at >= 0 && f >= arab_perf_at &&
             f < arab_perf_at + arab_perf_n) begin
@@ -1460,6 +1462,10 @@ initial begin
         $display("   tpage: F40=%04x F42=%04x F44=%04x F46=%04x F5c=%04x r00=%04x",
             core.tm_pages[0], core.tm_pages[1], core.tm_pages[2], core.tm_pages[3],
             core.tilemap.r1ff5c, core.tm_r1ff00);
+        end
+        if (quiet && (f % 100) == 0) begin
+            $display("[progress] frame %0d", f);
+            $fflush();
         end
         rdreq_cnt = 0; kick_cnt = 0; spr_cmd_cnt = 0; srom_req_cnt = 0; spr_opq_cnt = 0;
         p1a_rd_cnt = 0; coin_rd_cnt = 0; start_rd_cnt = 0;
