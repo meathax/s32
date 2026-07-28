@@ -26,19 +26,20 @@ always #5 clk = ~clk;
 
 // DUT wires
 reg         wr_start = 0, wr_valid = 0, wr_end = 0, wr_shadow = 0;
-reg  [1:0]  wr_buf = 0;
+reg  [2:0]  wr_buf = 0;
 reg  [8:0]  wr_x = 0;
 reg  [7:0]  wr_y = 0;
 reg  [15:0] wr_pix = 0;
 wire        wr_busy;
 reg         er_req = 0;
-reg  [1:0]  er_buf = 0;
+reg  [2:0]  er_buf = 0;
 reg  [7:0]  er_y = 0;
 wire        er_ack;
 reg         rd_req = 0;
-reg  [1:0]  rd_buf = 0;
-reg  [1:0]  rd_buf_alt = 0;
-reg         rd_dual = 0;
+reg  [2:0]  rd_buf = 0;
+reg  [2:0]  rd_buf_alt = 0;
+reg  [2:0]  rd_buf_alt2 = 0;
+reg  [1:0]  rd_fields = 0;
 reg  [7:0]  rd_y = 0;
 wire        rd_ack;
 reg  [8:0]  rd_x = 0;
@@ -64,16 +65,17 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) dut (
     .wr_shadow(wr_shadow), .wr_busy(wr_busy),
     .er_req(er_req), .er_buf(er_buf), .er_y(er_y), .er_ack(er_ack),
     .rd_req(rd_req), .rd_buf(rd_buf), .rd_buf_alt(rd_buf_alt),
-    .rd_dual(rd_dual), .rd_y(rd_y), .rd_ack(rd_ack),
+    .rd_buf_alt2(rd_buf_alt2), .rd_fields(rd_fields),
+    .rd_y(rd_y), .rd_ack(rd_ack),
     .rd_x(rd_x), .rd_pix(rd_pix)
 );
 
 // DDR memory + burst engine
-reg [63:0] ddr [0:131071];   // 1MB window (offset from FB_BASE>>3)
+reg [63:0] ddr [0:262143];   // 2MB window (offset from FB_BASE>>3)
 integer di;
-initial for (di = 0; di < 131072; di = di + 1) ddr[di] = 64'h0;
+initial for (di = 0; di < 262144; di = di + 1) ddr[di] = 64'h0;
 
-wire [16:0] locaddr = DD_ADDR[16:0];  // FB_BASE>>3 = 0x6000000; low bits index
+wire [17:0] locaddr = DD_ADDR[17:0];  // FB_BASE>>3 = 0x6000000; low bits index
 integer errors = 0;
 integer write_accepts = 0;
 integer read_accepts = 0;
@@ -135,7 +137,7 @@ always @(negedge clk) begin
     end
 end
 
-reg [16:0] rd_a = 0;
+reg [17:0] rd_a = 0;
 reg  [7:0] rd_n = 0;
 reg  [3:0] rd_delay = 0;
 always @(posedge clk) begin
@@ -354,7 +356,7 @@ initial begin
     ddr[32768 + 7 * 128] = {16'hffff, 16'ha003, 16'ha002, 16'ha001};
     dual_read_start = read_accepts;
     rd_y <= 8'd7; rd_buf <= 2'd0; rd_buf_alt <= 2'd1;
-    rd_dual <= 1'b1; rd_req <= 1'b1;
+    rd_fields <= 2'd1; rd_req <= 1'b1;
     @(posedge rd_ack); rd_req <= 1'b0;
     wait (!rd_ack); repeat (2) @(posedge clk);
     if ((read_accepts - dual_read_start) != 2) begin
@@ -367,7 +369,7 @@ initial begin
     rd_x = 9'd1; @(posedge clk); #1; check(rd_pix, 16'ha002, 1);
     rd_x = 9'd2; @(posedge clk); #1; check(rd_pix, 16'h2003, 2);
     rd_x = 9'd3; @(posedge clk); #1; check(rd_pix, 16'hffff, 3);
-    rd_dual <= 1'b0;
+    rd_fields <= 2'd0;
 
     if (stalled_request_cycles == 0) begin
         errors = errors + 1;

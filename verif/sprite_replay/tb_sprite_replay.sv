@@ -90,7 +90,7 @@ s32_sprite #(.VERIFY_SROM(1'b1)) dut (
     .fb_busy(fb_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf),
     .fb_er_y(fb_er_y), .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf), .scan_buf(), .scan_buf_prev(), .scan_dual()
+    .disp_buf(disp_buf), .scan_buf(), .scan_buf_prev(), .scan_buf_prev2(), .scan_fields()
 );
 
 integer errors = 0;
@@ -182,7 +182,8 @@ s32_fb_ddr_model fb_model (
     .wr_pix(fb_wr_pix), .wr_end(fb_wr_end), .wr_shadow(fb_wr_shadow),
     .wr_busy(fb_busy),
     .er_req(fb_er_req), .er_buf(fb_er_buf), .er_y(fb_er_y), .er_ack(fb_er_ack),
-    .rd_req(1'b0), .rd_buf(2'd0), .rd_buf_alt(2'd0), .rd_dual(1'b0),
+    .rd_req(1'b0), .rd_buf(3'd0), .rd_buf_alt(3'd0), .rd_buf_alt2(3'd0),
+    .rd_fields(2'd0),
     .rd_y(8'd0), .rd_ack(),
     .rd_x(9'd0), .rd_pix(),
     .write_accepts(model_write_accepts), .read_accepts(model_read_accepts),

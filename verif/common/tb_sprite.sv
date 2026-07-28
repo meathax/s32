@@ -56,7 +56,7 @@ wire [8:0]  fbw_x;
 wire [7:0]  fbw_y;
 wire [15:0] fbw_pix;
 wire        fbe_req;
-wire [1:0]  fbe_buf;
+wire [2:0]  fbe_buf;
 wire [7:0]  fbe_y;
 reg         fbe_ack;
 always @(posedge clk) fbe_ack <= fbe_req;
@@ -133,7 +133,7 @@ s32_sprite #(.POST_VBLANK_CYCLES(4)) dut (
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(1'b0),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
-    .disp_buf(), .scan_buf(), .scan_buf_prev(), .scan_dual()
+    .disp_buf(), .scan_buf(), .scan_buf_prev(), .scan_buf_prev2(), .scan_fields()
 );
 
 // write one list entry (8 words at entry*8)

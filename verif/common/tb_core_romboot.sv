@@ -227,8 +227,9 @@ end
 // Framebuffer service.  The broad regression keeps the compact behavioral
 // memory; +define+S32_REAL_FB_SIM selects the production s32_fb_if plus a
 // deterministic MiSTer-style DDR model for Golden Axe qualification.
-wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req, fbr_dual;
-wire  [1:0] fbw_buf, fbe_buf, fbr_buf, fbr_buf_alt;
+wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req;
+wire  [1:0] fbr_fields;
+wire  [2:0] fbw_buf, fbe_buf, fbr_buf, fbr_buf_alt, fbr_buf_alt2;
 wire  [8:0] fbw_x, fbr_x;
 wire  [7:0] fbw_y, fbe_y, fbr_y;
 wire [15:0] fbw_pix;
@@ -237,9 +238,10 @@ wire        fbw_busy, fbe_ack, fbr_ack;
 wire [15:0] fbr_pix;
 
 integer fbr_accepts = 0;
-reg [1:0] fbr_buf_l;
-reg [1:0] fbr_buf_alt_l;
-reg       fbr_dual_l;
+reg [2:0] fbr_buf_l;
+reg [2:0] fbr_buf_alt_l;
+reg [2:0] fbr_buf_alt2_l;
+reg [1:0] fbr_fields_l;
 reg [7:0] fbr_y_l;
 reg fbr_req_d = 0, fbr_ack_h_d = 0;
 always @(posedge clk_ram) begin
@@ -248,7 +250,8 @@ always @(posedge clk_ram) begin
     if (fbr_req && !fbr_req_d) begin
         fbr_buf_l <= fbr_buf;
         fbr_buf_alt_l <= fbr_buf_alt;
-        fbr_dual_l <= fbr_dual;
+        fbr_buf_alt2_l <= fbr_buf_alt2;
+        fbr_fields_l <= fbr_fields;
         fbr_y_l   <= fbr_y;
     end
     if (fbr_ack && !fbr_ack_h_d)
@@ -267,7 +270,8 @@ s32_fb_ddr_model fb_service (
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
     .rd_req(fbr_req), .rd_buf(fbr_buf), .rd_buf_alt(fbr_buf_alt),
-    .rd_dual(fbr_dual), .rd_y(fbr_y), .rd_ack(fbr_ack),
+    .rd_buf_alt2(fbr_buf_alt2), .rd_fields(fbr_fields),
+    .rd_y(fbr_y), .rd_ack(fbr_ack),
     .rd_x(fbr_x), .rd_pix(fbr_pix),
     .write_accepts(fb_ddr_writes), .read_accepts(fb_ddr_reads),
     .line_acks(fb_line_acks),
@@ -275,9 +279,9 @@ s32_fb_ddr_model fb_service (
     .max_er_wait(fb_max_er_wait), .deadline_fail(fb_deadline_fail)
 );
 `else
-// Fast behavioral model: 4 buffers x 256 lines x 512 pixels.
-reg [15:0] fbmem [0:3][0:255][0:511];
-initial for (int b = 0; b < 4; b++)
+// Fast behavioral model: 8 buffers x 256 lines x 512 pixels.
+reg [15:0] fbmem [0:7][0:255][0:511];
+initial for (int b = 0; b < 8; b++)
     for (int y = 0; y < 256; y++)
         for (int x = 0; x < 512; x++) fbmem[b][y][x] = 16'hffff;
 reg fbe_ack_r = 0, fbr_ack_r = 0;
@@ -294,10 +298,15 @@ always @(posedge clk_ram) begin
     if (fbe_req && !fbe_ack_r)
         for (int x = 0; x < 512; x++) fbmem[fbe_buf][fbe_y][x] = 16'hffff;
 end
-wire [15:0] fbr_pix_new = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
-wire [15:0] fbr_pix_old = fbmem[fbr_buf_alt_l][fbr_y_l][fbr_x];
-assign fbr_pix = (fbr_dual_l && fbr_pix_new == 16'hffff)
-               ? fbr_pix_old : fbr_pix_new;
+// Behavioural mirror of s32_fb_if's field compositor: each retained field
+// only fills what the newer ones left transparent.
+wire [15:0] fbr_pix_new  = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+wire [15:0] fbr_pix_old  = fbmem[fbr_buf_alt_l][fbr_y_l][fbr_x];
+wire [15:0] fbr_pix_old2 = fbmem[fbr_buf_alt2_l][fbr_y_l][fbr_x];
+wire [15:0] fbr_pix_1 = (fbr_fields_l >= 2'd1 && fbr_pix_new == 16'hffff)
+                      ? fbr_pix_old : fbr_pix_new;
+assign fbr_pix = (fbr_fields_l >= 2'd2 && fbr_pix_1 == 16'hffff)
+               ? fbr_pix_old2 : fbr_pix_1;
 `endif
 integer spr_px = 0;
 always @(posedge clk_ram) if (fbw_valid) spr_px = spr_px + 1;
@@ -432,7 +441,8 @@ s32_core core (
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
     .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_buf_alt(fbr_buf_alt),
-    .fb_rd_dual(fbr_dual), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
+    .fb_rd_buf_alt2(fbr_buf_alt2), .fb_rd_fields(fbr_fields),
+    .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
     .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
     .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),
     .eep_ld_wr(1'b0), .eep_ld_addr(6'h0), .eep_ld_data(16'h0), .eep_rd_addr(6'h0),

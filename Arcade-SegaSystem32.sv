@@ -203,12 +203,8 @@ localparam CONF_STR = {
 `endif
     "O[12],Pause,Off,On;",
 `ifndef S32_V25_GAME_ONLY
-`ifdef S32_ALIEN3_ONLY
-    // Status 00 is the dedicated cabinet default: both axes inverted.
-    "O[14:13],Analog Aim,Invert XY,Invert Y,Invert X,Normal;",
-`else
+    // Status 00 is direct stick sense on both axes for every profile.
     "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
-`endif
 `endif
     "-;",
     "R[0],Reset;",
@@ -502,8 +498,9 @@ sdram sdram (
 
 ////////////////////////////   FRAMEBUFFER   //////////////////////////////////
 wire        fbw_start, fbw_valid, fbw_end, fbw_shadow, fbw_busy;
-wire        fbe_req, fbe_ack, fbr_req, fbr_ack, fbr_dual;
-wire  [1:0] fbw_buf, fbe_buf, fbr_buf, fbr_buf_alt;
+wire        fbe_req, fbe_ack, fbr_req, fbr_ack;
+wire  [1:0] fbr_fields;
+wire  [2:0] fbw_buf, fbe_buf, fbr_buf, fbr_buf_alt, fbr_buf_alt2;
 wire  [8:0] fbw_x, fbr_x;
 wire  [7:0] fbw_y, fbe_y, fbr_y;
 wire [15:0] fbw_pix, fbr_pix;
@@ -519,7 +516,8 @@ s32_fb_if fb (
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
     .rd_req(fbr_req), .rd_buf(fbr_buf), .rd_buf_alt(fbr_buf_alt),
-    .rd_dual(fbr_dual), .rd_y(fbr_y), .rd_ack(fbr_ack),
+    .rd_buf_alt2(fbr_buf_alt2), .rd_fields(fbr_fields),
+    .rd_y(fbr_y), .rd_ack(fbr_ack),
     .rd_x(fbr_x), .rd_pix(fbr_pix)
 );
 
@@ -586,10 +584,11 @@ wire [7:0] core_p2a = alien3_gun_aim ? alien3_p2a : p2a_dig;
 // stick feeds them directly (P1 = stick 0, P2 = stick 1). Alien 3 uses a
 // radial inner deadzone, 95%-throw outer saturation, progressive response, and
 // error-sensitive smoothing in s32_gun_aim. Other analog titles retain the
-// proven per-axis conditioning below. The gun games keep their default
-// inversion through active_board.gun_aim; the OSD toggle permits an override.
-wire aim_inv_x = status[13] ^ active_board.gun_aim;
-wire aim_inv_y = status[14] ^ active_board.gun_aim;
+// proven per-axis conditioning below. Every profile now defaults to direct
+// stick sense — pushing the stick left moves the sight left — and the OSD
+// toggle inverts either axis for cabinets wired the other way.
+wire aim_inv_x = status[13];
+wire aim_inv_y = status[14];
 localparam signed [8:0] AIM_DZ = 9'sd6;
 
 // signed stick -> offset binary (center 0x80), with centred optional inversion
@@ -751,6 +750,14 @@ wire [7:0] ga2_ppi_pc = ~{4'b0, joystick_0[11], joystick_1[11],
 wire [23:0] rgb_a, rgb_b;
 wire ce_pix_core, core_hs, core_vs, core_hb, core_vb;
 wire signed [15:0] aud_l, aud_r;
+`ifdef S32_ALIEN3_DIAG
+`ifdef S32_RELEASE_MINIMAL
+// TEMPORARY: the release profile normally ties every debug output off; the
+// Alien 3 field-rate overlay needs these two, so declare them here as well.
+wire         core_debug_sprite_rendering;
+wire  [23:0] core_debug_fb_underrun;
+`endif
+`endif
 `ifndef S32_RELEASE_MINIMAL
 wire [31:0] core_debug_pc;
 wire        core_debug_halted;
@@ -800,7 +807,8 @@ s32_core core (
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
     .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_buf_alt(fbr_buf_alt),
-    .fb_rd_dual(fbr_dual), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
+    .fb_rd_buf_alt2(fbr_buf_alt2), .fb_rd_fields(fbr_fields),
+    .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
     .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
     .v25_prg_wr(v25_wr), .v25_prg_waddr(v25_waddr), .v25_prg_wdata(v25_wdata),
     .eep_ld_wr(eep_wr), .eep_ld_addr(eep_waddr), .eep_ld_data(eep_wdata),
@@ -823,8 +831,15 @@ s32_core core (
     .debug_hcnt(), .debug_vcnt(), .debug_sprite_desc(),
     .debug_sprite_desc_valid(), .debug_sprite_last_desc(),
     .debug_sprite_last_draw_desc(), .debug_sprite_activity(),
-    .debug_sprite_state(), .debug_sprite_counts(), .debug_sprite_rendering(),
+    .debug_sprite_state(), .debug_sprite_counts(),
+`ifdef S32_ALIEN3_DIAG
+    .debug_sprite_rendering(core_debug_sprite_rendering),
+    .debug_sprram_cpu(), .debug_pal_rd(),
+    .debug_fb_underrun(core_debug_fb_underrun),
+`else
+    .debug_sprite_rendering(),
     .debug_sprram_cpu(), .debug_pal_rd(), .debug_fb_underrun(),
+`endif
     .debug_cam(), .debug_v25(), .debug_v25_img()
 `else
     .debug_pc(core_debug_pc), .debug_halted(core_debug_halted),
@@ -959,7 +974,7 @@ end
  // The remainder is the raw 16-bit sprite framebuffer pixel.
 wire [23:0] debug_fb_rgb = core_debug_hcnt < 9'd32 ?
                               {fbw_count, fbend_count,
-                               4'b0000, fbw_buf, fbr_buf} :
+                               2'b00, fbw_buf, fbr_buf} :
                            core_debug_hcnt < 9'd64 ?
                               {ddrwe_count, erase_count, fbrack_count} :
                            core_debug_hcnt < 9'd96 ?
@@ -1053,9 +1068,83 @@ wire [23:0] debug_rgb = status[11:8] == 4'd1 ? core_debug_pc[23:0] :
 // Valid sync continues throughout startup. The solid colour identifies the
 // exact gate holding game logic: blue=download, red=ROM completion,
 // yellow=external/OSD reset. Normal game RGB takes over after boot.
+
+// ---------------------------------------------------------------------------
+// TEMPORARY Alien 3 diagnostic overlay (S32_ALIEN3_DIAG).
+//
+// Alien 3 emits its HUD/sight objects on alternate object lists, so scanout can
+// only recover both phases if the sprite engine COMPLETES one field per frame.
+// If a field overruns, consecutive completed fields are two game frames apart,
+// land on the same phase, and no amount of retained-field depth can help.
+//
+// Bar 1 (red, x 0..15)   = sprite fields completed in the last 60 frames x4.
+//                          Full red ~ 60 fields/s (healthy); half ~ 30 (overrun).
+// Bar 2 (green, x 16..31)= frames in the last 60 with NO field completion.
+// Bar 3 (blue, x 32..47) = sprite line-fetch underrun count (saturating).
+// ---------------------------------------------------------------------------
+`ifdef S32_ALIEN3_DIAG
+reg [9:0] diag_x, diag_y;
+reg       diag_hb_d, diag_vb_d;
+reg       diag_rend_d, diag_saw_render;
+reg [7:0] diag_fields, diag_fields_acc;
+reg [7:0] diag_misses, diag_misses_acc;
+reg [7:0] diag_frame_cnt;
+always @(posedge clk_sys) begin
+    if (reset) begin
+        diag_x <= 0; diag_y <= 0;
+        diag_rend_d <= 1'b0; diag_saw_render <= 1'b0;
+        diag_fields <= 0; diag_fields_acc <= 0;
+        diag_misses <= 0; diag_misses_acc <= 0;
+        diag_frame_cnt <= 0;
+    end
+    else begin
+        diag_rend_d <= core_debug_sprite_rendering;
+        // A field completes on the falling edge of `rendering`.
+        if (!core_debug_sprite_rendering && diag_rend_d) diag_saw_render <= 1'b1;
+
+        diag_vb_d <= core_vb;
+        if (core_vb && !diag_vb_d) begin           // start of vblank = frame tick
+            if (diag_saw_render) begin
+                if (~&diag_fields_acc) diag_fields_acc <= diag_fields_acc + 1'd1;
+            end
+            else begin
+                if (~&diag_misses_acc) diag_misses_acc <= diag_misses_acc + 1'd1;
+            end
+            diag_saw_render <= 1'b0;
+            if (diag_frame_cnt == 8'd59) begin
+                diag_fields <= diag_fields_acc + (diag_saw_render ? 8'd1 : 8'd0);
+                diag_misses <= diag_misses_acc + (diag_saw_render ? 8'd0 : 8'd1);
+                diag_fields_acc <= 0;
+                diag_misses_acc <= 0;
+                diag_frame_cnt <= 0;
+            end
+            else diag_frame_cnt <= diag_frame_cnt + 1'd1;
+        end
+
+        if (ce_pix_core) begin
+            diag_hb_d <= core_hb;
+            if (core_hb) diag_x <= 0;
+            else         diag_x <= diag_x + 1'd1;
+            if (core_vb)                     diag_y <= 0;
+            else if (core_hb && !diag_hb_d)  diag_y <= diag_y + 1'd1;
+        end
+    end
+end
+wire diag_active = (diag_y < 10'd8) && (diag_x < 10'd48);
+wire [7:0] diag_fields_bar = (diag_fields >= 8'd64) ? 8'hff : {diag_fields[5:0], 2'b00};
+wire [7:0] diag_miss_bar   = (diag_misses >= 8'd64) ? 8'hff : {diag_misses[5:0], 2'b00};
+wire [23:0] diag_rgb = (diag_x < 10'd16) ? {diag_fields_bar, 8'h00, 8'h00} :
+                       (diag_x < 10'd32) ? {8'h00, diag_miss_bar, 8'h00} :
+                                           {8'h00, 8'h00, core_debug_fb_underrun[7:0]};
+`endif
+
 wire [23:0] rgb_out = ioctl_download ? 24'h0000C0 :
                         ~rom_loaded   ? 24'hC00000 :
-                        video_reset   ? 24'hC0C000 : game_rgb;
+                        video_reset   ? 24'hC0C000 :
+`ifdef S32_ALIEN3_DIAG
+                        diag_active   ? diag_rgb :
+`endif
+                                        game_rgb;
 
 assign CE_PIXEL = ce_pix_core;
 assign VGA_R  = rgb_out[23:16];

@@ -73,7 +73,7 @@ module s32_core #(
 
     // DDR3 framebuffer service (s32_fb_if lives in emu top)
     output            fb_wr_start,
-    output      [1:0] fb_wr_buf,
+    output      [2:0] fb_wr_buf,
     output      [8:0] fb_wr_x,
     output      [7:0] fb_wr_y,
     output            fb_wr_valid,
@@ -82,13 +82,14 @@ module s32_core #(
     output            fb_wr_shadow,   // run RMWs dest &= 0x7fff (V-10)
     input             fb_wr_busy,     // fb_if still flushing previous run
     output            fb_er_req,
-    output      [1:0] fb_er_buf,
+    output      [2:0] fb_er_buf,
     output      [7:0] fb_er_y,
     input             fb_er_ack,
     output            fb_rd_req,
-    output      [1:0] fb_rd_buf,
-    output      [1:0] fb_rd_buf_alt,
-    output            fb_rd_dual,
+    output      [2:0] fb_rd_buf,
+    output      [2:0] fb_rd_buf_alt,
+    output      [2:0] fb_rd_buf_alt2,
+    output      [1:0] fb_rd_fields,
     output      [7:0] fb_rd_y,
     input             fb_rd_ack,
     output      [8:0] fb_rd_x,
@@ -624,9 +625,10 @@ assign sdr_p1_addr = SDR_TILES_BASE[24:3] + {3'b000, tile_rom_addr};
 // sprite engine
 wire [7:0] sprctl_q;
 wire [1:0] disp_buf;
-wire [1:0] spr_scan_buf;
-wire [1:0] spr_scan_buf_prev;
-wire       spr_scan_dual;
+wire [2:0] spr_scan_buf;
+wire [2:0] spr_scan_buf_prev;
+wire [2:0] spr_scan_buf_prev2;
+wire [1:0] spr_scan_fields;
 s32_sprite #(
 `ifdef S32_GOLDENAXE_ONLY
     .VERIFY_SROM(1'b1)
@@ -669,7 +671,8 @@ s32_sprite #(
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf), .fb_er_y(fb_er_y),
     .fb_er_ack(fb_er_ack),
     .disp_buf(disp_buf), .scan_buf(spr_scan_buf),
-    .scan_buf_prev(spr_scan_buf_prev), .scan_dual(spr_scan_dual)
+    .scan_buf_prev(spr_scan_buf_prev), .scan_buf_prev2(spr_scan_buf_prev2),
+    .scan_fields(spr_scan_fields)
 );
 assign sdr_p2_addr[24] = 1'b1;   // sprites region base 0x1000000
 
@@ -687,9 +690,10 @@ assign mode_416 = r1ff00[15];
 // now fills an inactive ping-pong line bank, so launch near the start of the
 // preceding line and give dual-field Alien 3 fetches almost a whole scanline.
 reg       fb_rd_req_r;
-reg [1:0] fb_rd_buf_r;
-reg [1:0] fb_rd_buf_alt_r;
-reg       fb_rd_dual_r;
+reg [2:0] fb_rd_buf_r;
+reg [2:0] fb_rd_buf_alt_r;
+reg [2:0] fb_rd_buf_alt2_r;
+reg [1:0] fb_rd_fields_r;
 reg [7:0] fb_rd_y_r;
 // Qualification telemetry: a line request still outstanding when its visible
 // scanline starts means the mixer is consuming stale sprite data.  Keep this
@@ -711,9 +715,10 @@ wire fb_rd_deadline = ce_pix && hcnt == 9'd0 && vcnt < 9'd224;
 always @(posedge clk_ram) begin
     if (rst) begin
         fb_rd_req_r <= 1'b0;
-        fb_rd_buf_r <= 2'd0;
-        fb_rd_buf_alt_r <= 2'd0;
-        fb_rd_dual_r <= 1'b0;
+        fb_rd_buf_r <= 3'd0;
+        fb_rd_buf_alt_r <= 3'd0;
+        fb_rd_buf_alt2_r <= 3'd0;
+        fb_rd_fields_r <= 2'd0;
         fb_rd_y_r   <= 8'd0;
         fb_rd_underrun_sticky <= 1'b0;
         fb_rd_underrun_count <= 16'd0;
@@ -740,7 +745,8 @@ always @(posedge clk_ram) begin
             // physical buffer, which changes only at a complete frame boundary.
             fb_rd_buf_r <= spr_scan_buf;
             fb_rd_buf_alt_r <= spr_scan_buf_prev;
-            fb_rd_dual_r <= spr_scan_dual;
+            fb_rd_buf_alt2_r <= spr_scan_buf_prev2;
+            fb_rd_fields_r <= spr_scan_fields;
             // CRT lines are 0..261. Truncating line 261 before adding produced
             // line 6 instead of the next frame's line 0.
             if (vcnt == 9'd261)
@@ -755,7 +761,8 @@ end
 assign fb_rd_req = fb_rd_req_r;
 assign fb_rd_buf = fb_rd_buf_r;
 assign fb_rd_buf_alt = fb_rd_buf_alt_r;
-assign fb_rd_dual = fb_rd_dual_r;
+assign fb_rd_buf_alt2 = fb_rd_buf_alt2_r;
+assign fb_rd_fields = fb_rd_fields_r;
 assign fb_rd_y   = fb_rd_y_r;
 assign fb_rd_x   = hcnt;
 

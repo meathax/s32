@@ -38,17 +38,18 @@ always @(posedge clk) srom_ack <= srom_req;
 
 // Sprite -> framebuffer ports.
 wire        fbw_start, fbw_valid, fbw_end, fbw_shadow, fbw_busy;
-wire [1:0]  fbw_buf;
+wire [2:0]  fbw_buf;
 wire [8:0]  fbw_x;
 wire [7:0]  fbw_y;
 wire [15:0] fbw_pix;
 wire        fbe_req, fbe_ack;
-wire [1:0]  fbe_buf;
+wire [2:0]  fbe_buf;
 wire [7:0]  fbe_y;
 wire [1:0]  disp_buf;
-wire [1:0]  scan_buf;
-wire [1:0]  scan_buf_prev;
-wire        scan_dual;
+wire [2:0]  scan_buf;
+wire [2:0]  scan_buf_prev;
+wire [2:0]  scan_buf_prev2;
+wire [1:0]  scan_fields;
 wire        rendering;
 
 reg present = 0;
@@ -77,7 +78,8 @@ s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
     .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf),
-    .scan_buf_prev(scan_buf_prev), .scan_dual(scan_dual)
+    .scan_buf_prev(scan_buf_prev), .scan_buf_prev2(scan_buf_prev2),
+    .scan_fields(scan_fields)
 );
 
 // Non-backpressured DDR so passes complete quickly.
@@ -101,8 +103,8 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) fb (
     .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
-    .rd_req(1'b0), .rd_buf(2'd0), .rd_buf_alt(2'd0), .rd_dual(1'b0),
-    .rd_y(8'd0), .rd_ack(),
+    .rd_req(1'b0), .rd_buf(3'd0), .rd_buf_alt(3'd0), .rd_buf_alt2(3'd0),
+    .rd_fields(2'd0), .rd_y(8'd0), .rd_ack(),
     .rd_x(9'd0), .rd_pix()
 );
 
@@ -116,7 +118,7 @@ integer errors = 0;
 reg used_third_buffer = 0;
 reg rendering_d = 0;
 reg [1:0] disp_buf_d = 0;
-reg [1:0] scan_buf_d = 0;
+reg [2:0] scan_buf_d = 0;
 reg present_sample_d = 0;
 always @(posedge clk) begin
     rendering_d <= rendering;
@@ -136,7 +138,7 @@ always @(posedge clk) begin
                      scan_buf_d, scan_buf);
         end
     end
-    if (!rst && fbe_req && fbe_buf == 2'd2)
+    if (!rst && fbe_req && fbe_buf == 3'd2)
         used_third_buffer <= 1'b1;
     if (!rst && (fbe_req || fbw_start) &&
         ((fbe_req ? fbe_buf : fbw_buf) == scan_buf)) begin
@@ -144,7 +146,7 @@ always @(posedge clk) begin
         $display("  FAIL framebuffer write/erase targets scanned buffer %0d",
                  scan_buf);
     end
-    if (!rst && scan_dual && (fbe_req || fbw_start) &&
+    if (!rst && scan_fields != 2'd0 && (fbe_req || fbw_start) &&
         ((fbe_req ? fbe_buf : fbw_buf) == scan_buf_prev)) begin
         errors = errors + 1;
         $display("  FAIL framebuffer write/erase targets retained buffer %0d",
@@ -299,9 +301,13 @@ initial begin
     repeat (8) @(posedge clk);
     write_ctl(3'd3, 8'h00);
     repeat (8) @(posedge clk);
+    // Retention tracks the newest field whose OBJECT LIST differed, so the
+    // walked words must change between fields exactly as Alien 3's rotating
+    // list buffers do.  Entry 0 stays an END command; only its payload varies.
     for (si = 0; si < 4; si = si + 1) begin
         base_render = render_edges;
         base_swap = swap_edges;
+        sram[1] = 16'ha500 + si[15:0];
         pulse_and_idle(2);
         if (render_edges - base_render !== 1) begin
             errors = errors + 1;
@@ -313,14 +319,14 @@ initial begin
             $display("  FAIL persistence frame %0d produced %0d swaps (want 1)",
                 si, swap_edges - base_swap);
         end
-        if (si < 2 && scan_dual) begin
+        if (si < 2 && scan_fields != 2'd0) begin
             errors = errors + 1;
             $display("  FAIL persistence enabled before two frames were published");
         end
-        if (si >= 2 && (!scan_dual || scan_buf == scan_buf_prev)) begin
+        if (si >= 2 && (scan_fields == 2'd0 || scan_buf == scan_buf_prev)) begin
             errors = errors + 1;
-            $display("  FAIL persistence frame %0d scan=%0d previous=%0d dual=%0d",
-                si, scan_buf, scan_buf_prev, scan_dual);
+            $display("  FAIL persistence frame %0d scan=%0d previous=%0d fields=%0d",
+                si, scan_buf, scan_buf_prev, scan_fields);
         end
     end
 

@@ -2,7 +2,7 @@
 // Directed test: Alien 3 modern analog-stick aim conditioning
 //   * radial inner deadzone and diagonal direction preservation
 //   * precision-biased monotonic response curve
-//   * 95%-throw outer saturation across the complete 8-bit cabinet ADC range
+//   * 95%-throw outer saturation onto a pulled-in 0x08..0xf8 endpoint pair
 //   * centred inversion, player isolation, and adaptive filter settling
 //============================================================================
 `timescale 1ns/1ps
@@ -69,18 +69,18 @@ initial begin
           "zero raw input rests exactly at ADC center");
 
     // Cardinal and diagonal samples inside the radial center deadzone.
-    p1_raw_x = 8'd10;
+    p1_raw_x = 8'd6;
     settle();
     check(p1_aim_x == 8'h80 && p1_aim_y == 8'h80,
           "inner radius boundary remains centered");
-    p1_raw_x = 8'd7;
-    p1_raw_y = 8'd7;
+    p1_raw_x = 8'd4;
+    p1_raw_y = 8'd4;
     settle();
     check(p1_aim_x == 8'h80 && p1_aim_y == 8'h80,
           "diagonal inner deadzone is radial rather than per-axis");
 
     // The first code outside the deadzone is continuous, with no jump.
-    p1_raw_x = 8'd11;
+    p1_raw_x = 8'd7;
     p1_raw_y = 8'd0;
     settle();
     check(p1_aim_x == 8'd129,
@@ -89,52 +89,52 @@ initial begin
     // Selected exact curve points also prove monotonic progression.
     p1_raw_x = 8'd32;
     settle();
-    check(p1_aim_x == 8'd146, "curve radius 32 exact response");
+    check(p1_aim_x == 8'd147, "curve radius 32 exact response");
     prior = p1_aim_x;
     p1_raw_x = 8'd64;
     settle();
-    check(p1_aim_x == 8'd178 && p1_aim_x > prior,
+    check(p1_aim_x == 8'd177 && p1_aim_x > prior,
           "curve radius 64 is precise and monotonic");
     prior = p1_aim_x;
     p1_raw_x = 8'd96;
     settle();
-    check(p1_aim_x == 8'd218 && p1_aim_x > prior,
+    check(p1_aim_x == 8'd213 && p1_aim_x > prior,
           "curve radius 96 accelerates toward the edge");
 
     // The outer saturation reaches full throw just before physical maximum.
     p1_raw_x = 8'd121;
     settle();
-    check(p1_aim_x == 8'd254, "last live-band radius remains below saturation");
+    check(p1_aim_x == 8'd247, "last live-band radius remains below saturation");
     p1_raw_x = 8'd122;
     settle();
-    check(p1_aim_x == 8'hff, "outer saturation begins at about 95 percent throw");
+    check(p1_aim_x == 8'd248, "outer saturation begins at about 95 percent throw");
     p1_raw_x = 8'd127;
     settle();
-    check(p1_aim_x == 8'hff, "positive physical maximum stays saturated");
+    check(p1_aim_x == 8'd248, "positive physical maximum stays saturated");
     p1_raw_x = 8'h80; // signed -128
     settle();
-    check(p1_aim_x == 8'h00, "negative physical maximum reaches cabinet endpoint");
+    check(p1_aim_x == 8'd8, "negative physical maximum reaches the pulled-in endpoint");
 
     // Equal diagonal components remain equal after radial scaling.
     p1_raw_x = 8'd64;
     p1_raw_y = 8'd64;
     settle();
-    check(p1_aim_x == 8'd185 && p1_aim_y == 8'd185,
+    check(p1_aim_x == 8'd183 && p1_aim_y == 8'd183,
           "diagonal response preserves direction and shared magnitude");
 
     // Positive/negative and OSD inversion are centered mirrors.
     p1_raw_x = 8'd64;
     p1_raw_y = 8'd0;
     settle();
-    check(p1_aim_x == 8'd178, "positive symmetry reference");
+    check(p1_aim_x == 8'd177, "positive symmetry reference");
     p1_raw_x = 8'hc0; // signed -64
     settle();
-    check(p1_aim_x == 8'd78 && ({1'b0, p1_aim_x} + 9'd178) == 9'd256,
+    check(p1_aim_x == 8'd79 && ({1'b0, p1_aim_x} + 9'd177) == 9'd256,
           "negative response mirrors around center");
     p1_raw_x = 8'd64;
     invert_x = 1'b1;
     settle();
-    check(p1_aim_x == 8'd78, "X inversion mirrors the conditioned response");
+    check(p1_aim_x == 8'd79, "X inversion mirrors the conditioned response");
     invert_x = 1'b0;
 
     // P1/P2 are sampled together but processed independently by shared math.
@@ -144,7 +144,7 @@ initial begin
     settle();
     check(p1_aim_x == 8'h80 && p1_aim_y == 8'h80,
           "P2 input does not leak into P1");
-    check(p2_aim_x == 8'd47 && p2_aim_y == 8'd225,
+    check(p2_aim_x == 8'd52 && p2_aim_y == 8'd219,
           "P2 diagonal vector is conditioned independently");
 
     // Observe the first adaptive-filter update: large motion consumes half
@@ -160,19 +160,19 @@ initial begin
         timeout = timeout + 1;
     end
     #1;
-    check(timeout < 500 && p1_aim_x == 8'd192,
+    check(timeout < 500 && p1_aim_x == 8'd188,
           "large sweep takes a responsive half-error first step");
     settle();
-    check(p1_aim_x == 8'hff, "large sweep settles exactly at cabinet endpoint");
+    check(p1_aim_x == 8'd248, "large sweep settles exactly at the aim endpoint");
 
     p1_raw_x = 8'h00;
     timeout = 0;
-    while (p1_aim_x == 8'hff && timeout < 500) begin
+    while (p1_aim_x == 8'd248 && timeout < 500) begin
         @(posedge clk);
         timeout = timeout + 1;
     end
     #1;
-    check(timeout < 500 && p1_aim_x == 8'd191,
+    check(timeout < 500 && p1_aim_x == 8'd188,
           "return-to-center uses the symmetric fast step");
     settle();
     check(p1_aim_x == 8'h80, "return-to-center snaps exactly with no residual drift");

@@ -1,8 +1,11 @@
 //============================================================================
 //  Sega System 32 — sprite framebuffer interface (DESIGN.md §4.4)
 //  Backing store: MiSTer DDR3 (DDRAM 64-bit burst interface).
-//  Layout: 4 buffers (A/B x screen0/1), stride 512 pixels x 16 bit,
-//  256 lines. Base = FB_BASE + buf*512*256*2.
+//  Layout: 8 buffers, stride 512 pixels x 16 bit, 256 lines (2 MiB total).
+//  Base = FB_BASE + buf*512*256*2.  System 32 rotates through them so the
+//  fields scanout still needs (see s32_sprite's retained-field window) are
+//  never the erase/render target; Multi 32 keeps its two-buffer-per-monitor
+//  mapping inside the same space.
 //  Services (per DESIGN.md):
 //    - erase_line(y):     fill line with 0xFFFF
 //    - write_run(...):    pixel run writes from the sprite renderer;
@@ -35,7 +38,7 @@ module s32_fb_if #(
     // wr_x is PER PIXEL (absolute x) — pixels may arrive in any order and
     // with gaps (flipped sprites sweep right-to-left; clip-out punches holes)
     input             wr_start,        // begin run (latches y/buf/shadow)
-    input       [1:0] wr_buf,          // buffer select
+    input       [2:0] wr_buf,          // buffer select
     input       [8:0] wr_x,            // x of THIS pixel (valid with wr_valid)
     input       [7:0] wr_y,
     input             wr_valid,        // one pixel this cycle
@@ -46,15 +49,18 @@ module s32_fb_if #(
 
     // erase port
     input             er_req,
-    input       [1:0] er_buf,
+    input       [2:0] er_buf,
     input       [7:0] er_y,
     output reg        er_ack,
 
     // line read port -> mixer
     input             rd_req,
-    input       [1:0] rd_buf,
-    input       [1:0] rd_buf_alt,       // preceding completed field
-    input             rd_dual,          // combine current + preceding field
+    input       [2:0] rd_buf,
+    input       [2:0] rd_buf_alt,       // preceding completed field
+    input       [2:0] rd_buf_alt2,      // field before that
+    // Extra fields to fold under the newest one: 0 = newest only, 1 = plus the
+    // preceding field, 2 = plus the two preceding fields.
+    input       [1:0] rd_fields,
     input       [7:0] rd_y,
     output reg        rd_ack,          // line available in buffer
     input       [8:0] rd_x,            // synchronous read of fetched line
@@ -74,7 +80,7 @@ reg [511:0] run_msk;               // which pixels this run actually wrote
 // line instead of racing the renderer during the short horizontal blank.
 reg [8:0]   run_x0, run_xe;        // min / max written x
 reg [7:0]   run_y;
-reg [1:0]   run_bufsel;
+reg [2:0]   run_bufsel;
 reg         run_active;
 reg         run_shadow;
 reg         run_any;               // at least one pixel written
@@ -90,8 +96,10 @@ reg        line_ready;
 wire       rd_line_publish = (rd_x == 9'd0) && line_ready;
 wire       scan_bank = rd_line_publish ? fill_bank : display_bank;
 
-// Resolve Alien 3's alternating player fields while the preceding field is
+// Resolve Alien 3's alternating player fields while the preceding fields are
 // fetched from DDR, before acknowledging the completed line to scanout.
+// Each extra field is folded in with the same pass, so a second pass sees the
+// already-merged line and only fills what is still transparent.
 // System 32 regards both 0xffff and 0x7fff as transparent; the latter is what
 // remains when a shadow RMW crosses an erased pixel.  For 0x7fff, retain the
 // preceding field's pixel while applying the newest field's shadow flag.  This
@@ -125,7 +133,8 @@ function automatic [63:0] compose_line_word(
     end
 endfunction
 
-reg rd_dual_latched;
+reg [1:0] rd_fields_latched;
+reg [1:0] rd_pass;                  // extra fields already folded in
 
 // DDR engine
 typedef enum logic [3:0] { D_IDLE, D_WR_PF, D_WR, D_ER, D_RD, D_RD_W,
@@ -140,7 +149,8 @@ reg [63:0] ddin;
 reg [7:0]  dbe;
 reg [6:0]  beat, beats;
 reg [6:0]  rbeat;
-reg [1:0]  rd_buf_alt_latched;
+reg [2:0]  rd_buf_alt_latched;
+reg [2:0]  rd_buf_alt2_latched;
 reg [63:0] compose_prior;
 reg  [6:0] compose_addr;
 reg        compose_valid;
@@ -191,10 +201,10 @@ always @(posedge clk) begin
     end
 end
 
-function automatic [28:0] pix_addr(input [1:0] buf_i, input [7:0] y,
+function automatic [28:0] pix_addr(input [2:0] buf_i, input [7:0] y,
                                    input [6:0] x_word);
     // 64-bit word address for DDRAM: byte addr / 8
-    pix_addr = FB_BASE[31:3] + {{12{1'b0}}, buf_i, 15'b0}
+    pix_addr = FB_BASE[31:3] + {{11{1'b0}}, buf_i, 15'b0}
                                 + {{14{1'b0}}, y, 7'b0}
                                 + {22'b0, x_word};
 endfunction
@@ -295,8 +305,10 @@ assign wr_busy = wr_end | flush_req |
 always @(posedge clk) begin
     if (rst) begin
         dst <= D_IDLE; dwe <= 0; drd <= 0; er_ack <= 0; rd_ack <= 0;
-        rd_dual_latched <= 1'b0;
-        rd_buf_alt_latched <= 2'd0;
+        rd_fields_latched <= 2'd0;
+        rd_pass <= 2'd0;
+        rd_buf_alt_latched <= 3'd0;
+        rd_buf_alt2_latched <= 3'd0;
         display_bank <= 1'b0;
         fill_bank <= 1'b1;
         line_ready <= 1'b0;
@@ -334,8 +346,10 @@ always @(posedge clk) begin
                 dburst <= 8'd128;
                 rbeat  <= 0;
                 fill_bank <= ~display_bank;
-                rd_dual_latched <= rd_dual;
+                rd_fields_latched <= rd_fields;
+                rd_pass <= 2'd0;
                 rd_buf_alt_latched <= rd_buf_alt;
+                rd_buf_alt2_latched <= rd_buf_alt2;
                 drd    <= 1'b1;
                 dbe    <= 8'hFF;  // audit R20 PF-4: reads drive all byte lanes
                 dst    <= D_RD;
@@ -415,10 +429,11 @@ always @(posedge clk) begin
             if (DDRAM_DOUT_READY) begin
                 rbeat <= rbeat + 1'd1;
                 if (rbeat == 7'd127) begin
-                    if (rd_dual_latched) begin
+                    if (rd_fields_latched != 2'd0) begin
                         daddr  <= pix_addr(rd_buf_alt_latched, rd_y, 7'd0);
                         dburst <= 8'd128;
                         rbeat  <= 0;
+                        rd_pass <= 2'd1;
                         drd    <= 1'b1;
                         dst    <= D_RD_ALT;
                     end
@@ -447,10 +462,23 @@ always @(posedge clk) begin
                 end
             end
         end
+        // The pass's final current/prior pair is written on this edge, so the
+        // next pass may only start from here: its first read must not disturb
+        // the compose pipeline before that last word has landed.
         D_RD_ALT_FLUSH: begin
-            line_ready <= 1'b1;
-            rd_ack <= 1'b1;
-            dst <= D_IDLE;
+            if (rd_pass < rd_fields_latched) begin
+                daddr   <= pix_addr(rd_buf_alt2_latched, rd_y, 7'd0);
+                dburst  <= 8'd128;
+                rbeat   <= 0;
+                rd_pass <= rd_pass + 1'd1;
+                drd     <= 1'b1;
+                dst     <= D_RD_ALT;
+            end
+            else begin
+                line_ready <= 1'b1;
+                rd_ack <= 1'b1;
+                dst <= D_IDLE;
+            end
         end
         default: dst <= D_IDLE;
         endcase

@@ -35,15 +35,15 @@ end
 
 // Sprite -> framebuffer run/erase ports.
 wire        fbw_start, fbw_valid, fbw_end, fbw_shadow, fbw_busy;
-wire [1:0]  fbw_buf;
+wire [2:0]  fbw_buf;
 wire [8:0]  fbw_x;
 wire [7:0]  fbw_y;
 wire [15:0] fbw_pix;
 wire        fbe_req, fbe_ack;
-wire [1:0]  fbe_buf;
+wire [2:0]  fbe_buf;
 wire [7:0]  fbe_y;
 wire [1:0]  disp_buf;
-wire [1:0]  scan_buf;
+wire [2:0]  scan_buf;
 wire        rendering;
 
 reg vblank = 0;
@@ -65,7 +65,7 @@ s32_sprite sprite (
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
     .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf),
-    .scan_buf_prev(), .scan_dual()
+    .scan_buf_prev(), .scan_buf_prev2(), .scan_fields()
 );
 
 // MiSTer DDR interface.
@@ -88,7 +88,8 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) fb (
     .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
-    .rd_req(1'b0), .rd_buf(2'd0), .rd_buf_alt(2'd0), .rd_dual(1'b0),
+    .rd_req(1'b0), .rd_buf(3'd0), .rd_buf_alt(3'd0), .rd_buf_alt2(3'd0),
+    .rd_fields(2'd0),
     .rd_y(8'd0), .rd_ack(),
     .rd_x(9'd0), .rd_pix()
 );

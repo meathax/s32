@@ -390,9 +390,11 @@ endmodule
 // the System 32 ADC expects offset-binary channels around 8'h80.
 //
 // The response is radial so diagonal motion retains its direction:
-//   * radius <= 10/128 is an inner deadzone (about 8%);
-//   * radius >= 122/128 reaches the cabinet-gun endpoint (about 5% outer
-//     saturation, so screen edge requires roughly 95% physical stick travel);
+//   * radius <= 6/128 is an inner deadzone (about 5%);
+//   * radius >= 122/128 reaches the gun endpoint (about 5% outer saturation,
+//     so the extreme of aim needs roughly 95% physical stick travel), and that
+//     endpoint is 120/128 of the ADC span so the sight stops at the screen
+//     border instead of tracking past it;
 //   * the live band uses a 62.5% linear / 37.5% quadratic response, giving
 //     precise small corrections without making large sweeps sluggish.
 //
@@ -422,49 +424,53 @@ module s32_gun_aim #(
     output reg  [7:0]  p2_aim_y
 );
 
-localparam [8:0] GUN_INNER_R = 9'd10;
-localparam [8:0] GUN_OUTER_R = 9'd122;
+localparam [8:0] GUN_INNER_R  = 9'd6;
+localparam [8:0] GUN_OUTER_R  = 9'd122;
+// Full stick deflection stops slightly short of the ADC end codes.  At the
+// hardware limit the game's sight tracked past the visible border and vanished
+// off screen, so the endpoint is pulled in to 0x08..0xf8.
+localparam [7:0] GUN_PEAK_MAG = 8'd120;
 
 // Precomputed curve magnitude for radii strictly between the two deadzones.
-// Values are round(128 * (0.625*t + 0.375*t*t)), t=(r-10)/(122-10).
+// Values are round(GUN_PEAK_MAG * (0.625*t + 0.375*t*t)), t=(r-6)/(122-6).
 // The table is read by one shared processing state, so it synthesizes once.
 function automatic [7:0] gun_curve_mag(input [8:0] radius);
 begin
     if (radius <= GUN_INNER_R)
         gun_curve_mag = 8'd0;
     else if (radius >= GUN_OUTER_R)
-        gun_curve_mag = 8'd128;
+        gun_curve_mag = GUN_PEAK_MAG;
     else begin
         case (radius)
-            9'd11, 9'd12: gun_curve_mag = 8'd1;
-            9'd13: gun_curve_mag = 8'd2;
-            9'd14: gun_curve_mag = 8'd3;
-            9'd15, 9'd16: gun_curve_mag = 8'd4;
-            9'd17: gun_curve_mag = 8'd5;
-            9'd18: gun_curve_mag = 8'd6;
-            9'd19: gun_curve_mag = 8'd7;
-            9'd20, 9'd21: gun_curve_mag = 8'd8;
-            9'd22: gun_curve_mag = 8'd9;
-            9'd23: gun_curve_mag = 8'd10;
-            9'd24: gun_curve_mag = 8'd11;
-            9'd25, 9'd26: gun_curve_mag = 8'd12;
-            9'd27: gun_curve_mag = 8'd13;
-            9'd28: gun_curve_mag = 8'd14;
-            9'd29: gun_curve_mag = 8'd15;
-            9'd30: gun_curve_mag = 8'd16;
-            9'd31: gun_curve_mag = 8'd17;
-            9'd32, 9'd33: gun_curve_mag = 8'd18;
-            9'd34: gun_curve_mag = 8'd19;
-            9'd35: gun_curve_mag = 8'd20;
-            9'd36: gun_curve_mag = 8'd21;
-            9'd37: gun_curve_mag = 8'd22;
-            9'd38: gun_curve_mag = 8'd23;
-            9'd39: gun_curve_mag = 8'd24;
-            9'd40: gun_curve_mag = 8'd25;
-            9'd41: gun_curve_mag = 8'd26;
-            9'd42: gun_curve_mag = 8'd27;
-            9'd43: gun_curve_mag = 8'd28;
-            9'd44: gun_curve_mag = 8'd29;
+            9'd7, 9'd8: gun_curve_mag = 8'd1;
+            9'd9: gun_curve_mag = 8'd2;
+            9'd10, 9'd11: gun_curve_mag = 8'd3;
+            9'd12: gun_curve_mag = 8'd4;
+            9'd13, 9'd14: gun_curve_mag = 8'd5;
+            9'd15: gun_curve_mag = 8'd6;
+            9'd16: gun_curve_mag = 8'd7;
+            9'd17, 9'd18: gun_curve_mag = 8'd8;
+            9'd19: gun_curve_mag = 8'd9;
+            9'd20, 9'd21: gun_curve_mag = 8'd10;
+            9'd22: gun_curve_mag = 8'd11;
+            9'd23: gun_curve_mag = 8'd12;
+            9'd24, 9'd25: gun_curve_mag = 8'd13;
+            9'd26: gun_curve_mag = 8'd14;
+            9'd27: gun_curve_mag = 8'd15;
+            9'd28: gun_curve_mag = 8'd16;
+            9'd29, 9'd30: gun_curve_mag = 8'd17;
+            9'd31: gun_curve_mag = 8'd18;
+            9'd32: gun_curve_mag = 8'd19;
+            9'd33: gun_curve_mag = 8'd20;
+            9'd34: gun_curve_mag = 8'd21;
+            9'd35, 9'd36: gun_curve_mag = 8'd22;
+            9'd37: gun_curve_mag = 8'd23;
+            9'd38: gun_curve_mag = 8'd24;
+            9'd39: gun_curve_mag = 8'd25;
+            9'd40: gun_curve_mag = 8'd26;
+            9'd41: gun_curve_mag = 8'd27;
+            9'd42: gun_curve_mag = 8'd28;
+            9'd43, 9'd44: gun_curve_mag = 8'd29;
             9'd45: gun_curve_mag = 8'd30;
             9'd46: gun_curve_mag = 8'd31;
             9'd47: gun_curve_mag = 8'd32;
@@ -483,65 +489,65 @@ begin
             9'd60: gun_curve_mag = 8'd45;
             9'd61: gun_curve_mag = 8'd46;
             9'd62: gun_curve_mag = 8'd47;
-            9'd63: gun_curve_mag = 8'd49;
-            9'd64: gun_curve_mag = 8'd50;
-            9'd65: gun_curve_mag = 8'd51;
-            9'd66: gun_curve_mag = 8'd52;
-            9'd67: gun_curve_mag = 8'd53;
-            9'd68: gun_curve_mag = 8'd54;
-            9'd69: gun_curve_mag = 8'd55;
-            9'd70: gun_curve_mag = 8'd57;
-            9'd71: gun_curve_mag = 8'd58;
-            9'd72: gun_curve_mag = 8'd59;
-            9'd73: gun_curve_mag = 8'd60;
-            9'd74: gun_curve_mag = 8'd61;
-            9'd75: gun_curve_mag = 8'd63;
-            9'd76: gun_curve_mag = 8'd64;
-            9'd77: gun_curve_mag = 8'd65;
-            9'd78: gun_curve_mag = 8'd66;
-            9'd79: gun_curve_mag = 8'd68;
-            9'd80: gun_curve_mag = 8'd69;
-            9'd81: gun_curve_mag = 8'd70;
-            9'd82: gun_curve_mag = 8'd71;
-            9'd83: gun_curve_mag = 8'd73;
-            9'd84: gun_curve_mag = 8'd74;
-            9'd85: gun_curve_mag = 8'd75;
-            9'd86: gun_curve_mag = 8'd76;
-            9'd87: gun_curve_mag = 8'd78;
-            9'd88: gun_curve_mag = 8'd79;
-            9'd89: gun_curve_mag = 8'd80;
-            9'd90: gun_curve_mag = 8'd82;
-            9'd91: gun_curve_mag = 8'd83;
-            9'd92: gun_curve_mag = 8'd84;
-            9'd93: gun_curve_mag = 8'd86;
-            9'd94: gun_curve_mag = 8'd87;
-            9'd95: gun_curve_mag = 8'd88;
-            9'd96: gun_curve_mag = 8'd90;
-            9'd97: gun_curve_mag = 8'd91;
-            9'd98: gun_curve_mag = 8'd92;
-            9'd99: gun_curve_mag = 8'd94;
-            9'd100: gun_curve_mag = 8'd95;
-            9'd101: gun_curve_mag = 8'd97;
-            9'd102: gun_curve_mag = 8'd98;
-            9'd103: gun_curve_mag = 8'd100;
-            9'd104: gun_curve_mag = 8'd101;
-            9'd105: gun_curve_mag = 8'd102;
-            9'd106: gun_curve_mag = 8'd104;
-            9'd107: gun_curve_mag = 8'd105;
-            9'd108: gun_curve_mag = 8'd107;
-            9'd109: gun_curve_mag = 8'd108;
-            9'd110: gun_curve_mag = 8'd110;
-            9'd111: gun_curve_mag = 8'd111;
-            9'd112: gun_curve_mag = 8'd113;
-            9'd113: gun_curve_mag = 8'd114;
-            9'd114: gun_curve_mag = 8'd116;
-            9'd115: gun_curve_mag = 8'd117;
-            9'd116: gun_curve_mag = 8'd119;
-            9'd117: gun_curve_mag = 8'd120;
-            9'd118: gun_curve_mag = 8'd122;
-            9'd119: gun_curve_mag = 8'd123;
-            9'd120: gun_curve_mag = 8'd125;
-            9'd121: gun_curve_mag = 8'd126;
+            9'd63: gun_curve_mag = 8'd48;
+            9'd64: gun_curve_mag = 8'd49;
+            9'd65: gun_curve_mag = 8'd50;
+            9'd66: gun_curve_mag = 8'd51;
+            9'd67: gun_curve_mag = 8'd52;
+            9'd68: gun_curve_mag = 8'd53;
+            9'd69: gun_curve_mag = 8'd54;
+            9'd70: gun_curve_mag = 8'd55;
+            9'd71: gun_curve_mag = 8'd56;
+            9'd72: gun_curve_mag = 8'd57;
+            9'd73: gun_curve_mag = 8'd58;
+            9'd74: gun_curve_mag = 8'd59;
+            9'd75: gun_curve_mag = 8'd61;
+            9'd76: gun_curve_mag = 8'd62;
+            9'd77: gun_curve_mag = 8'd63;
+            9'd78: gun_curve_mag = 8'd64;
+            9'd79: gun_curve_mag = 8'd65;
+            9'd80: gun_curve_mag = 8'd66;
+            9'd81: gun_curve_mag = 8'd67;
+            9'd82: gun_curve_mag = 8'd68;
+            9'd83: gun_curve_mag = 8'd70;
+            9'd84: gun_curve_mag = 8'd71;
+            9'd85: gun_curve_mag = 8'd72;
+            9'd86: gun_curve_mag = 8'd73;
+            9'd87: gun_curve_mag = 8'd74;
+            9'd88: gun_curve_mag = 8'd76;
+            9'd89: gun_curve_mag = 8'd77;
+            9'd90: gun_curve_mag = 8'd78;
+            9'd91: gun_curve_mag = 8'd79;
+            9'd92: gun_curve_mag = 8'd80;
+            9'd93: gun_curve_mag = 8'd82;
+            9'd94: gun_curve_mag = 8'd83;
+            9'd95: gun_curve_mag = 8'd84;
+            9'd96: gun_curve_mag = 8'd85;
+            9'd97: gun_curve_mag = 8'd87;
+            9'd98: gun_curve_mag = 8'd88;
+            9'd99: gun_curve_mag = 8'd89;
+            9'd100: gun_curve_mag = 8'd90;
+            9'd101: gun_curve_mag = 8'd92;
+            9'd102: gun_curve_mag = 8'd93;
+            9'd103: gun_curve_mag = 8'd94;
+            9'd104: gun_curve_mag = 8'd95;
+            9'd105: gun_curve_mag = 8'd97;
+            9'd106: gun_curve_mag = 8'd98;
+            9'd107: gun_curve_mag = 8'd99;
+            9'd108: gun_curve_mag = 8'd101;
+            9'd109: gun_curve_mag = 8'd102;
+            9'd110: gun_curve_mag = 8'd103;
+            9'd111: gun_curve_mag = 8'd105;
+            9'd112: gun_curve_mag = 8'd106;
+            9'd113: gun_curve_mag = 8'd107;
+            9'd114: gun_curve_mag = 8'd109;
+            9'd115: gun_curve_mag = 8'd110;
+            9'd116: gun_curve_mag = 8'd112;
+            9'd117: gun_curve_mag = 8'd113;
+            9'd118: gun_curve_mag = 8'd114;
+            9'd119: gun_curve_mag = 8'd116;
+            9'd120: gun_curve_mag = 8'd117;
+            9'd121: gun_curve_mag = 8'd119;
             default: gun_curve_mag = 8'd0;
         endcase
     end
@@ -554,11 +560,11 @@ function automatic [7:0] gun_offset_axis(
 );
 begin
     if (negative)
-        gun_offset_axis = (magnitude >= 8'd128) ? 8'h00
-                                                : 8'd128 - magnitude;
+        gun_offset_axis = (magnitude >= GUN_PEAK_MAG)
+                        ? (8'd128 - GUN_PEAK_MAG) : (8'd128 - magnitude);
     else
-        gun_offset_axis = (magnitude >= 8'd127) ? 8'hff
-                                                : 8'd128 + magnitude;
+        gun_offset_axis = (magnitude >= GUN_PEAK_MAG)
+                        ? (8'd128 + GUN_PEAK_MAG) : (8'd128 + magnitude);
 end
 endfunction
 
@@ -688,8 +694,8 @@ always @(posedge clk) begin
                 div_rem <= div_rem_next[7:0];
                 div_quot <= div_quot_next;
                 if (div_count == 4'd14) begin
-                    work_out_x <= (div_quot_next > 15'd128)
-                                ? 8'd128 : div_quot_next[7:0];
+                    work_out_x <= (div_quot_next > {7'd0, GUN_PEAK_MAG})
+                                ? GUN_PEAK_MAG : div_quot_next[7:0];
                     div_rem <= 8'd0;
                     div_quot <= selected_abs_y * work_magnitude;
                     div_count <= 4'd0;
@@ -703,8 +709,8 @@ always @(posedge clk) begin
                 div_rem <= div_rem_next[7:0];
                 div_quot <= div_quot_next;
                 if (div_count == 4'd14) begin
-                    work_out_y <= (div_quot_next > 15'd128)
-                                ? 8'd128 : div_quot_next[7:0];
+                    work_out_y <= (div_quot_next > {7'd0, GUN_PEAK_MAG})
+                                ? GUN_PEAK_MAG : div_quot_next[7:0];
                     state <= G_FILTER;
                 end
                 else

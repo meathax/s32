@@ -14,7 +14,7 @@ module s32_fb_ddr_model #(
     input             rst,
 
     input             wr_start,
-    input       [1:0] wr_buf,
+    input       [2:0] wr_buf,
     input       [8:0] wr_x,
     input       [7:0] wr_y,
     input             wr_valid,
@@ -24,14 +24,15 @@ module s32_fb_ddr_model #(
     output            wr_busy,
 
     input             er_req,
-    input       [1:0] er_buf,
+    input       [2:0] er_buf,
     input       [7:0] er_y,
     output            er_ack,
 
     input             rd_req,
-    input       [1:0] rd_buf,
-    input       [1:0] rd_buf_alt,
-    input             rd_dual,
+    input       [2:0] rd_buf,
+    input       [2:0] rd_buf_alt,
+    input       [2:0] rd_buf_alt2,
+    input       [1:0] rd_fields,
     input       [7:0] rd_y,
     output            rd_ack,
     input       [8:0] rd_x,
@@ -66,17 +67,18 @@ s32_fb_if #(.FB_BASE(32'h0000_0000)) dut (
     .wr_shadow(wr_shadow), .wr_busy(wr_busy),
     .er_req(er_req), .er_buf(er_buf), .er_y(er_y), .er_ack(er_ack),
     .rd_req(rd_req), .rd_buf(rd_buf), .rd_buf_alt(rd_buf_alt),
-    .rd_dual(rd_dual), .rd_y(rd_y), .rd_ack(rd_ack),
+    .rd_buf_alt2(rd_buf_alt2), .rd_fields(rd_fields),
+    .rd_y(rd_y), .rd_ack(rd_ack),
     .rd_x(rd_x), .rd_pix(rd_pix)
 );
 
-// Four buffers x 256 lines x 128 64-bit words.  Transparent initialization
+// Eight buffers x 256 lines x 128 64-bit words.  Transparent initialization
 // removes irrelevant host-memory power-up noise; the game still exercises the
 // production erase engine on every commanded buffer erase.
-reg [63:0] ddr [0:131071];
+reg [63:0] ddr [0:262143];
 integer init_i;
 initial begin
-    for (init_i = 0; init_i < 131072; init_i = init_i + 1)
+    for (init_i = 0; init_i < 262144; init_i = init_i + 1)
         ddr[init_i] = 64'hffff_ffff_ffff_ffff;
 end
 
@@ -85,10 +87,10 @@ reg [31:0] model_cycle;
 reg busy_r;
 assign dd_busy = busy_r;
 
-reg [16:0] read_addr;
+reg [17:0] read_addr;
 reg  [7:0] read_left;
 reg  [3:0] read_delay;
-wire [16:0] local_addr = dd_addr[16:0];
+wire [17:0] local_addr = dd_addr[17:0];
 
 always @(posedge clk) begin
     dd_ready <= 1'b0;

@@ -79,7 +79,7 @@ s32_core core (
     .fb_wr_valid(), .fb_wr_pix(), .fb_wr_end(),
     .fb_wr_shadow(), .fb_wr_busy(1'b0),
     .fb_er_req(), .fb_er_buf(), .fb_er_y(), .fb_er_ack(1'b1),
-    .fb_rd_req(), .fb_rd_buf(), .fb_rd_buf_alt(), .fb_rd_dual(),
+    .fb_rd_req(), .fb_rd_buf(), .fb_rd_buf_alt(), .fb_rd_buf_alt2(), .fb_rd_fields(),
     .fb_rd_y(), .fb_rd_ack(1'b1),
     .fb_rd_x(), .fb_rd_pix(16'hffff),
     .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),

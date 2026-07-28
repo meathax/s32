@@ -172,6 +172,14 @@ iverilog -g2012 -s tb_sprite_vblank -o /tmp/s32_sprite_vblank \
   rtl/video/s32_sprite.sv rtl/mem/s32_fb_if.sv \
   verif/common/tb_sprite_vblank.sv
 vvp /tmp/s32_sprite_vblank | grep -q "SPRITE VBLANK PASS" && echo "SPRITE VBLANK: PASS" || { echo "SPRITE VBLANK: FAIL"; exit 1; }
+iverilog -g2012 -DSIMULATION -s tb_alien3_persist -o /tmp/s32_alien3_persist \
+  rtl/s32_pkg.sv rtl/video/s32_sprite.sv rtl/mem/s32_fb_if.sv \
+  verif/common/s32_fb_ddr_model.sv verif/common/tb_alien3_persist.sv
+vvp /tmp/s32_alien3_persist | grep -q "ALIEN3 PERSIST PASS" && echo "ALIEN3 PERSIST: PASS" || { echo "ALIEN3 PERSIST: FAIL"; exit 1; }
+iverilog -g2012 -DSIMULATION -s tb_alien3_load -o /tmp/s32_alien3_load \
+  rtl/s32_pkg.sv rtl/video/s32_sprite.sv rtl/mem/s32_fb_if.sv \
+  verif/common/s32_fb_ddr_model.sv verif/common/tb_alien3_load.sv
+vvp /tmp/s32_alien3_load | grep -q "ALIEN3 LOAD OK" && echo "ALIEN3 LOAD: PASS" || { echo "ALIEN3 LOAD: FAIL"; exit 1; }
 echo "[28/35] interrupt controller reset / source+ack collision / timers / doorbell"
 iverilog -g2012 -s tb_intc -o /tmp/s32_intc \
   rtl/s32_pkg.sv rtl/io/s32_io.sv verif/common/tb_intc.sv

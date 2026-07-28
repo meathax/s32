@@ -537,6 +537,8 @@ try {
     Write-Tier 27 "integrated sprite renderer / backpressured DDR framebuffer stress"
     Run-HdlTest "t27_sprite_fb" "tb_sprite_fb" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_fb.sv") "SPRITE FB PASS"
     Run-HdlTest "t27_sprite_vblank" "tb_sprite_vblank" @("rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/tb_sprite_vblank.sv") "SPRITE VBLANK PASS"
+    Run-HdlTest "t27_alien3_persist" "tb_alien3_persist" @("rtl/s32_pkg.sv", "rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/s32_fb_ddr_model.sv", "verif/common/tb_alien3_persist.sv") "ALIEN3 PERSIST PASS"
+    Run-HdlTest "t27_alien3_load" "tb_alien3_load" @("rtl/s32_pkg.sv", "rtl/video/s32_sprite.sv", "rtl/mem/s32_fb_if.sv", "verif/common/s32_fb_ddr_model.sv", "verif/common/tb_alien3_load.sv") "ALIEN3 LOAD OK"
 
     Write-Tier 28 "interrupt controller reset / source+ack collision / timers / doorbell"
     Run-HdlTest "t28_intc" "tb_intc" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_intc.sv") "INTC PASS"

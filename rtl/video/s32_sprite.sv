@@ -59,7 +59,7 @@ module s32_sprite #(
 
     // framebuffer interface
     output reg        fb_wr_start,
-    output reg  [1:0] fb_wr_buf,
+    output reg  [2:0] fb_wr_buf,
     output reg  [8:0] fb_wr_x,
     output reg  [7:0] fb_wr_y,
     output reg        fb_wr_valid,
@@ -68,14 +68,15 @@ module s32_sprite #(
     output reg        fb_wr_shadow,  // this run RMWs dest &= 0x7fff (V-10)
     input             fb_busy,       // previous run still flushing
     output reg        fb_er_req,
-    output reg  [1:0] fb_er_buf,
+    output reg  [2:0] fb_er_buf,
     output reg  [7:0] fb_er_y,
     input             fb_er_ack,
 
     output reg  [1:0] disp_buf,     // game-visible logical A/B selector
-    output reg  [1:0] scan_buf,     // newest physical buffer the mixer reads
-    output reg  [1:0] scan_buf_prev,// preceding completed field (Alien 3)
-    output reg        scan_dual     // both scan buffers contain valid fields
+    output reg  [2:0] scan_buf,     // newest physical buffer the mixer reads
+    output reg  [2:0] scan_buf_prev, // preceding completed field (Alien 3)
+    output reg  [2:0] scan_buf_prev2,// the field before that (Alien 3)
+    output reg  [1:0] scan_fields   // retained fields available under scan_buf
 );
 
 // control registers
@@ -84,13 +85,31 @@ reg [7:0] ctl_latched [0:7];
 reg       render_count;             // MAME m_sprite_render_count (0/1)
 reg       render_after_erase;       // combined command: render after hidden erase
 reg       erase_after_swap;         // combined command: swap before destructive clear
-reg [1:0] erase_buf_sel;            // physical buffer selected for erase
+reg [2:0] erase_buf_sel;            // physical buffer selected for erase
 reg       erase_mon;                // Multi32 erase visits both monitors
-reg [1:0] work_buf;                 // physical System32 erase/render target
-reg [1:0] ready_buf;                // completed System32 frame awaiting vblank
+reg [2:0] work_buf;                 // physical System32 erase/render target
+reg [2:0] ready_buf;                // completed System32 frame awaiting vblank
 reg       ready_valid;
-reg       scan_seen;                // at least one completed frame was published
 reg       publish_on_done;          // current command includes a render pass
+// Rolling signature of the object-list words walked by a render pass.  Alien 3
+// alternates the two players' HUD/sight objects once per GAME LOGIC frame, not
+// once per sprite field: a frame the V60 does not finish in time leaves the
+// object list untouched and the identical field is rendered again.  Retaining
+// such a duplicate would merge a player with itself and drop the other one, so
+// retention tracks the newest field whose list actually differed.
+reg [31:0] list_hash;               // accumulated over the current pass
+// Completed-field history, newest first.  Scanout folds the retained fields in
+// under the newest one, so both players' HUD/sight survive whichever field
+// they landed in.  The history advances on field COMPLETION rather than on
+// publication: when a render overruns a frame its predecessor is superseded
+// before it is ever published, and tracking publications would silently drop
+// one phase of the alternation.  A field whose object list is unchanged
+// replaces the newest entry instead of consuming a slot, so a logic frame the
+// V60 missed cannot push the other player's field out of the window.
+reg [2:0]  hist_buf [0:2];
+reg [31:0] hist0_hash;              // object-list signature of hist_buf[0]
+reg [1:0]  hist_depth;              // retained fields behind hist_buf[0]
+reg        hist_any;                // at least one field has completed
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
 reg        vblank_d;                // edge-detect the end-of-vblank pulse
@@ -102,30 +121,17 @@ reg        present_d;               // edge-detect start-of-vblank publication
 wire       vblank_rise = vblank & ~vblank_d;
 wire       present_rise = present & ~present_d;
 
-// System 32 has only one monitor, leaving physical framebuffer slots 2/3
-// unused by the original A/B mapping. Use slot 2 as a third rotating buffer:
-// choose a work target that is neither being scanned nor waiting to be
-// published. If no frame is pending there are two safe choices; preferring
-// the lowest keeps the normal 0/1 cadence and reserves slot 2 for overruns.
-function automatic [1:0] choose_work_buf(
-    input [1:0] scan,
-    input [1:0] previous,
-    input       preserve_previous,
-    input [1:0] ready,
-    input       valid
-);
+// System 32 uses one monitor, so the eight physical framebuffer slots are free
+// for rotation. A work target must avoid every buffer that is still live: the
+// fields currently being scanned out, the completed fields queued to become
+// them, and any frame waiting to be published. Preferring the lowest free slot
+// keeps the ordinary 0/1 cadence when nothing is retained.
+function automatic [2:0] lowest_free_buf(input [7:0] busy);
+    integer i;
     begin
-        if (scan != 2'd0 && (!preserve_previous || previous != 2'd0) &&
-            (!valid || ready != 2'd0))
-            choose_work_buf = 2'd0;
-        else if (scan != 2'd1 && (!preserve_previous || previous != 2'd1) &&
-                 (!valid || ready != 2'd1))
-            choose_work_buf = 2'd1;
-        else if (scan != 2'd2 && (!preserve_previous || previous != 2'd2) &&
-                 (!valid || ready != 2'd2))
-            choose_work_buf = 2'd2;
-        else
-            choose_work_buf = 2'd3;
+        lowest_free_buf = 3'd7;
+        for (i = 7; i >= 0; i = i - 1)
+            if (!busy[i]) lowest_free_buf = i[2:0];
     end
 endfunction
 
@@ -147,6 +153,23 @@ always @(*) begin
         3'd6: ctl_rdata = {6'h3f, 1'b0, ctl_latched[6][0]};
         default: ctl_rdata = 8'hfc;
     endcase
+end
+
+// Buffers that must not be chosen as the next erase/render target: the fields
+// currently being scanned, the completed fields queued to replace them, and a
+// frame still waiting to be published.
+reg [7:0] buf_busy;
+always @(*) begin
+    buf_busy = 8'd0;
+    buf_busy[scan_buf] = 1'b1;
+    if (ready_valid) buf_busy[ready_buf] = 1'b1;
+    if (retain_previous) begin
+        if (scan_fields >= 2'd1) buf_busy[scan_buf_prev]  = 1'b1;
+        if (scan_fields >= 2'd2) buf_busy[scan_buf_prev2] = 1'b1;
+        if (hist_any)            buf_busy[hist_buf[0]]    = 1'b1;
+        if (hist_depth >= 2'd1)  buf_busy[hist_buf[1]]    = 1'b1;
+        if (hist_depth >= 2'd2)  buf_busy[hist_buf[2]]    = 1'b1;
+    end
 end
 
 // list walker / renderer FSM
@@ -324,10 +347,10 @@ always @(posedge clk) begin
     if (rst) begin
         rs <= R_IDLE; rendering <= 0;
         disp_buf <= 2'b00;
-        scan_buf <= 2'b00;
-        scan_buf_prev <= 2'b00;
-        scan_dual <= 1'b0;
-        scan_seen <= 1'b0;
+        scan_buf <= 3'd0;
+        scan_buf_prev <= 3'd0;
+        scan_buf_prev2 <= 3'd0;
+        scan_fields <= 2'd0;
         debug_first_rom_desc <= 128'd0;
         debug_first_rom_valid <= 1'b0;
         debug_last_desc <= 128'd0;
@@ -350,10 +373,17 @@ always @(posedge clk) begin
         render_count <= 0; render_after_erase <= 0;
         erase_after_swap <= 0; erase_buf_sel <= 0;
         erase_mon <= 0; post_vblank_count <= 0;
-        work_buf <= 2'd1;
-        ready_buf <= 2'd0;
+        work_buf <= 3'd1;
+        ready_buf <= 3'd0;
         ready_valid <= 1'b0;
         publish_on_done <= 1'b0;
+        list_hash <= 32'd0;
+        hist_buf[0] <= 3'd0;
+        hist_buf[1] <= 3'd0;
+        hist_buf[2] <= 3'd0;
+        hist0_hash <= 32'd0;
+        hist_depth <= 2'd0;
+        hist_any <= 1'b0;
         vblank_pending <= 1'b0;         // audit R20 SP-3
         vblank_d <= 1'b0;
         present_d <= 1'b0;
@@ -385,19 +415,21 @@ always @(posedge clk) begin
         // line-0 DDR prefetch on raster line 261. Every visible scanline then
         // comes from one stable buffer. Multi 32 retains its two-buffer map.
         if (present_rise && !is_multi32 && ready_valid) begin
-            // Alien 3 deliberately alternates its P1 and P2 HUD/sight content.
-            // Keep the preceding completed field alive so scanout can combine
-            // the two fields, like the persistence visible on the original CRT.
-            // Other System 32 profiles retain the ordinary single-frame path.
-            if (retain_previous && scan_seen) begin
-                scan_buf_prev <= scan_buf;
-                scan_dual <= 1'b1;
+            // Alien 3 deliberately alternates its P1 and P2 HUD/sight content
+            // between object lists.  Publish the completed-field window so
+            // scanout can fold the retained fields in, like the persistence
+            // visible on the original CRT.  Other System 32 profiles publish
+            // the newest field alone, exactly as before.
+            if (retain_previous) begin
+                scan_buf       <= hist_buf[0];
+                scan_buf_prev  <= hist_buf[1];
+                scan_buf_prev2 <= hist_buf[2];
+                scan_fields    <= hist_depth;
             end
             else begin
-                scan_dual <= 1'b0;
+                scan_buf    <= ready_buf;
+                scan_fields <= 2'd0;
             end
-            scan_buf <= ready_buf;
-            scan_seen <= 1'b1;
             ready_valid <= 1'b0;
         end
 
@@ -451,7 +483,7 @@ always @(posedge clk) begin
                 rs <= R_SWAP;
             end
             else if (command[1]) begin
-                logic [1:0] erase_work;
+                logic [2:0] erase_work;
                 render_after_erase <= 1'b0;
                 erase_after_swap <= 1'b0;
                 rendering <= 1'b0;
@@ -459,16 +491,14 @@ always @(posedge clk) begin
                 erase_mon <= 1'b0;
                 if (is_multi32) begin
                     publish_on_done <= 1'b0;
-                    erase_buf_sel <= {1'b0, disp_buf[0]};
+                    erase_buf_sel <= {2'b0, disp_buf[0]};
                 end
                 else begin
                     // Triple-buffer: a standalone erase-displayed must NOT wipe
                     // the buffer being scanned (that flashes live scanout).
                     // Clear a hidden work buffer and publish it at vblank so the
                     // sprite layer blanks cleanly at a frame boundary instead.
-                    erase_work = choose_work_buf(scan_buf, scan_buf_prev,
-                                                 retain_previous && scan_dual,
-                                                 ready_buf, ready_valid);
+                    erase_work = lowest_free_buf(buf_busy);
                     work_buf       <= erase_work;
                     erase_buf_sel  <= erase_work;
                     publish_on_done <= 1'b1;
@@ -484,16 +514,14 @@ always @(posedge clk) begin
         end
 
         R_SWAP: begin
-            logic [1:0] next_work;
-            next_work = choose_work_buf(scan_buf, scan_buf_prev,
-                                        retain_previous && scan_dual,
-                                        ready_buf, ready_valid);
+            logic [2:0] next_work;
+            next_work = lowest_free_buf(buf_busy);
             debug_activity[3] <= 1'b1;
             debug_swap_count <= debug_sat_inc(debug_swap_count);
             disp_buf <= {1'b0, ~disp_buf[0]}; // bit0 is the sole A/B selector
             publish_on_done <= 1'b1;
             if (is_multi32)
-                scan_buf <= {1'b0, ~disp_buf[0]};
+                scan_buf <= {2'b0, ~disp_buf[0]};
             else begin
                 work_buf <= next_work;
                 erase_buf_sel <= next_work;
@@ -502,7 +530,7 @@ always @(posedge clk) begin
             ctl[0] <= 0;
             if (erase_after_swap) begin
                 if (is_multi32)
-                    erase_buf_sel <= {1'b0, disp_buf[0]};
+                    erase_buf_sel <= {2'b0, disp_buf[0]};
                 erase_after_swap <= 1'b0;
                 render_after_erase <= 1'b1;
                 rendering <= 1'b0;
@@ -519,6 +547,7 @@ always @(posedge clk) begin
             rendering <= 1'b1;
             list_idx <= 0;
             list_count <= 0;
+            list_hash <= 32'd0;
             jump_xoff <= 0; jump_yoff <= 0;
             clip_en <= 0; clipout_en <= 0;
             clip_l <= 0; clip_t <= 0;
@@ -528,7 +557,7 @@ always @(posedge clk) begin
         R_ERASE: begin
             debug_activity[1] <= 1'b1;
             fb_er_req <= 1'b1;
-            fb_er_buf <= is_multi32 ? {erase_mon, erase_buf_sel[0]}
+            fb_er_buf <= is_multi32 ? {1'b0, erase_mon, erase_buf_sel[0]}
                                     : erase_buf_sel;
             rs <= R_ERASEW;
         end
@@ -569,6 +598,10 @@ always @(posedge clk) begin
         end
         R_FETCHW: begin
             sw[swi] <= slist_data;   // = mem[base+swi]
+            // Signature covers every walked word, so it changes with the jump
+            // targets the game rotates each logic frame even when the drawn
+            // objects happen to be identical.
+            list_hash <= {list_hash[30:0], list_hash[31]} ^ {16'd0, slist_data};
             if (swi == 3'd7) rs <= R_DECODE;
             else begin
                 swi <= swi + 1'd1;
@@ -750,7 +783,7 @@ always @(posedge clk) begin
                                              && scry <= $signed(cout_b);
                 fb_wr_start <= 1'b1;
                 debug_activity[15] <= 1'b1;
-                fb_wr_buf <= is_multi32 ? {d_mon, ~disp_buf[0]} : work_buf;
+                fb_wr_buf <= is_multi32 ? {1'b0, d_mon, ~disp_buf[0]} : work_buf;
                 // MAME applies latched controller flip while scanning the
                 // displayed sprite framebuffer.  Mirroring writes into the
                 // back buffer is equivalent and keeps the framebuffer read
@@ -1034,6 +1067,26 @@ always @(posedge clk) begin
             if (!is_multi32 && publish_on_done) begin
                 ready_buf <= work_buf;
                 ready_valid <= 1'b1;
+                if (retain_previous) begin
+                    if (!hist_any) begin
+                        hist_buf[0] <= work_buf;
+                        hist0_hash  <= list_hash;
+                        hist_any    <= 1'b1;
+                    end
+                    else if (list_hash != hist0_hash) begin
+                        hist_buf[2] <= hist_buf[1];
+                        hist_buf[1] <= hist_buf[0];
+                        hist_buf[0] <= work_buf;
+                        hist0_hash  <= list_hash;
+                        if (hist_depth != 2'd2)
+                            hist_depth <= hist_depth + 1'd1;
+                    end
+                    else begin
+                        // Identical list: same picture, so it replaces the
+                        // newest entry and the retained window is untouched.
+                        hist_buf[0] <= work_buf;
+                    end
+                end
             end
             publish_on_done <= 1'b0;
             rs <= R_IDLE;
