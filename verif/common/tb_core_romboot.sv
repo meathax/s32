@@ -25,6 +25,10 @@
 //    +ARABHEAVYAT=<f> first field in the heavy-sprite recurrence window
 //    +ARABHEAVYN=<n>  consecutive fields to inspect (default 6)
 //    +ARABHEAVYMIN=<n> required fields with >=1400 sprite draw runs (default 3)
+//    +ARABENTRY       replay Arabian Fight through the level-1 neutral entrance;
+//                     pass when the player advances >=20 pixels between two
+//                     NBG1 scene markers matched to the MAME reference
+//    +QUIET           suppress routine per-frame diagnostics
 //
 //  This is a diagnostic, not a pass/fail tier: it reports boot progress
 //  (PC movement, RAM/VRAM/palette/sprite/io write counts, IRQs taken,
@@ -1255,9 +1259,11 @@ integer frames, f, p1_ev;
 integer arab_perf_at, arab_perf_n;
 integer arab_perf_samples = 0, arab_perf_misses = 0;
 reg arab_perf_done = 0;
-reg playmagic = 0, playfight = 0, arabentry = 0;
+reg playmagic = 0, playfight = 0, arabentry = 0, quiet = 0;
 integer arab_entry_x0 = 0, arab_entry_x1 = 0;
 integer arab_entry_dx = 0;
+integer arab_entry_f0 = -1, arab_entry_f1 = -1;
+reg arab_entry_started = 0;
 reg arab_entry_done = 0, arab_entry_failed = 0;
 initial begin
     if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
@@ -1266,6 +1272,7 @@ initial begin
     playmagic = $test$plusargs("PLAYMAGIC");
     playfight = $test$plusargs("PLAYFIGHT");
     arabentry = $test$plusargs("ARABENTRY");
+    quiet = $test$plusargs("QUIET");
     // Model the long board ROM-load reset: this fully flushes the production
     // jt12's 24-stage rings at its internally divided operator cadence.
     repeat (2048) @(posedge clk_sys);
@@ -1341,30 +1348,49 @@ initial begin
             if (f >= 700 && (f % 25) < 5) in_p1a_r[0] = 1'b0;           // Button1 attack
         end
         repeat (804000) @(posedge clk_sys);
-        if (arabentry && (f == 1620 || f == 1660)) begin
+        // Synchronise to the game scene rather than an absolute emulator frame.
+        // In the matched MAME replay, NBG1 is at 4.0x zoom and scroll X advances
+        // from 0x0271 to 0x0659 while the neutral-input player walks in.  Absolute
+        // frame numbers differ with CPU implementation speed, but these video
+        // registers and sprite-list positions describe the same game state.
+        if (arabentry && !arab_entry_started &&
+            core.tm_zoomx[1] == 16'h0400 &&
+            core.tm_scrollx[1] >= 16'h0271 && core.tm_scrollx[1] < 16'h0300) begin
             integer arab_jump_x;
             integer arab_raw_x;
             arab_jump_x = $signed({{20{core.sprite_ram.mem[16'h0002][11]}},
                                     core.sprite_ram.mem[16'h0002][11:0]});
             arab_raw_x = $signed({{20{core.sprite_ram.mem[16'h0065][11]}},
                                    core.sprite_ram.mem[16'h0065][11:0]});
-            if (f == 1620) arab_entry_x0 = arab_jump_x + arab_raw_x;
-            else begin
-                arab_entry_x1 = arab_jump_x + arab_raw_x;
-                arab_entry_dx = arab_entry_x1 - arab_entry_x0;
-                arab_entry_done = 1'b1;
-                $display("[arab-entry] f=1620 x=%0d f=1660 x=%0d dx=%0d jump=%0d raw=%0d",
-                    arab_entry_x0, arab_entry_x1, arab_entry_dx,
-                    arab_jump_x, arab_raw_x);
-                if (arab_entry_dx < 20) begin
-                    arab_entry_failed = 1'b1;
-                    $display("ARABIAN FIGHT ENTRY FAIL: neutral-input player advanced only %0d pixels (need >=20)",
-                        arab_entry_dx);
-                end
-                else
-                    $display("ARABIAN FIGHT ENTRY PASS: neutral-input player advanced %0d pixels",
-                        arab_entry_dx);
+            arab_entry_x0 = arab_jump_x + arab_raw_x;
+            arab_entry_f0 = f;
+            arab_entry_started = 1'b1;
+            $display("[arab-entry] start f=%0d n1sx=%04x x=%0d jump=%0d raw=%0d",
+                f, core.tm_scrollx[1], arab_entry_x0, arab_jump_x, arab_raw_x);
+        end
+        if (arabentry && arab_entry_started && !arab_entry_done &&
+            core.tm_zoomx[1] == 16'h0400 && core.tm_scrollx[1] >= 16'h0659) begin
+            integer arab_jump_x;
+            integer arab_raw_x;
+            arab_jump_x = $signed({{20{core.sprite_ram.mem[16'h0002][11]}},
+                                    core.sprite_ram.mem[16'h0002][11:0]});
+            arab_raw_x = $signed({{20{core.sprite_ram.mem[16'h0065][11]}},
+                                   core.sprite_ram.mem[16'h0065][11:0]});
+            arab_entry_x1 = arab_jump_x + arab_raw_x;
+            arab_entry_f1 = f;
+            arab_entry_dx = arab_entry_x1 - arab_entry_x0;
+            arab_entry_done = 1'b1;
+            $display("[arab-entry] end f=%0d n1sx=%04x x=%0d dx=%0d jump=%0d raw=%0d",
+                f, core.tm_scrollx[1], arab_entry_x1, arab_entry_dx,
+                arab_jump_x, arab_raw_x);
+            if (arab_entry_dx < 20) begin
+                arab_entry_failed = 1'b1;
+                $display("ARABIAN FIGHT ENTRY FAIL: neutral-input player advanced only %0d pixels between scene markers (need >=20)",
+                    arab_entry_dx);
             end
+            else
+                $display("ARABIAN FIGHT ENTRY PASS: neutral-input player advanced %0d pixels between scene markers",
+                    arab_entry_dx);
         end
         if (arab_perf_at >= 0 && f >= arab_perf_at &&
             f < arab_perf_at + arab_perf_n) begin
@@ -1387,6 +1413,7 @@ initial begin
                         arab_perf_samples, arab_perf_samples);
             end
         end
+        if (!quiet) begin
         $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
             f, core.v60.dbg_pc, core.v60.dbg_halted,
             n_wram_wr, n_vram_wr, n_pal_wr, n_spr_wr, n_io_wr, n_intc_wr,
@@ -1433,6 +1460,7 @@ initial begin
         $display("   tpage: F40=%04x F42=%04x F44=%04x F46=%04x F5c=%04x r00=%04x",
             core.tm_pages[0], core.tm_pages[1], core.tm_pages[2], core.tm_pages[3],
             core.tilemap.r1ff5c, core.tm_r1ff00);
+        end
         rdreq_cnt = 0; kick_cnt = 0; spr_cmd_cnt = 0; srom_req_cnt = 0; spr_opq_cnt = 0;
         p1a_rd_cnt = 0; coin_rd_cnt = 0; start_rd_cnt = 0;
     end
