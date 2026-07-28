@@ -47,6 +47,8 @@ wire [1:0]  fbe_buf;
 wire [7:0]  fbe_y;
 wire [1:0]  disp_buf;
 wire [1:0]  scan_buf;
+wire [1:0]  scan_buf_prev;
+wire        scan_dual;
 wire        rendering;
 
 reg present = 0;
@@ -54,10 +56,11 @@ reg vblank = 0;
 reg [7:0] ctl_addr = 0;
 reg [7:0] ctl_wdata = 0;
 reg       ctl_we = 0;
+reg       retain_previous = 0;
 
 // Small post-vblank delay keeps the sim short; behaviour is delay-independent.
 s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
-    .clk(clk), .rst(rst), .is_multi32(1'b0),
+    .clk(clk), .rst(rst), .is_multi32(1'b0), .retain_previous(retain_previous),
     .srom_bank_mask(2'b11),
     .present(present), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
@@ -73,7 +76,8 @@ s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
     .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
-    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf)
+    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf),
+    .scan_buf_prev(scan_buf_prev), .scan_dual(scan_dual)
 );
 
 // Non-backpressured DDR so passes complete quickly.
@@ -97,7 +101,8 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) fb (
     .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
-    .rd_req(1'b0), .rd_buf(2'd0), .rd_y(8'd0), .rd_ack(),
+    .rd_req(1'b0), .rd_buf(2'd0), .rd_buf_alt(2'd0), .rd_dual(1'b0),
+    .rd_y(8'd0), .rd_ack(),
     .rd_x(9'd0), .rd_pix()
 );
 
@@ -139,6 +144,12 @@ always @(posedge clk) begin
         $display("  FAIL framebuffer write/erase targets scanned buffer %0d",
                  scan_buf);
     end
+    if (!rst && scan_dual && (fbe_req || fbw_start) &&
+        ((fbe_req ? fbe_buf : fbw_buf) == scan_buf_prev)) begin
+        errors = errors + 1;
+        $display("  FAIL framebuffer write/erase targets retained buffer %0d",
+                 scan_buf_prev);
+    end
 end
 
 task write_ctl(input [2:0] a, input [7:0] d);
@@ -165,6 +176,14 @@ task pulse_and_settle(input integer width);
     // wait for the pass to run and the framebuffer to drain
     wait (rendering === 1'b1);
     wait (rendering === 1'b0);
+    wait (fbw_busy === 1'b0);
+    repeat (40) @(posedge clk);
+endtask
+
+task pulse_and_idle(input integer width);
+    pulse_frame(width);
+    wait (sprite.rs !== 0);
+    wait (sprite.rs === 0);
     wait (fbw_busy === 1'b0);
     repeat (40) @(posedge clk);
 endtask
@@ -267,6 +286,42 @@ initial begin
     if (!used_third_buffer) begin
         errors = errors + 1;
         $display("  FAIL overrun path did not rotate through buffer 2");
+    end
+
+    // ---- Alien 3 persistence: render every field and retain the prior one. ----
+    // Alien 3 alternates P1 and P2 HUD/sight content. After two completed
+    // publications scanout must expose both newest and preceding fields while
+    // the renderer rotates through a different physical work buffer.
+    rst <= 1'b1;
+    retain_previous <= 1'b1;
+    repeat (8) @(posedge clk);
+    rst <= 1'b0;
+    repeat (8) @(posedge clk);
+    write_ctl(3'd3, 8'h00);
+    repeat (8) @(posedge clk);
+    for (si = 0; si < 4; si = si + 1) begin
+        base_render = render_edges;
+        base_swap = swap_edges;
+        pulse_and_idle(2);
+        if (render_edges - base_render !== 1) begin
+            errors = errors + 1;
+            $display("  FAIL persistence frame %0d produced %0d renders (want 1)",
+                si, render_edges - base_render);
+        end
+        if (swap_edges - base_swap !== 1) begin
+            errors = errors + 1;
+            $display("  FAIL persistence frame %0d produced %0d swaps (want 1)",
+                si, swap_edges - base_swap);
+        end
+        if (si < 2 && scan_dual) begin
+            errors = errors + 1;
+            $display("  FAIL persistence enabled before two frames were published");
+        end
+        if (si >= 2 && (!scan_dual || scan_buf == scan_buf_prev)) begin
+            errors = errors + 1;
+            $display("  FAIL persistence frame %0d scan=%0d previous=%0d dual=%0d",
+                si, scan_buf, scan_buf_prev, scan_dual);
+        end
     end
 
     if (errors == 0) $display("SPRITE VBLANK PASS");

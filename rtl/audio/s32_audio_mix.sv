@@ -34,10 +34,14 @@ wire signed [19:0] mp_r_w  = {{4{mp_r[15]}},  mp_r};
 // multipcm add_route(1,"sleft") / add_route(0,"sright") — stream 1 -> left,
 // stream 0 -> right — the same cross as the YM).  mp channels were previously
 // routed straight, mirroring the MultiPCM stereo image on Multi 32.
-`ifdef S32_GOLDENAXE_ONLY
-// The dedicated Golden Axe revision is fixed to a single-screen System 32
-// board. Remove the Multi 32 routing cone at preprocessing time instead of
-// relying on cross-module constant propagation through is_multi32.
+`ifdef S32_V25_GAME_ONLY
+`define S32_FIXED_SYSTEM32_AUDIO
+`elsif S32_ALIEN3_ONLY
+`define S32_FIXED_SYSTEM32_AUDIO
+`endif
+`ifdef S32_FIXED_SYSTEM32_AUDIO
+// Dedicated revisions are fixed to single-screen System 32 boards.
+// Remove the Multi 32 routing cone at preprocessing time.
 wire signed [19:0] mix_l = (fm1_l_w <<< 1) + fm1_l_w
                          + (fm2_l_w <<< 1) + fm2_l_w
                          + (rf_l_w <<< 2);
@@ -55,7 +59,7 @@ wire signed [19:0] mix_r = is_multi32
       + (rf_r_w <<< 2);
 `endif
 
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_FIXED_SYSTEM32_AUDIO
 // Exact unsigned divide-by-10 from Hacker's Delight, applied to the magnitude
 // and signed afterward so negative results truncate toward zero exactly like
 // SystemVerilog signed `/ 10`. The complete input magnitude is 0..524288.
@@ -83,7 +87,7 @@ endfunction
 function automatic signed [15:0] scale_and_clip(input logic signed [19:0] sample);
     logic signed [19:0] scaled;
     begin
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_FIXED_SYSTEM32_AUDIO
         scaled = divide_by_10_exact(sample);
 `else
         scaled = is_multi32 ? (sample / 20'sd20) : (sample / 20'sd10);
@@ -98,3 +102,7 @@ assign audio_l = scale_and_clip(mix_l);
 assign audio_r = scale_and_clip(mix_r);
 
 endmodule
+
+`ifdef S32_FIXED_SYSTEM32_AUDIO
+`undef S32_FIXED_SYSTEM32_AUDIO
+`endif

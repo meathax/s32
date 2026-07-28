@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$BuildScript
+    [string]$BuildScript,
+    [ValidateRange(0, 3600)]
+    [int]$WaitSeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,13 +41,13 @@ function Append-Log([string]$Text) {
 
 try {
     try {
-        $acquired = $mutex.WaitOne(0)
+        $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($WaitSeconds))
     }
     catch [Threading.AbandonedMutexException] {
         $acquired = $true
     }
     if (-not $acquired) {
-        throw "Another Sega System 32 Quartus build is already active in $repoRoot."
+        throw "Another Sega System 32 Quartus build is already active in $repoRoot after waiting $WaitSeconds second(s)."
     }
 
     $gitHead = "unavailable"

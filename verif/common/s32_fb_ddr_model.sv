@@ -30,6 +30,8 @@ module s32_fb_ddr_model #(
 
     input             rd_req,
     input       [1:0] rd_buf,
+    input       [1:0] rd_buf_alt,
+    input             rd_dual,
     input       [7:0] rd_y,
     output            rd_ack,
     input       [8:0] rd_x,
@@ -63,7 +65,8 @@ s32_fb_if #(.FB_BASE(32'h0000_0000)) dut (
     .wr_valid(wr_valid), .wr_pix(wr_pix), .wr_end(wr_end),
     .wr_shadow(wr_shadow), .wr_busy(wr_busy),
     .er_req(er_req), .er_buf(er_buf), .er_y(er_y), .er_ack(er_ack),
-    .rd_req(rd_req), .rd_buf(rd_buf), .rd_y(rd_y), .rd_ack(rd_ack),
+    .rd_req(rd_req), .rd_buf(rd_buf), .rd_buf_alt(rd_buf_alt),
+    .rd_dual(rd_dual), .rd_y(rd_y), .rd_ack(rd_ack),
     .rd_x(rd_x), .rd_pix(rd_pix)
 );
 

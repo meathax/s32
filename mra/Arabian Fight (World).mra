@@ -3,7 +3,7 @@
   <setname>arabfgt</setname>
   <year>1991</year>
   <manufacturer>Sega</manufacturer>
-  <rbf>SegaS32</rbf>
+  <rbf>s32ArabianFight</rbf>
   <rom index="4" zip="arabfgt.zip" md5="none">
     <part name="epr-14609.ic8" crc="6a43c7fb"/>
     <part name="epr-14609.ic8" crc="6a43c7fb"/>

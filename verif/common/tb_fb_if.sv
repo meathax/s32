@@ -7,6 +7,10 @@
 //  4. line read-back through the rd port matches DDR contents
 //  5. display read wins over a simultaneous deferred sprite flush, and the
 //     sprite write remains queued and completes afterward
+//  6. Alien 3 dual-field scanout falls back to the preceding field only where
+//     the newest field is erased, retaining shadow pixels as authoritative
+//  7. a completed line is published only on the following raster boundary,
+//     so early next-line fetches cannot tear the line currently being scanned
 //
 //  The DDR model applies deterministic pseudo-random backpressure and
 //  variable read-response latency/bubbles.  Writes are deliberately modelled
@@ -33,6 +37,8 @@ reg  [7:0]  er_y = 0;
 wire        er_ack;
 reg         rd_req = 0;
 reg  [1:0]  rd_buf = 0;
+reg  [1:0]  rd_buf_alt = 0;
+reg         rd_dual = 0;
 reg  [7:0]  rd_y = 0;
 wire        rd_ack;
 reg  [8:0]  rd_x = 0;
@@ -57,7 +63,8 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) dut (
     .wr_valid(wr_valid), .wr_pix(wr_pix), .wr_end(wr_end),
     .wr_shadow(wr_shadow), .wr_busy(wr_busy),
     .er_req(er_req), .er_buf(er_buf), .er_y(er_y), .er_ack(er_ack),
-    .rd_req(rd_req), .rd_buf(rd_buf), .rd_y(rd_y), .rd_ack(rd_ack),
+    .rd_req(rd_req), .rd_buf(rd_buf), .rd_buf_alt(rd_buf_alt),
+    .rd_dual(rd_dual), .rd_y(rd_y), .rd_ack(rd_ack),
     .rd_x(rd_x), .rd_pix(rd_pix)
 );
 
@@ -198,6 +205,14 @@ task check(input [15:0] got, input [15:0] want, input [8:0] x);
     end
 endtask
 
+task commit_fetched_line;
+begin
+    // Model hcnt wrapping to zero. The ping-pong buffer swaps only here.
+    rd_x = 9'd511; @(posedge clk);
+    rd_x = 9'd0;   @(posedge clk);
+end
+endtask
+
 // all DUT inputs are driven with nonblocking assigns so they change after
 // the clock edge, like real registered outputs (avoids TB/DUT races)
 integer i;
@@ -205,6 +220,7 @@ integer erase_write_start;
 integer line_read_start;
 integer arb_read_start;
 integer arb_write_start;
+integer dual_read_start;
 initial begin
     repeat (5) @(posedge clk);
     rst <= 0;
@@ -294,6 +310,7 @@ initial begin
         $display("  FAIL held line-read accepted %0d requests, expected exactly 1",
                  read_accepts - line_read_start);
     end
+    commit_fetched_line();
     rd_x = 9'd3;  @(posedge clk); #1; check(rd_pix, 16'h8003, 3);
     rd_x = 9'd5;  @(posedge clk); #1; check(rd_pix, 16'h0005, 5);
     rd_x = 9'd9;  @(posedge clk); #1; check(rd_pix, 16'h8009, 9);
@@ -317,6 +334,10 @@ initial begin
     end
     @(posedge rd_ack); rd_req <= 0;
     wait (!rd_ack);
+    // The newly fetched line must not replace the line being scanned until X
+    // wraps. Pixel 3 therefore still comes from the preceding published line.
+    rd_x = 9'd3; @(posedge clk); #1; check(rd_pix, 16'h8003, 3);
+    commit_fetched_line();
     wait (!wr_busy); repeat (4) @(posedge clk);
     if ((write_accepts - arb_write_start) != 1) begin
         errors = errors + 1;
@@ -324,6 +345,29 @@ initial begin
                  write_accepts - arb_write_start);
     end
     check(ddr_pix(6, 30), 16'hABCD, 30);
+
+    // 6: composite two completed Alien 3 fields. The newest field wins where
+    // populated; erased pixels fall back to the preceding P1/P2 field. A
+    // transparent 0x7fff shadow pixel retains the prior pixel with bit 15
+    // cleared, matching the mixer shadow-RMW convention.
+    ddr[7 * 128] = {16'hffff, 16'h7fff, 16'hffff, 16'h9001};
+    ddr[32768 + 7 * 128] = {16'hffff, 16'ha003, 16'ha002, 16'ha001};
+    dual_read_start = read_accepts;
+    rd_y <= 8'd7; rd_buf <= 2'd0; rd_buf_alt <= 2'd1;
+    rd_dual <= 1'b1; rd_req <= 1'b1;
+    @(posedge rd_ack); rd_req <= 1'b0;
+    wait (!rd_ack); repeat (2) @(posedge clk);
+    if ((read_accepts - dual_read_start) != 2) begin
+        errors = errors + 1;
+        $display("  FAIL dual-field read accepted %0d bursts, expected 2",
+                 read_accepts - dual_read_start);
+    end
+    commit_fetched_line();
+    rd_x = 9'd0; @(posedge clk); #1; check(rd_pix, 16'h9001, 0);
+    rd_x = 9'd1; @(posedge clk); #1; check(rd_pix, 16'ha002, 1);
+    rd_x = 9'd2; @(posedge clk); #1; check(rd_pix, 16'h2003, 2);
+    rd_x = 9'd3; @(posedge clk); #1; check(rd_pix, 16'hffff, 3);
+    rd_dual <= 1'b0;
 
     if (stalled_request_cycles == 0) begin
         errors = errors + 1;

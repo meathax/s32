@@ -296,9 +296,10 @@ endfunction
 // snapshot. The priority tree then drives only a shallow 8:1 index mux.
 reg [13:0] idx_text_s, idx_nbg0_s, idx_nbg1_s, idx_nbg2_s;
 reg [13:0] idx_nbg3_s, idx_bmp_s, idx_spr_s, idx_bg_s;
+reg [19:0] li_spr_s;
 reg [13:0] idx_winner, idx_runner;
 always @(*) begin
-    case (bestsel)
+    case (bestsel_hold)
         4'd0: idx_winner = idx_text_s; 4'd1: idx_winner = idx_nbg0_s;
         4'd2: idx_winner = idx_nbg1_s; 4'd3: idx_winner = idx_nbg2_s;
         4'd4: idx_winner = idx_nbg3_s; 4'd5: idx_winner = idx_bmp_s;
@@ -422,8 +423,8 @@ endfunction
 // Pixel period is 12 clk_ram in 416 mode and >= 14 in 320 mode.
 //   T0 (disp_x changes): synchronous line-RAM read is issued
 //   T1: snapshot candidates from the RAM outputs
-//   T2: resolve/register winner
-//   T3: resolve/register blend partner
+//   T2: resolve/register winner and finish the sprite palette index
+//   T3: resolve/register blend partner and issue the winner palette lookup
 //   T4: latch the runner palette index and final context
 //   P0: present the second palette index; the first address has already been
 //       registered for a full clk_ram edge, so its data is in flight
@@ -434,7 +435,7 @@ endfunction
 // ---------------------------------------------------------------------------
 reg [8:0]  dx_d;
 reg [3:0]  ph;
-reg        launch_pending;
+reg        pixel_changed;
 reg        winner_pending;
 reg        second_pending;
 reg        context_pending;
@@ -479,31 +480,43 @@ function automatic signed [11:0] blend_chan(
     end
 endfunction
 
+// Keep the palette-address launch mux independent of the pixel-start
+// qualifier below.  When pal_addr_r lived in the main priority chain,
+// Quartus folded (disp_x != dx_d) and every intervening state test into the
+// register's enable/data cone.  Both launch points are already identified by
+// registered state, so this small dedicated block preserves the exact lookup
+// edges while removing display X from the palette-address timing path.
+always @(posedge clk) begin
+    if (rst)
+        pal_addr_r <= 14'd0;
+    else if (second_pending)
+        pal_addr_r <= idx_winner;
+    else if (ph == 4'd0)
+        pal_addr_r <= idx2_hold;
+end
+
 always @(posedge clk) begin
     logic signed [11:0] rr, gg, bb;
 
     dx_d <= disp_x;
+    // mix_disp_x_cdc is updated on the opposite clk_ram edge.  Register the
+    // change indication here before it fans into the wide candidate snapshot
+    // bank.  This preserves the existing T1 snapshot edge while replacing a
+    // half-cycle disp_x comparator/enable path with one full-cycle strobe.
+    pixel_changed <= (disp_x != dx_d);
     // Register the palette output before the offset/blend DSP chain.
     pal_data_r <= pal_data;
     if (rst) begin
         ph <= 4'hF;
-        launch_pending <= 1'b0;
+        pixel_changed <= 1'b0;
         winner_pending <= 1'b0;
         second_pending <= 1'b0;
         context_pending <= 1'b0;
         rgb <= 24'h000000;
     end
-    else if (disp_x != dx_d) begin
-        // The line memories sample disp_x on this edge.  Their registered
-        // outputs become visible after the edge, so launch winner selection
-        // on the following clock rather than pairing old pixels with new x.
-        launch_pending <= 1'b1;
-        winner_pending <= 1'b0;
-        second_pending <= 1'b0;
-        context_pending <= 1'b0;
-        ph <= 4'hF;
-    end
-    else if (launch_pending) begin
+    else if (pixel_changed) begin
+        // The line memories sampled disp_x on the preceding edge. Their
+        // registered outputs are now stable, so snapshot all candidates.
         ep_spr_s     <= ep_spr;
         ep_text_s    <= ep_text;
         ep_nbg0_s    <= ep_nbg0;
@@ -518,7 +531,11 @@ always @(posedge clk) begin
         idx_nbg2_s   <= mk_palidx(li_nbg2);
         idx_nbg3_s   <= mk_palidx(li_nbg3);
         idx_bmp_s    <= mk_palidx(li_bmp);
-        idx_spr_s    <= mk_palidx(li_spr);
+        // The sprite line comes directly from the framebuffer M10K.  Retain
+        // its compact palette-info word here, then perform the shift/add on
+        // the following edge.  This uses the existing winner stage and keeps
+        // the M10K output out of the palette-index arithmetic timing cone.
+        li_spr_s     <= li_spr;
         idx_bg_s     <= mk_palidx(li_bg);
         spr_group_raw_s <= spr_group_raw;
         spr_shadow_src_s <= spr_shadow_src;
@@ -528,20 +545,18 @@ always @(posedge clk) begin
         r4c15_s <= r4c[15];
         layer_color_flags_s <= layer_color_flags;
         act_hold <= disp_active & display_en;
-        launch_pending <= 1'b0;
         winner_pending <= 1'b1;
+        second_pending <= 1'b0;
+        context_pending <= 1'b0;
+        ph <= 4'hF;
     end
     else if (winner_pending) begin
+        idx_spr_s <= mk_palidx(li_spr_s);
         best_hold <= best;
         bestsel_hold <= bestsel;
         runner_first_hold <= win_loser_first;
         runner_second_hold <= win_loser_second;
         runner_final_hold <= win_loser_final;
-        // The candidate snapshot already makes the winner and its palette
-        // index stable. Start the registered palette lookup here, two stages
-        // before P0, leaving ample latency before first_pal is retained at P2.
-        pal_addr_r <= idx_winner;
-
         winner_pending <= 1'b0;
         second_pending <= 1'b1;
     end
@@ -555,6 +570,10 @@ always @(posedge clk) begin
         // redundant 7-bit comparisons from the path toward idx2_hold.
         best2_hold    <= best2;
         best2sel_hold <= best2sel;
+        // bestsel_hold and every palette index are now registered.  Issue the
+        // first lookup here so the priority tournament no longer feeds the
+        // palette-address register in the same cycle.  The existing P2 sample
+        // remains four clocks later, preserving the output-pixel schedule.
         second_pending <= 1'b0;
         context_pending <= 1'b1;
     end
@@ -570,9 +589,8 @@ always @(posedge clk) begin
     else if (ph != 4'hF) begin
         ph <= ph + 1'd1;
         if (ph == 4'd0) begin
-            // The first address was issued in winner_pending. Switch now so
+            // The first address was issued in the partner stage. Switch now so
             // the second registered lookup is available well before P4.
-            pal_addr_r <= idx2_hold;
         end
         else if (ph == 4'd2) begin
             first_pal <= pal_data_r;

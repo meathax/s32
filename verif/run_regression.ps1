@@ -439,11 +439,13 @@ try {
     Run-HdlTest "t07_v60_fpdecode" "tb_v60_fpdecode" ($V60Sources + "verif/v60/tb_v60_fpdecode.sv") "V60 FPDECODE PASS"
     Run-HdlTest "t07_v60_no_fp" "tb_v60_no_fp" ($V60Sources + "verif/v60/tb_v60_no_fp.sv") "V60 NO-FP PASS" @("S32_V60_NO_FP")
 
-    Write-Tier 8 "release contracts + exact Golden Axe profile boot/cache"
+    Write-Tier 8 "release contracts + exact dedicated-game profile boot/cache"
     $releaseOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_holo_release.py") "Holo release MRA check")
     Assert-Marker $releaseOutput "HOLO RELEASE MRA PASS" "Holo release MRA check"
     $ga2MraOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_ga2_release.py") "GA2 compatibility MRA check")
     Assert-Marker $ga2MraOutput "GA2 COMPAT MRA PASS" "GA2 compatibility MRA check"
+    $arabMraOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_arabianfight_release.py") "Arabian Fight release MRA check")
+    Assert-Marker $arabMraOutput "ARABIAN FIGHT RELEASE PASS" "Arabian Fight release MRA check"
     Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @(
         "SIMULATION", "S32_GOLDENAXE_ONLY", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY",
         "S32_V60_NO_FP", "S32_RELEASE_MINIMAL"
@@ -490,8 +492,9 @@ try {
     Run-HdlTest "t17_rom_loader" "tb_rom_loader" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader.sv") "ROM LOADER PASS"
     Run-HdlTest "t17_rom_loader_wide" "tb_rom_loader_wide" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader_wide.sv") "WIDE ROM LOADER PASS"
 
-    Write-Tier 18 "EEPROM NVRAM upload byte order / dirty-state persistence"
+    Write-Tier 18 "EEPROM persistence + radial analog-gun response"
     Run-HdlTest "t18_eeprom" "tb_eeprom_nvram" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_eeprom_nvram.sv") "EEPROM NVRAM PASS"
+    Run-HdlTest "t18_gun_aim" "tb_gun_aim" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_gun_aim.sv") "GUN AIM PASS"
 
     Write-Tier 19 "V60 20-byte F1 / high fetch-buffer offset regression"
     Run-HdlTest "t19_v60_long_ea" "tb_v60_long_ea" ($V60Sources + "verif/v60/tb_v60_long_ea.sv") "LONG EA PASS"

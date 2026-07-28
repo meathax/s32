@@ -5,7 +5,7 @@ param(
     [ValidatePattern('^[A-Za-z0-9_.-]+$')]
     [string]$Revision,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Fresh", "MapRetry", "Candidate")]
+    [ValidateSet("Fresh", "MapRetry", "DatabaseRetry", "RevisionFresh", "Candidate")]
     [string]$Mode
 )
 
@@ -52,6 +52,27 @@ switch ($Mode) {
         Remove-CheckedPath (Join-Path $ProjectRoot "db")
         Remove-CheckedPath (Join-Path $ProjectRoot "incremental_db")
         Remove-CheckedPath $outputDir
+    }
+    "DatabaseRetry" {
+        # Recover generated elaboration databases after a no-summary map crash
+        # while retaining reports, seed archives, and programming artifacts.
+        Remove-CheckedPath (Join-Path $ProjectRoot "db")
+        Remove-CheckedPath (Join-Path $ProjectRoot "incremental_db")
+    }
+    "RevisionFresh" {
+        # Recover one demonstrably corrupt revision without discarding the
+        # compilation databases and caches belonging to other revisions.
+        foreach ($directory in @(
+            (Join-Path $ProjectRoot "db"),
+            (Join-Path $ProjectRoot "incremental_db"),
+            $outputDir
+        )) {
+            if (Test-Path -LiteralPath $directory -PathType Container) {
+                Get-ChildItem -LiteralPath $directory -Recurse -File -Force |
+                    Where-Object { $_.Name.StartsWith($Revision, [StringComparison]::OrdinalIgnoreCase) } |
+                    ForEach-Object { Remove-CheckedPath $_.FullName }
+            }
+        }
     }
     "Candidate" {
         foreach ($suffix in @(

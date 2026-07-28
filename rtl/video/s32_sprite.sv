@@ -21,6 +21,7 @@ module s32_sprite #(
     input       [1:0] srom_bank_mask,
 
     // frame control
+    input             retain_previous, // Alien 3: scan current + prior completed field
     input             present,      // start-of-vblank pulse: publish completed frame
     input             vblank,       // end-of-vblank pulse (1 clk_sys wide =
                                     // 2 clk_ram samples; edge-detected below)
@@ -72,7 +73,9 @@ module s32_sprite #(
     input             fb_er_ack,
 
     output reg  [1:0] disp_buf,     // game-visible logical A/B selector
-    output reg  [1:0] scan_buf      // physical buffer the mixer reads
+    output reg  [1:0] scan_buf,     // newest physical buffer the mixer reads
+    output reg  [1:0] scan_buf_prev,// preceding completed field (Alien 3)
+    output reg        scan_dual     // both scan buffers contain valid fields
 );
 
 // control registers
@@ -86,6 +89,7 @@ reg       erase_mon;                // Multi32 erase visits both monitors
 reg [1:0] work_buf;                 // physical System32 erase/render target
 reg [1:0] ready_buf;                // completed System32 frame awaiting vblank
 reg       ready_valid;
+reg       scan_seen;                // at least one completed frame was published
 reg       publish_on_done;          // current command includes a render pass
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
@@ -105,16 +109,23 @@ wire       present_rise = present & ~present_d;
 // the lowest keeps the normal 0/1 cadence and reserves slot 2 for overruns.
 function automatic [1:0] choose_work_buf(
     input [1:0] scan,
+    input [1:0] previous,
+    input       preserve_previous,
     input [1:0] ready,
     input       valid
 );
     begin
-        if (scan != 2'd0 && (!valid || ready != 2'd0))
+        if (scan != 2'd0 && (!preserve_previous || previous != 2'd0) &&
+            (!valid || ready != 2'd0))
             choose_work_buf = 2'd0;
-        else if (scan != 2'd1 && (!valid || ready != 2'd1))
+        else if (scan != 2'd1 && (!preserve_previous || previous != 2'd1) &&
+                 (!valid || ready != 2'd1))
             choose_work_buf = 2'd1;
-        else
+        else if (scan != 2'd2 && (!preserve_previous || previous != 2'd2) &&
+                 (!valid || ready != 2'd2))
             choose_work_buf = 2'd2;
+        else
+            choose_work_buf = 2'd3;
     end
 endfunction
 
@@ -149,7 +160,14 @@ typedef enum logic [4:0] {
     R_PIXEL_DATA, R_DONE, R_DELAY,
     R_ROM_GAP, R_ROM_VERIFY, R_ROM_VERIFYW, R_ROM_RETRY
 } rst_t;
+`ifdef S32_ALIEN3_ONLY
+// Alien 3's dedicated build has enough ALM headroom to trade a few state
+// flops for much shallower renderer enables.  Binary rs[0] decoding was the
+// remaining 96 MHz critical cone after the dedicated profile was pruned.
+(* syn_encoding = "onehot" *) rst_t rs;
+`else
 rst_t rs;
+`endif
 
 // latched sprite entry
 reg [15:0] sw [0:7];
@@ -307,6 +325,9 @@ always @(posedge clk) begin
         rs <= R_IDLE; rendering <= 0;
         disp_buf <= 2'b00;
         scan_buf <= 2'b00;
+        scan_buf_prev <= 2'b00;
+        scan_dual <= 1'b0;
+        scan_seen <= 1'b0;
         debug_first_rom_desc <= 128'd0;
         debug_first_rom_valid <= 1'b0;
         debug_last_desc <= 128'd0;
@@ -364,7 +385,19 @@ always @(posedge clk) begin
         // line-0 DDR prefetch on raster line 261. Every visible scanline then
         // comes from one stable buffer. Multi 32 retains its two-buffer map.
         if (present_rise && !is_multi32 && ready_valid) begin
+            // Alien 3 deliberately alternates its P1 and P2 HUD/sight content.
+            // Keep the preceding completed field alive so scanout can combine
+            // the two fields, like the persistence visible on the original CRT.
+            // Other System 32 profiles retain the ordinary single-frame path.
+            if (retain_previous && scan_seen) begin
+                scan_buf_prev <= scan_buf;
+                scan_dual <= 1'b1;
+            end
+            else begin
+                scan_dual <= 1'b0;
+            end
             scan_buf <= ready_buf;
+            scan_seen <= 1'b1;
             ready_valid <= 1'b0;
         end
 
@@ -433,7 +466,9 @@ always @(posedge clk) begin
                     // the buffer being scanned (that flashes live scanout).
                     // Clear a hidden work buffer and publish it at vblank so the
                     // sprite layer blanks cleanly at a frame boundary instead.
-                    erase_work = choose_work_buf(scan_buf, ready_buf, ready_valid);
+                    erase_work = choose_work_buf(scan_buf, scan_buf_prev,
+                                                 retain_previous && scan_dual,
+                                                 ready_buf, ready_valid);
                     work_buf       <= erase_work;
                     erase_buf_sel  <= erase_work;
                     publish_on_done <= 1'b1;
@@ -450,7 +485,9 @@ always @(posedge clk) begin
 
         R_SWAP: begin
             logic [1:0] next_work;
-            next_work = choose_work_buf(scan_buf, ready_buf, ready_valid);
+            next_work = choose_work_buf(scan_buf, scan_buf_prev,
+                                        retain_previous && scan_dual,
+                                        ready_buf, ready_valid);
             debug_activity[3] <= 1'b1;
             debug_swap_count <= debug_sat_inc(debug_swap_count);
             disp_buf <= {1'b0, ~disp_buf[0]}; // bit0 is the sole A/B selector

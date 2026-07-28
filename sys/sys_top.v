@@ -1159,10 +1159,18 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 
 	wire [23:0] hdmi_data_mask;
 	wire        hdmi_de_mask, hdmi_vs_mask, hdmi_hs_mask;
+	reg  [15:0] shadowmask_data;
+	reg         shadowmask_wr = 0;
 
-	reg [15:0] shadowmask_data;
-	reg        shadowmask_wr = 0;
-
+	`ifdef MISTER_DISABLE_SHADOWMASK
+	// Dedicated area-constrained profiles can omit the optional CRT mask
+	// post-process. Keep blanking and sync semantics identical at the OSD input;
+	// only the mask pipeline latency/effect is removed.
+	assign hdmi_data_mask = dis_output ? 24'd0 : hdmi_data;
+	assign hdmi_hs_mask   = hdmi_hs;
+	assign hdmi_vs_mask   = hdmi_vs;
+	assign hdmi_de_mask   = hdmi_de;
+	`else
 	shadowmask HDMI_shadowmask
 	(
 		.clk(clk_hdmi),
@@ -1183,6 +1191,7 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.vs_out(hdmi_vs_mask),
 		.de_out(hdmi_de_mask)
 	);
+	`endif
 
 	wire [23:0] hdmi_data_osd;
 	wire        hdmi_de_osd, hdmi_vs_osd, hdmi_hs_osd;
@@ -1476,17 +1485,46 @@ reg  [39:0] PhaseInc;
 	wire VGA_DISABLE;
 	wire [23:0] vgas_o;
 	wire vgas_hs, vgas_vs, vgas_cs, vgas_de;
+	wire [23:0] hdmi_data_vgas_in;
+	wire hdmi_hs_vgas_in, hdmi_vs_vgas_in, hdmi_cs_vgas_in, hdmi_de_vgas_in;
+	`ifdef S32_ARABFIGHT_ONLY
+		// The Arabian-only fit places the HDMI OSD and the VGA scaler shift
+		// RAM at opposite ends of the device. Preserve one matched pipeline
+		// stage at their boundary so Quartus can place it between the blocks
+		// instead of routing the OSD mux directly into the scaler M10K.
+		(* preserve *) reg [23:0] hdmi_data_vgas_pipe;
+		(* preserve *) reg hdmi_hs_vgas_pipe, hdmi_vs_vgas_pipe;
+		(* preserve *) reg hdmi_cs_vgas_pipe, hdmi_de_vgas_pipe;
+		always @(posedge clk_hdmi) begin
+			hdmi_data_vgas_pipe <= hdmi_data_osd;
+			hdmi_hs_vgas_pipe   <= hdmi_hs_osd;
+			hdmi_vs_vgas_pipe   <= hdmi_vs_osd;
+			hdmi_cs_vgas_pipe   <= hdmi_cs_osd;
+			hdmi_de_vgas_pipe   <= hdmi_de_osd;
+		end
+		assign hdmi_data_vgas_in = hdmi_data_vgas_pipe;
+		assign hdmi_hs_vgas_in   = hdmi_hs_vgas_pipe;
+		assign hdmi_vs_vgas_in   = hdmi_vs_vgas_pipe;
+		assign hdmi_cs_vgas_in   = hdmi_cs_vgas_pipe;
+		assign hdmi_de_vgas_in   = hdmi_de_vgas_pipe;
+	`else
+		assign hdmi_data_vgas_in = hdmi_data_osd;
+		assign hdmi_hs_vgas_in   = hdmi_hs_osd;
+		assign hdmi_vs_vgas_in   = hdmi_vs_osd;
+		assign hdmi_cs_vgas_in   = hdmi_cs_osd;
+		assign hdmi_de_vgas_in   = hdmi_de_osd;
+	`endif
 	`ifndef MISTER_DEBUG_NOHDMI
 		vga_out vga_scaler_out
 		(
 			.clk(clk_hdmi),
 			.ypbpr_en(ypbpr_en),
-			.hsync(hdmi_hs_osd),
-			.vsync(hdmi_vs_osd),
-			.csync(hdmi_cs_osd),
-			.de(hdmi_de_osd),
+			.hsync(hdmi_hs_vgas_in),
+			.vsync(hdmi_vs_vgas_in),
+			.csync(hdmi_cs_vgas_in),
+			.de(hdmi_de_vgas_in),
 			.dout(vgas_o),
-			.din({24{hdmi_de_osd}} & hdmi_data_osd),
+			.din({24{hdmi_de_vgas_in}} & hdmi_data_vgas_in),
 			.hsync_o(vgas_hs),
 			.vsync_o(vgas_vs),
 			.csync_o(vgas_cs),

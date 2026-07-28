@@ -102,7 +102,11 @@ BUTTONS = {
 }
 
 BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2}
-RBF_BY_PARENT = {"ga2": "s32GoldenAxe"}
+RBF_BY_PARENT = {
+    "ga2": "s32GoldenAxe",
+    "arabfgt": "s32ArabianFight",
+    "alien3": "s32Alien3",
+}
 
 UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
 
@@ -315,7 +319,12 @@ def gen(setname, data, outdir):
 
     # Defaults precede index 0 so the descriptor is the final boot commit.
     ee = regions.get("eeprom")
-    if ee and ee["loads"]:
+    # Alien 3's tiny factory EEPROM dump is absent from many otherwise valid
+    # MAME ROM sets. Requiring it makes MiSTer abort with a misleading missing
+    # "93c45_eeprom.ic76" error. The core's erased 93C46 image and index-3
+    # persistent NVRAM provide the same writable hardware contract, so let the
+    # game initialise it instead of requiring a separate copyrighted dump.
+    if ee and ee["loads"] and parent != "alien3":
         lines.append('  <rom index="2">')
         lines.append(f'    <part name="{escape(ee["loads"][0]["file"])}" crc="{ee["loads"][0]["crc"]}"/>')
         lines.append('  </rom>')

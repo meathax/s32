@@ -64,9 +64,10 @@ vvp /tmp/s32_v60_fpdecode | grep -q "V60 FPDECODE PASS" && echo "V60 FPDECODE: P
 iverilog -g2012 -DS32_V60_NO_FP -o /tmp/s32_v60_no_fp \
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_no_fp.sv
 vvp /tmp/s32_v60_no_fp | grep -q "V60 NO-FP PASS" && echo "V60 NO-FP: PASS" || { echo "V60 NO-FP: FAIL"; exit 1; }
-echo "[8/35] release contracts + exact Golden Axe profile boot/cache"
+echo "[8/35] release contracts + exact dedicated-game profile boot/cache"
 python3 verif/check_holo_release.py | grep -q "HOLO RELEASE MRA PASS" || { echo "HOLO RELEASE MRA: FAIL"; exit 1; }
 python3 verif/check_ga2_release.py | grep -q "GA2 COMPAT MRA PASS" || { echo "GA2 COMPAT MRA: FAIL"; exit 1; }
+python3 verif/check_arabianfight_release.py | grep -q "ARABIAN FIGHT RELEASE PASS" || { echo "ARABIAN FIGHT RELEASE MRA: FAIL"; exit 1; }
 iverilog -g2012 -DSIMULATION -DS32_GOLDENAXE_ONLY -DS32_SYSTEM32_ONLY -DS32_GA2_ONLY \
   -DS32_V60_NO_FP -DS32_RELEASE_MINIMAL -o /tmp/s32_ga2 \
   rtl/s32_pkg.sv rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv \
@@ -112,10 +113,13 @@ echo "[17/35] ROM loader reset / mapping / completion gating"
 iverilog -g2012 -o /tmp/s32_rom_loader \
   rtl/s32_pkg.sv rtl/mem/s32_rom_loader.sv verif/common/tb_rom_loader.sv
 vvp /tmp/s32_rom_loader | grep -q "ROM LOADER PASS" && echo "ROM LOADER: PASS" || { echo "ROM LOADER: FAIL"; exit 1; }
-echo "[18/35] EEPROM NVRAM upload byte order / dirty-state persistence"
+echo "[18/35] EEPROM persistence + radial analog-gun response"
 iverilog -g2012 -o /tmp/s32_eeprom_nvram \
   rtl/s32_pkg.sv rtl/io/s32_io.sv verif/common/tb_eeprom_nvram.sv
 vvp /tmp/s32_eeprom_nvram | grep -q "EEPROM NVRAM PASS" && echo "EEPROM NVRAM: PASS" || { echo "EEPROM NVRAM: FAIL"; exit 1; }
+iverilog -g2012 -o /tmp/s32_gun_aim \
+  rtl/s32_pkg.sv rtl/io/s32_io.sv verif/common/tb_gun_aim.sv
+vvp /tmp/s32_gun_aim | grep -q "GUN AIM PASS" && echo "GUN AIM: PASS" || { echo "GUN AIM: FAIL"; exit 1; }
 echo "[19/35] V60 20-byte F1 / high fetch-buffer offset regression"
 iverilog -g2012 -o /tmp/s32_v60_long_ea \
   rtl/cpu/v60/s32_v60.sv rtl/cpu/v60/s32_v60_bus.sv verif/v60/tb_v60_long_ea.sv

@@ -270,9 +270,20 @@ $fitSeed = Match-Value $fitReport '(?m)^;\s*Fitter Initial Placement Seed\s*;\s*
 $configuredSeed = Match-Value $qsf '(?m)^set_global_assignment -name SEED\s+(\d+)\s*$'
 $seedMatchesExpected = $ExpectedSeed -lt 0 -or
     ($fitSeed -and [int]$fitSeed -eq $ExpectedSeed)
+$mapNewestUtc = [DateTime]::MinValue
+foreach ($item in @($mapSummaryFile, $mapReportFile)) {
+    if ($item -and $item.LastWriteTimeUtc -gt $mapNewestUtc) {
+        $mapNewestUtc = $item.LastWriteTimeUtc
+    }
+}
+# The clean flow writes the manifest immediately after map, whereas the Smart
+# Recompile flow records it after Quartus completes.  In both cases the map
+# hashes and input fingerprint above establish provenance; fit freshness must
+# therefore be ordered after the hashed map artifacts, not after the time at
+# which their manifest happened to be written.
 $fitIsCurrent = $fitSuccessful -and $mapIsCurrent -and [bool]$fitSummaryFile -and
-    [bool]$fitReportFile -and $fitSummaryFile.LastWriteTimeUtc -ge $manifestFile.LastWriteTimeUtc -and
-    $fitReportFile.LastWriteTimeUtc -ge $manifestFile.LastWriteTimeUtc -and $seedMatchesExpected
+    [bool]$fitReportFile -and $fitSummaryFile.LastWriteTimeUtc -ge $mapNewestUtc -and
+    $fitReportFile.LastWriteTimeUtc -ge $mapNewestUtc -and $seedMatchesExpected
 $fitNewestUtc = [DateTime]::MinValue
 foreach ($item in @($fitSummaryFile, $fitReportFile)) {
     if ($item -and $item.LastWriteTimeUtc -gt $fitNewestUtc) {

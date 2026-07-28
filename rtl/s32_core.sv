@@ -6,6 +6,14 @@
 
 import s32_pkg::*;
 
+// Fixed-clock dedicated revisions can use the single-port synchronous V60
+// cache. Keep this preprocessing choice local to this compilation unit.
+`ifdef S32_V25_GAME_ONLY
+`define S32_AREA_ROM_CACHE
+`elsif S32_ALIEN3_ONLY
+`define S32_AREA_ROM_CACHE
+`endif
+
 module s32_core #(
 `ifdef S32_SYSTEM32_ONLY
     // The SegaS32 Quartus revision sets this macro so Cyclone V only pays for
@@ -79,6 +87,8 @@ module s32_core #(
     input             fb_er_ack,
     output            fb_rd_req,
     output      [1:0] fb_rd_buf,
+    output      [1:0] fb_rd_buf_alt,
+    output            fb_rd_dual,
     output      [7:0] fb_rd_y,
     input             fb_rd_ack,
     output      [8:0] fb_rd_x,
@@ -143,33 +153,58 @@ module s32_core #(
     output     [89:0] debug_v25_img     // {sweep_done, first_valid, hash[23:0], first_line[63:0]}
 );
 
-`ifdef S32_GOLDENAXE_ONLY
-localparam GOLDENAXE_ONLY = 1'b1;
-localparam GAME_ONLY      = 1'b1;
+`ifdef S32_V25_GAME_ONLY
+localparam V25_GAME_ONLY = 1'b1;
+localparam GAME_ONLY     = 1'b1;
 `elsif S32_GA2_ONLY
-localparam GOLDENAXE_ONLY = 1'b0;
-localparam GAME_ONLY      = 1'b1;
+localparam V25_GAME_ONLY = 1'b0;
+localparam GAME_ONLY     = 1'b1;
 `elsif S32_HOLO_ONLY
-localparam GOLDENAXE_ONLY = 1'b0;
-localparam GAME_ONLY      = 1'b1;
+localparam V25_GAME_ONLY = 1'b0;
+localparam GAME_ONLY     = 1'b1;
+`elsif S32_ALIEN3_ONLY
+localparam V25_GAME_ONLY = 1'b0;
+localparam GAME_ONLY     = 1'b1;
 `elsif S32_JPARK_ONLY
-localparam GOLDENAXE_ONLY = 1'b0;
-localparam GAME_ONLY      = 1'b1;
+localparam V25_GAME_ONLY = 1'b0;
+localparam GAME_ONLY     = 1'b1;
 `else
-localparam GOLDENAXE_ONLY = 1'b0;
-localparam GAME_ONLY      = 1'b0;
+localparam V25_GAME_ONLY = 1'b0;
+localparam GAME_ONLY     = 1'b0;
 `endif
 
-// Dedicated Golden Axe hardware constants. The MRA descriptor is still loaded
-// and validated, but fixing these board straps at elaboration lets Quartus
-// remove unrelated runtime-select muxes. Other profiles remain descriptor-led.
-`ifdef S32_GOLDENAXE_ONLY
+// Dedicated real-V25 game hardware constants. The MRA descriptor is still
+// loaded and validated, but fixing these board straps at elaboration lets
+// Quartus remove unrelated runtime-select muxes. Other profiles remain
+// descriptor-led.
+`ifdef S32_V25_GAME_ONLY
 wire       cfg_multi32           = 1'b0;
 wire       cfg_has_v25           = 1'b1;
+`ifdef S32_ARABFIGHT_ONLY
+wire       cfg_v25_table         = 1'b1;
+`else
 wire       cfg_v25_table         = 1'b0;
+`endif
 wire       cfg_has_adc           = 1'b0;
 wire       cfg_has_track         = 1'b0;
 wire       cfg_has_ppi           = 1'b1;
+wire       cfg_has_dsp_hle       = 1'b0;
+wire       cfg_dual_pcb          = 1'b0;
+wire [6:0] cfg_prot_sel          = PROT_NONE;
+wire       cfg_sprite_bank_valid = 1'b1;
+wire [1:0] cfg_sprite_bank_mask  = 2'b11;
+wire       cfg_flip_y            = 1'b0;
+`elsif S32_ALIEN3_ONLY
+// Alien 3's three regional MRAs share the same physical board descriptor:
+// System 32, four-channel ADC, no V25/PPI/trackball/protection, 16 MiB sprite
+// address space, normal orientation. Fixing these straps removes the generic
+// descriptor muxes without changing the streamed descriptor contract.
+wire       cfg_multi32           = 1'b0;
+wire       cfg_has_v25           = 1'b0;
+wire       cfg_v25_table         = 1'b0;
+wire       cfg_has_adc           = 1'b1;
+wire       cfg_has_track         = 1'b0;
+wire       cfg_has_ppi           = 1'b0;
 wire       cfg_has_dsp_hle       = 1'b0;
 wire       cfg_dual_pcb          = 1'b0;
 wire [6:0] cfg_prot_sel          = PROT_NONE;
@@ -222,7 +257,7 @@ wire        v60_debug_halted;
 wire        if_req;
 wire [23:0] if_addr;                 // frontier byte address (low 3 bits = intra-line
                                     // offset used to pre-align the returned line)
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_AREA_ROM_CACHE
 wire [63:0] if_data;
 wire        if_served;
 `else
@@ -590,6 +625,8 @@ assign sdr_p1_addr = SDR_TILES_BASE[24:3] + {3'b000, tile_rom_addr};
 wire [7:0] sprctl_q;
 wire [1:0] disp_buf;
 wire [1:0] spr_scan_buf;
+wire [1:0] spr_scan_buf_prev;
+wire       spr_scan_dual;
 s32_sprite #(
 `ifdef S32_GOLDENAXE_ONLY
     .VERIFY_SROM(1'b1)
@@ -598,6 +635,13 @@ s32_sprite #(
 `endif
 ) sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
+    // Alien 3 alternates the P1 and P2 HUD/sight content between complete
+    // sprite fields. Preserve the preceding field so scanout can display both.
+`ifdef S32_ALIEN3_ONLY
+    .retain_previous(1'b1),
+`else
+    .retain_previous(1'b0),
+`endif
     // Old MRAs predate bank metadata and therefore retain the original
     // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.
     .srom_bank_mask(cfg_sprite_bank_valid ? cfg_sprite_bank_mask : 2'b11),
@@ -624,7 +668,8 @@ s32_sprite #(
     .fb_wr_shadow(fb_wr_shadow), .fb_busy(fb_wr_busy),
     .fb_er_req(fb_er_req), .fb_er_buf(fb_er_buf), .fb_er_y(fb_er_y),
     .fb_er_ack(fb_er_ack),
-    .disp_buf(disp_buf), .scan_buf(spr_scan_buf)
+    .disp_buf(disp_buf), .scan_buf(spr_scan_buf),
+    .scan_buf_prev(spr_scan_buf_prev), .scan_dual(spr_scan_dual)
 );
 assign sdr_p2_addr[24] = 1'b1;   // sprites region base 0x1000000
 
@@ -638,9 +683,13 @@ assign mode_416 = r1ff00[15];
 
 // Sprite line prefetch for mixer. Hold the request and its address until the
 // DDR service acknowledges it; a one-cycle pulse was lost whenever an erase
-// or sprite write occupied the framebuffer engine.
+// or sprite write occupied the framebuffer engine. The framebuffer interface
+// now fills an inactive ping-pong line bank, so launch near the start of the
+// preceding line and give dual-field Alien 3 fetches almost a whole scanline.
 reg       fb_rd_req_r;
 reg [1:0] fb_rd_buf_r;
+reg [1:0] fb_rd_buf_alt_r;
+reg       fb_rd_dual_r;
 reg [7:0] fb_rd_y_r;
 // Qualification telemetry: a line request still outstanding when its visible
 // scanline starts means the mixer is consuming stale sprite data.  Keep this
@@ -656,13 +705,15 @@ assign debug_fb_underrun = {fb_rd_underrun_sticky ? 8'hff : 8'h00, fb_rd_underru
 // ungated kick also ran through the 37 vblank lines, fetching nonexistent
 // buffer rows 224-255 and wasting ~14% of the DDR line-read bandwidth (same
 // rationale as the TM-5 tilemap vblank suppression).
-wire fb_rd_kick = ce_pix && hcnt == (mode_416_active ? 9'd420 : 9'd324) &&
+wire fb_rd_kick = ce_pix && hcnt == 9'd16 &&
                   (vcnt < 9'd223 || vcnt == 9'd261);
 wire fb_rd_deadline = ce_pix && hcnt == 9'd0 && vcnt < 9'd224;
 always @(posedge clk_ram) begin
     if (rst) begin
         fb_rd_req_r <= 1'b0;
         fb_rd_buf_r <= 2'd0;
+        fb_rd_buf_alt_r <= 2'd0;
+        fb_rd_dual_r <= 1'b0;
         fb_rd_y_r   <= 8'd0;
         fb_rd_underrun_sticky <= 1'b0;
         fb_rd_underrun_count <= 16'd0;
@@ -688,6 +739,8 @@ always @(posedge clk_ram) begin
             // sprite-controller update. Scanout uses the separately published
             // physical buffer, which changes only at a complete frame boundary.
             fb_rd_buf_r <= spr_scan_buf;
+            fb_rd_buf_alt_r <= spr_scan_buf_prev;
+            fb_rd_dual_r <= spr_scan_dual;
             // CRT lines are 0..261. Truncating line 261 before adding produced
             // line 6 instead of the next frame's line 0.
             if (vcnt == 9'd261)
@@ -701,6 +754,8 @@ always @(posedge clk_ram) begin
 end
 assign fb_rd_req = fb_rd_req_r;
 assign fb_rd_buf = fb_rd_buf_r;
+assign fb_rd_buf_alt = fb_rd_buf_alt_r;
+assign fb_rd_dual = fb_rd_dual_r;
 assign fb_rd_y   = fb_rd_y_r;
 assign fb_rd_x   = hcnt;
 
@@ -709,6 +764,25 @@ assign fb_rd_x   = hcnt;
 // item; v1 shares screen A's fetched line so B's tilemaps/palette/mixer are
 // nonetheless fully independent (the valuable part of B7).
 wire [15:0] fb_rd_pix_b = fb_rd_pix;
+`ifdef S32_ARABFIGHT_ONLY
+// The fetched sprite line lives in the top-level framebuffer M10K while the
+// mixer is placed with the palette/video logic.  Stage both the sprite pixel
+// and its display-X marker once in the Arabian-only profile.  The mixer still
+// snapshots them together, one clock later within the same 12+ clock pixel
+// period, but the long M10K-to-priority-bank route is split at a freely
+// placeable register.
+reg [15:0] fb_rd_pix_mix_pipe;
+reg  [8:0] mix_disp_x_pipe;
+always @(posedge clk_ram) begin
+    fb_rd_pix_mix_pipe <= fb_rd_pix;
+    mix_disp_x_pipe    <= mix_disp_x_cdc;
+end
+wire [15:0] fb_rd_pix_mix = fb_rd_pix_mix_pipe;
+wire  [8:0] mix_disp_x    = mix_disp_x_pipe;
+`else
+wire [15:0] fb_rd_pix_mix = fb_rd_pix;
+wire  [8:0] mix_disp_x    = mix_disp_x_cdc;
+`endif
 wire [15:0] pal0_cpu_q, pal1_cpu_q;
 wire [47:0] dbg_pal0_entries;
 wire [13:0] mix0_pal_addr, mix1_pal_addr;
@@ -746,12 +820,12 @@ s32_mixer mix0 (
     .reg_we(wr_stb && m_we && is_mix0),
     .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
-    .disp_x(mix_disp_x_cdc), .disp_y(vcnt), .disp_active(~hb & ~vb),
+    .disp_x(mix_disp_x), .disp_y(vcnt), .disp_active(~hb & ~vb),
     .display_en(io0_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
     .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
-    .spr_pix(fb_rd_pix),
+    .spr_pix(fb_rd_pix_mix),
     .pal_addr(mix0_pal_addr), .pal_data(mix0_pal_q),
     .rgb(rgb_a)
 );
@@ -785,7 +859,7 @@ generate
             .reg_we(wr_stb && m_we && is_mix1),
             .reg_addr(A[6:1]), .reg_wdata(m_wdata), .reg_be(m_be),
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
-            .disp_x(mix_disp_x_cdc), .disp_y(vcnt), .disp_active(~hb & ~vb),
+            .disp_x(mix_disp_x), .disp_y(vcnt), .disp_active(~hb & ~vb),
             .display_en(io1_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off), .bg_ctrl(mix_bg_ctrl),
             .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
             .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
@@ -914,8 +988,8 @@ wire sel_track = sel_ioex && (A[5:3] <= 3'b010) && cfg_has_track;
 wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && cfg_has_ppi;
 genvar t;                         // declare outside the generate-for (Quartus 17.0)
 generate
-    if (GOLDENAXE_ONLY) begin : g_goldenaxe_no_analog
-        // Golden Axe has no MSM6253 ADC or uPD4701 trackball board.
+    if (V25_GAME_ONLY) begin : g_v25_game_no_analog
+        // Golden Axe and Arabian Fight have no ADC or trackball board.
         assign adc_bit = 1'b1;
         for (t = 0; t < 3; t = t + 1) begin : tracks
             assign trk_q[t] = 8'hff;
@@ -1208,7 +1282,7 @@ assign sdr_p5_addr = '0;
 //   32 lines x 8 bytes direct-mapped. Hit = 1 clk_sys; miss = 4 sequential
 //   p0 word reads to fill the line. Reset (incl. ROM download) invalidates.
 // ---------------------------------------------------------------------------
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_AREA_ROM_CACHE
 wire        rom_req_r;
 wire [23:1] rom_addr_r;
 `else
@@ -1219,7 +1293,7 @@ reg [23:1] rom_addr_r;
 // here so the icache lookup can suppress re-arming a completed ROM read while
 // the V60 bus still holds m_req; the driving logic lives in the read-mux block.
 reg        ack_r;
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_AREA_ROM_CACHE
 wire       prot_rom_grant = 1'b0;
 `else
 reg        prot_rom_grant;
@@ -1230,13 +1304,12 @@ assign sdr_p0_req  = prot_rom_grant ? prot_rom_req : rom_req_r;
 assign sdr_p0_addr = prot_rom_grant ? {2'b00, prot_p0_addr[21:1]} :
                                        {2'b00, rom_addr_r[21:1]};
 
-`ifdef S32_GOLDENAXE_ONLY
-// Golden Axe-only area cache. The generic asynchronous cache below provides a
+`ifdef S32_AREA_ROM_CACHE
+// Dedicated-game area cache. The generic asynchronous cache below provides a
 // one-clk_sys hit, but its two variable-index read paths flatten 2,464 cache
 // bits into registers and very wide muxes in Quartus 17. This implementation
-// gives the dedicated profile one arbitrated synchronous lookup port. Because
-// the V60 advances only on ce_cpu (one clk_sys in three), the extra raw clock
-// of lookup latency remains inside one architectural CPU interval.
+// gives the dedicated profile one arbitrated synchronous lookup port. The
+// extra raw clock of lookup latency remains inside the fixed V60 CE interval.
 wire        rom_ready;
 wire [15:0] rom_word_r;
 s32_ga_rom_cache ga_rom_cache (
@@ -1653,6 +1726,10 @@ always @(posedge clk_sys) begin
 end
 
 endmodule
+
+`ifdef S32_AREA_ROM_CACHE
+`undef S32_AREA_ROM_CACHE
+`endif
 //============================================================================
 // Golden Axe main-ROM cache: 32 direct-mapped 8-byte lines.
 //

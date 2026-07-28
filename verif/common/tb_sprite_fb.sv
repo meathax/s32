@@ -48,7 +48,7 @@ wire        rendering;
 
 reg vblank = 0;
 s32_sprite sprite (
-    .clk(clk), .rst(rst), .is_multi32(1'b0),
+    .clk(clk), .rst(rst), .is_multi32(1'b0), .retain_previous(1'b0),
     .srom_bank_mask(2'b11),
     .present(vblank), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
@@ -64,7 +64,8 @@ s32_sprite sprite (
     .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y),
-    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf)
+    .fb_er_ack(fbe_ack), .disp_buf(disp_buf), .scan_buf(scan_buf),
+    .scan_buf_prev(), .scan_dual()
 );
 
 // MiSTer DDR interface.
@@ -87,7 +88,8 @@ s32_fb_if #(.FB_BASE(32'h3000_0000)) fb (
     .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
-    .rd_req(1'b0), .rd_buf(2'd0), .rd_y(8'd0), .rd_ack(),
+    .rd_req(1'b0), .rd_buf(2'd0), .rd_buf_alt(2'd0), .rd_dual(1'b0),
+    .rd_y(8'd0), .rd_ack(),
     .rd_x(9'd0), .rd_pix()
 );
 

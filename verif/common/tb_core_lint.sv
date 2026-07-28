@@ -49,6 +49,9 @@ module tb_core_lint;
 `elsif S32_JPARK_ONLY
         if (core.GAME_ONLY !== 1'b1) $fatal(1, "Jurassic Park release pruning not enabled");
         $display("CORE JPARK PROFILE LINT PASS");
+`elsif S32_ALIEN3_ONLY
+        if (core.GAME_ONLY !== 1'b1) $fatal(1, "Alien 3 release pruning not enabled");
+        $display("CORE ALIEN3 PROFILE LINT PASS");
 `else
         $display("CORE S32-ONLY LINT PASS");
 `endif

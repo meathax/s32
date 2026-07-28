@@ -12,6 +12,7 @@ assert goldenaxe_qsf.startswith(common_qsf.rstrip() + "\n")
 for macro in (
     "S32_GA2_ONLY=1",
     "S32_GOLDENAXE_ONLY=1",
+    "S32_V25_GAME_ONLY=1",
     "S32_REAL_V25=1",
     "S32_V60_NO_FP=1",
     "S32_RELEASE_MINIMAL=1",

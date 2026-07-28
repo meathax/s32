@@ -196,9 +196,9 @@ initial begin
     repeat (14) @(posedge clk_ram);
     disp_x <= 9'd10;
     @(posedge clk_ram); #1;
-    if (mix.launch_pending !== 1'b1 || mix.ph !== 4'hf) begin
+    if (mix.pixel_changed !== 1'b1 || mix.ph !== 4'hf) begin
         errors = errors + 1;
-        $display("  FAIL synchronous RAM launch was not deferred by one clock");
+        $display("  FAIL synchronous RAM launch strobe was not registered");
     end
     @(posedge clk_ram); #1;
     if (mix.winner_pending !== 1'b1 || mix.ph !== 4'hf) begin

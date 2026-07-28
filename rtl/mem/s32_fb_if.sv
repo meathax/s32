@@ -53,6 +53,8 @@ module s32_fb_if #(
     // line read port -> mixer
     input             rd_req,
     input       [1:0] rd_buf,
+    input       [1:0] rd_buf_alt,       // preceding completed field
+    input             rd_dual,          // combine current + preceding field
     input       [7:0] rd_y,
     output reg        rd_ack,          // line available in buffer
     input       [8:0] rd_x,            // synchronous read of fetched line
@@ -67,7 +69,10 @@ module s32_fb_if #(
 // a synchronous 64-bit flush read port.  Keeping this out of flops removes the
 // 8,192-register run buffer and its large read mux from the integrated map.
 reg [511:0] run_msk;               // which pixels this run actually wrote
-reg [63:0]  line_buf [0:127];      // read line (512 px = 128 x 64bit)
+// Two fetched/composed lines. Scanout reads one bank while DDR fills the
+// other, allowing the next line to be requested near the start of the current
+// line instead of racing the renderer during the short horizontal blank.
+reg [63:0]  line_buf [0:255];      // 2 x (512 px = 128 x 64-bit words)
 reg [8:0]   run_x0, run_xe;        // min / max written x
 reg [7:0]   run_y;
 reg [1:0]   run_bufsel;
@@ -81,16 +86,68 @@ reg         run_any;               // at least one pixel written
 // and prevents a deep clk_sys -> clk_ram path through the priority logic.
 reg [63:0] rd_word;
 reg  [1:0] rd_lane;
+reg        display_bank;
+reg        fill_bank;
+reg        line_ready;
+reg  [8:0] rd_x_d;
+wire       rd_line_start = (rd_x == 9'd0) && (rd_x_d != 9'd0);
+wire       scan_bank = (rd_line_start && line_ready) ? fill_bank : display_bank;
+
+// Resolve Alien 3's alternating player fields while the preceding field is
+// fetched from DDR, before acknowledging the completed line to scanout.
+// System 32 regards both 0xffff and 0x7fff as transparent; the latter is what
+// remains when a shadow RMW crosses an erased pixel.  For 0x7fff, retain the
+// preceding field's pixel while applying the newest field's shadow flag.  This
+// makes both player HUD/sight fields solid without dropping shadow semantics.
+// Keeping the composed result in line_buf removes both the second line RAM and
+// the transparency compare from the 96.6 MHz pixel-read path.
+function automatic [63:0] compose_line_word(
+    input [63:0] newest,
+    input [63:0] prior
+);
+    reg [63:0] result;
+    begin
+        result = newest;
+        if (&newest[14:0]) begin
+            result[14:0] = prior[14:0];
+            result[15] = prior[15] & newest[15];
+        end
+        if (&newest[30:16]) begin
+            result[30:16] = prior[30:16];
+            result[31] = prior[31] & newest[31];
+        end
+        if (&newest[46:32]) begin
+            result[46:32] = prior[46:32];
+            result[47] = prior[47] & newest[47];
+        end
+        if (&newest[62:48]) begin
+            result[62:48] = prior[62:48];
+            result[63] = prior[63] & newest[63];
+        end
+        compose_line_word = result;
+    end
+endfunction
+
 always @(posedge clk) begin
-    rd_word <= line_buf[rd_x[8:2]];
-    rd_lane <= rd_x[1:0];
+    if (rst) begin
+        rd_word <= 64'd0;
+        rd_lane <= 2'd0;
+        rd_x_d <= 9'd0;
+    end
+    else begin
+        rd_word <= line_buf[{scan_bank, rd_x[8:2]}];
+        rd_lane <= rd_x[1:0];
+        rd_x_d <= rd_x;
+    end
 end
+reg rd_dual_latched;
 assign rd_pix = (rd_lane == 2'd0) ? rd_word[15:0]  :
                 (rd_lane == 2'd1) ? rd_word[31:16] :
                 (rd_lane == 2'd2) ? rd_word[47:32] : rd_word[63:48];
 
 // DDR engine
 typedef enum logic [3:0] { D_IDLE, D_WR_PF, D_WR, D_ER, D_RD, D_RD_W,
+                           D_RD_ALT, D_RD_ALT_W,
                            D_SH_R, D_SH_RW, D_SH_W } dstate_t;
 dstate_t dst = D_IDLE;
 
@@ -101,6 +158,7 @@ reg [63:0] ddin;
 reg [7:0]  dbe;
 reg [6:0]  beat, beats;
 reg [6:0]  rbeat;
+reg [1:0]  rd_buf_alt_latched;
 
 function automatic [28:0] pix_addr(input [1:0] buf_i, input [7:0] y,
                                    input [6:0] x_word);
@@ -162,7 +220,10 @@ reg flush_req;
 // a pending display-line fetch has been launched.  Keep acceptance explicit so
 // deferring the flush cannot discard it.
 wire erase_pending = er_req && !er_ack;
-wire read_pending  = rd_req && !rd_ack;
+// Do not reuse the just-filled bank until the raster boundary has published
+// it. This also makes a rare late line recover cleanly instead of allowing the
+// following request to overwrite a completed-but-not-yet-visible line.
+wire read_pending  = rd_req && !rd_ack && !line_ready;
 wire flush_accept  = (dst == D_IDLE) && !erase_pending &&
                      !read_pending && flush_req;
 
@@ -201,8 +262,22 @@ assign wr_busy = wr_end | flush_req |
                  (dst == D_SH_R) | (dst == D_SH_RW) | (dst == D_SH_W);
 
 always @(posedge clk) begin
-    if (rst) begin dst <= D_IDLE; dwe <= 0; drd <= 0; er_ack <= 0; rd_ack <= 0; end
+    if (rst) begin
+        dst <= D_IDLE; dwe <= 0; drd <= 0; er_ack <= 0; rd_ack <= 0;
+        rd_dual_latched <= 1'b0;
+        rd_buf_alt_latched <= 2'd0;
+        display_bank <= 1'b0;
+        fill_bank <= 1'b1;
+        line_ready <= 1'b0;
+    end
     else begin
+        // Publish a completely fetched line only at the raster boundary. The
+        // bank that is still being displayed is never modified underneath the
+        // mixer, even if DDR completes very early in the preceding scanline.
+        if (rd_line_start && line_ready) begin
+            display_bank <= fill_bank;
+            line_ready <= 1'b0;
+        end
         case (dst)
         D_IDLE: begin
             dwe <= 0; drd <= 0;
@@ -221,6 +296,9 @@ always @(posedge clk) begin
                 daddr  <= pix_addr(rd_buf, rd_y, 7'd0);
                 dburst <= 8'd128;
                 rbeat  <= 0;
+                fill_bank <= ~display_bank;
+                rd_dual_latched <= rd_dual;
+                rd_buf_alt_latched <= rd_buf_alt;
                 drd    <= 1'b1;
                 dbe    <= 8'hFF;  // audit R20 PF-4: reads drive all byte lanes
                 dst    <= D_RD;
@@ -298,9 +376,39 @@ always @(posedge clk) begin
         end
         D_RD_W: begin
             if (DDRAM_DOUT_READY) begin
-                line_buf[rbeat] <= DDRAM_DOUT;
+                line_buf[{fill_bank, rbeat}] <= DDRAM_DOUT;
                 rbeat <= rbeat + 1'd1;
-                if (rbeat == 7'd127) begin rd_ack <= 1'b1; dst <= D_IDLE; end
+                if (rbeat == 7'd127) begin
+                    if (rd_dual_latched) begin
+                        daddr  <= pix_addr(rd_buf_alt_latched, rd_y, 7'd0);
+                        dburst <= 8'd128;
+                        rbeat  <= 0;
+                        drd    <= 1'b1;
+                        dst    <= D_RD_ALT;
+                    end
+                    else begin
+                        line_ready <= 1'b1;
+                        rd_ack <= 1'b1;
+                        dst <= D_IDLE;
+                    end
+                end
+            end
+        end
+        D_RD_ALT: if (!DDRAM_BUSY) begin
+            drd <= 1'b0;
+            dst <= D_RD_ALT_W;
+        end
+        D_RD_ALT_W: begin
+            if (DDRAM_DOUT_READY) begin
+                line_buf[{fill_bank, rbeat}] <= compose_line_word(
+                                                line_buf[{fill_bank, rbeat}],
+                                                DDRAM_DOUT);
+                rbeat <= rbeat + 1'd1;
+                if (rbeat == 7'd127) begin
+                    line_ready <= 1'b1;
+                    rd_ack <= 1'b1;
+                    dst <= D_IDLE;
+                end
             end
         end
         default: dst <= D_IDLE;

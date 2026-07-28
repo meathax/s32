@@ -24,6 +24,7 @@ if not defined S32_RESUME_FIT set S32_RESUME_FIT=0
 if not defined S32_MAP_RETRIES set S32_MAP_RETRIES=2
 if not defined S32_FIT_RETRIES set S32_FIT_RETRIES=2
 if not defined S32_FIT_SEEDS set S32_FIT_SEEDS=2 3 4 6 1 5
+if not defined S32_SEED_RESULTS_DIR set S32_SEED_RESULTS_DIR=output_files\seed-results
 
 if not defined QUARTUS_ROOT goto :quartus_root_missing
 set "QBIN=%QUARTUS_ROOT%\quartus\bin64"
@@ -121,7 +122,7 @@ for %%S in (%S32_FIT_SEEDS%) do (
     if "!SEED_RESULT!"=="2" goto :err
 )
 echo ERROR: No fitter seed produced a timing-qualified result.
-if exist "output_files\seed-results\best-timing.json" type "output_files\seed-results\best-timing.json"
+if exist "%S32_SEED_RESULTS_DIR%\best-timing.json" type "%S32_SEED_RESULTS_DIR%\best-timing.json"
 goto :err
 
 :done
@@ -187,7 +188,7 @@ if "%TIMING_RESULT%"=="1" goto :timing_negative
 goto :seed_structural_failure
 
 :timing_negative
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-seed-state.ps1 -ProjectRoot "%CD%" -Revision "%S32_REVISION%" -ExpectedSeed %FIT_SEED%
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-seed-state.ps1 -ProjectRoot "%CD%" -Revision "%S32_REVISION%" -ExpectedSeed %FIT_SEED% -StatePath "%S32_SEED_RESULTS_DIR%\best-timing.json"
 set "BEST_RESULT=%ERRORLEVEL%"
 if "%BEST_RESULT%"=="10" goto :run_detailed_timing
 if not "%BEST_RESULT%"=="0" goto :seed_structural_failure
@@ -232,7 +233,7 @@ call :archive_seed
 exit /b 2
 
 :archive_seed
-set "SEED_ARCHIVE=output_files\seed-results\seed-%FIT_SEED%"
+set "SEED_ARCHIVE=%S32_SEED_RESULTS_DIR%\seed-%FIT_SEED%"
 if not exist "%SEED_ARCHIVE%" mkdir "%SEED_ARCHIVE%"
 if not exist "%SEED_ARCHIVE%" exit /b 2
 for %%F in (fit.summary fit.rpt fit.smsg sta.summary sta.rpt sta.smsg asm.summary asm.rpt asm.smsg map.inputs.json) do (

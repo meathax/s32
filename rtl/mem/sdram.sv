@@ -127,6 +127,7 @@ reg [3:0]  rd_issued;
 reg [3:0]  rd_captured;
 reg [24:1] xfer_addr;
 reg        is_write;
+reg        reuse_open_write_row;
 reg [15:0] din_r;
 reg [1:0]  be_r;
 reg [2:0]  wrrc_cnt;
@@ -311,6 +312,7 @@ always @(posedge clk) begin
         row_open <= 1'b0;
         open_bank <= 2'b00;
         open_row <= 13'd0;
+        reuse_open_write_row <= 1'b0;
         pre_cnt <= 2'd0;
         dqm      <= 2'b11;
         cl_pipe  <= 4'b0000;
@@ -376,6 +378,13 @@ always @(posedge clk) begin
                     endcase
                 end
                 xfer_addr <= a;
+                // The selected address and transfer type are already stable at
+                // this arbitration boundary.  Register the row-reuse decision
+                // here so ST_DISPATCH does not place the bank/row comparator in
+                // the SDRAM command-output timing cone.
+                reuse_open_write_row <= wr_pend && row_open &&
+                                        a[24:23] == open_bank &&
+                                        a[22:10] == open_row;
                 din_r     <= wr_din_p;
                 be_r      <= wr_be_p;
                 rd_issued   <= 0;
@@ -393,9 +402,7 @@ always @(posedge clk) begin
             // A same-row download write can reuse the active row. Every other
             // transfer first closes the row explicitly so reads retain their
             // original ACT/auto-precharge behavior.
-            if (row_open && is_write &&
-                xfer_addr[24:23] == open_bank &&
-                xfer_addr[22:10] == open_row) begin
+            if (reuse_open_write_row) begin
                 state <= ST_WR;
             end
             else if (row_open) begin

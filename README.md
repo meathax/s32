@@ -98,10 +98,12 @@ Quartus Prime Lite 17.0.2 Build 602 is the pinned toolchain. On Windows, point
 ```bat
 set QUARTUS_ROOT=D:\Q17
 tools\build-goldenaxe.bat
+tools\build-arabianfight.bat
 ```
 
-This builds the dedicated `s32GoldenAxe` revision and stages
-`releases/s32GoldenAxe.rbf`. Golden Axe's MRAs select that RBF. The common
+These build the dedicated `s32GoldenAxe` and `s32ArabianFight` revisions and
+stage their matching RBFs under `releases/`. Each game's MRAs select its
+dedicated RBF. The common
 `Arcade-SegaSystem32.qsf` retains the complete hardware source list and each
 game revision adds a thin QSF containing only its compile-time profile, so
 future per-game cores can prune different hardware without deleting shared
@@ -130,7 +132,7 @@ considered deployable.
 The old Linux/Docker compile entrypoints fail fast because they cannot reproduce
 the qualified Quartus 17.0.2 Windows flow. Public CI performs source/profile
 checks and simulation only; release RBFs are produced locally through
-`tools\build-goldenaxe.bat`.
+the matching dedicated build wrapper.
 
 Useful checks that do not build an RBF are:
 
@@ -150,8 +152,9 @@ Copy `s32GoldenAxe.rbf` to `_Arcade/cores/` and the Golden Axe `.mra` files to
 `_Arcade/`, then launch a title from the MiSTer arcade menu. The deployment
 helper accepts the MiSTer host at runtime; no host, password, token, or SSH key
 is stored in the repository. After a qualified build,
-`tools\deploy-goldenaxe.ps1 -MisterHost root@192.168.0.69` performs a
-hash-verified deployment.
+`tools\deploy-goldenaxe.ps1 -MisterHost root@192.168.0.69` and
+`tools\deploy-arabianfight.ps1 -MisterHost root@192.168.0.69` perform
+hash-verified deployments.
 
 ## Licence and credits
 

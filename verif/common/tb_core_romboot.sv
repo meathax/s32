@@ -6,7 +6,7 @@
 //    +IMG=<dir>     image directory (maincpu.hex/soundcpu.hex/tiles.hex/
 //                   sprites.hex expected inside)
 //    +B0=<hex>      board descriptor byte 0 (flags), default 0
-//    +B1=<hex>      board descriptor byte 1 (bit 1 = flip Y), default 0
+//    +B1=<hex>      board descriptor byte 1: dual/flipY/gun/coin-swap bits 0..3
 //    +B2=<hex>      protection selector (1 = Sonic), default 0
 //    +SBM=<hex>     physical sprite-ROM bank mask (0/1/3), default 3
 //    +FRAMES=<n>    frames to run (804k clk_sys each), default 3
@@ -18,6 +18,8 @@
 //    +P1LEN<n>=<n>   event length in frames, default 1
 //    +P1MASK<n>=<h>  P1A bits to pull low: L/R/U/D=80/40/20/10,
 //                    B3/B2/B1 (Magic/Jump/Attack)=04/02/01
+//    +ALIEN3UIAT=<f>  first Alien 3 gameplay HUD/sight regression field
+//    +ALIEN3UIN=<n>   consecutive UI fields (default 8; must all be solid)
 //    +ARABPERFAT=<f>  first Arabian Fight frame-boundary performance sample
 //    +ARABPERFN=<n>   consecutive samples; each must be at FE4244/FE4248
 //    +ARABHEAVYAT=<f> first field in the heavy-sprite recurrence window
@@ -102,7 +104,10 @@ initial begin
     board.has_track   = b0[4];
     board.has_ppi     = b0[5];
     board.has_dsp_hle = b0[6];
+    board.dual_pcb    = b1[0];
     board.flip_y      = b1[1];
+    board.gun_aim     = b1[2];
+    board.coin_swap   = b1[3];
     board.prot_sel    = b2[6:0];
     board.sprite_bank_valid = 1'b1;
     board.sprite_bank_mask  = sbm[1:0];
@@ -222,8 +227,8 @@ end
 // Framebuffer service.  The broad regression keeps the compact behavioral
 // memory; +define+S32_REAL_FB_SIM selects the production s32_fb_if plus a
 // deterministic MiSTer-style DDR model for Golden Axe qualification.
-wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req;
-wire  [1:0] fbw_buf, fbe_buf, fbr_buf;
+wire        fbw_start, fbw_valid, fbw_end, fbe_req, fbr_req, fbr_dual;
+wire  [1:0] fbw_buf, fbe_buf, fbr_buf, fbr_buf_alt;
 wire  [8:0] fbw_x, fbr_x;
 wire  [7:0] fbw_y, fbe_y, fbr_y;
 wire [15:0] fbw_pix;
@@ -233,6 +238,8 @@ wire [15:0] fbr_pix;
 
 integer fbr_accepts = 0;
 reg [1:0] fbr_buf_l;
+reg [1:0] fbr_buf_alt_l;
+reg       fbr_dual_l;
 reg [7:0] fbr_y_l;
 reg fbr_req_d = 0, fbr_ack_h_d = 0;
 always @(posedge clk_ram) begin
@@ -240,6 +247,8 @@ always @(posedge clk_ram) begin
     fbr_ack_h_d <= fbr_ack;
     if (fbr_req && !fbr_req_d) begin
         fbr_buf_l <= fbr_buf;
+        fbr_buf_alt_l <= fbr_buf_alt;
+        fbr_dual_l <= fbr_dual;
         fbr_y_l   <= fbr_y;
     end
     if (fbr_ack && !fbr_ack_h_d)
@@ -257,7 +266,8 @@ s32_fb_ddr_model fb_service (
     .wr_valid(fbw_valid), .wr_pix(fbw_pix), .wr_end(fbw_end),
     .wr_shadow(fbw_shadow), .wr_busy(fbw_busy),
     .er_req(fbe_req), .er_buf(fbe_buf), .er_y(fbe_y), .er_ack(fbe_ack),
-    .rd_req(fbr_req), .rd_buf(fbr_buf), .rd_y(fbr_y), .rd_ack(fbr_ack),
+    .rd_req(fbr_req), .rd_buf(fbr_buf), .rd_buf_alt(fbr_buf_alt),
+    .rd_dual(fbr_dual), .rd_y(fbr_y), .rd_ack(fbr_ack),
     .rd_x(fbr_x), .rd_pix(fbr_pix),
     .write_accepts(fb_ddr_writes), .read_accepts(fb_ddr_reads),
     .line_acks(fb_line_acks),
@@ -284,7 +294,10 @@ always @(posedge clk_ram) begin
     if (fbe_req && !fbe_ack_r)
         for (int x = 0; x < 512; x++) fbmem[fbe_buf][fbe_y][x] = 16'hffff;
 end
-assign fbr_pix = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+wire [15:0] fbr_pix_new = fbmem[fbr_buf_l][fbr_y_l][fbr_x];
+wire [15:0] fbr_pix_old = fbmem[fbr_buf_alt_l][fbr_y_l][fbr_x];
+assign fbr_pix = (fbr_dual_l && fbr_pix_new == 16'hffff)
+               ? fbr_pix_old : fbr_pix_new;
 `endif
 integer spr_px = 0;
 always @(posedge clk_ram) if (fbw_valid) spr_px = spr_px + 1;
@@ -294,7 +307,9 @@ always @(posedge clk_ram) if (fbw_valid) spr_px = spr_px + 1;
 integer spr_cmd_cnt = 0, srom_req_cnt = 0;
 reg [15:0] spr_jump_prev [0:1];
 reg        spr_jump_seen [0:1];
+reg        spr_list_log;
 initial begin
+    spr_list_log = $test$plusargs("SPRLIST");
     spr_jump_seen[0] = 1'b0;
     spr_jump_seen[1] = 1'b0;
 end
@@ -304,7 +319,7 @@ always @(posedge clk_ram) begin
     // Report a command-list jump only when it changes for that framebuffer
     // parity.  This keeps long real-ROM runs concise while exposing the exact
     // list target consumed after each sprite-update pulse.
-    if (core.sprite.rs == core.sprite.R_DECODE &&
+    if (spr_list_log && core.sprite.rs == core.sprite.R_DECODE &&
         core.sprite.sw[0][15:14] == 2'b10) begin
         if (!spr_jump_seen[core.sprite.disp_buf[0]] ||
             spr_jump_prev[core.sprite.disp_buf[0]] != core.sprite.sw[0]) begin
@@ -318,11 +333,12 @@ always @(posedge clk_ram) begin
 end
 
 // Confirm that the CPU-side I/O transaction returned each active-low pulse.
-// P1A is C00000; MAME system32_generic puts P1 coin/start on port E
-// (C00008) bits 2/4.
+// P1A is C00000; MAME system32_generic puts start on port E bit 4 and P1 coin
+// on bit 2. Alien 3's cabinet wiring swaps Coin1/Coin2, putting P1 coin on bit 3.
 integer p1a_rd_cnt = 0, coin_rd_cnt = 0, start_rd_cnt = 0;
 integer p1a_active_samples = 0;
 integer coin_active_samples = 0, start_active_samples = 0;
+wire [2:0] p1_coin_bit = board.coin_swap ? 3'd3 : 3'd2;
 always @(posedge clk_sys) begin
     if (core.m_req && core.m_ack && !core.m_we && !core.ack_d) begin
         if ({core.A[23:1], 1'b0} == 24'hc00000) begin
@@ -336,7 +352,7 @@ always @(posedge clk_sys) begin
         if ({core.A[23:1], 1'b0} == 24'hc00008) begin
             coin_rd_cnt = coin_rd_cnt + 1;
             start_rd_cnt = start_rd_cnt + 1;
-            if (!core.m_rdata[2]) begin
+            if (!core.m_rdata[p1_coin_bit]) begin
                 coin_active_samples = coin_active_samples + 1;
                 $display("[input-sampled] frame %0d: P1 coin read=%04x pc=%08x",
                     cur_frame, core.m_rdata, core.v60.dbg_pc);
@@ -415,7 +431,8 @@ s32_core core (
     .fb_wr_valid(fbw_valid), .fb_wr_pix(fbw_pix), .fb_wr_end(fbw_end),
     .fb_wr_shadow(fbw_shadow), .fb_wr_busy(fbw_busy),
     .fb_er_req(fbe_req), .fb_er_buf(fbe_buf), .fb_er_y(fbe_y), .fb_er_ack(fbe_ack),
-    .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
+    .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf), .fb_rd_buf_alt(fbr_buf_alt),
+    .fb_rd_dual(fbr_dual), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
     .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
     .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),
     .eep_ld_wr(1'b0), .eep_ld_addr(6'h0), .eep_ld_data(16'h0), .eep_rd_addr(6'h0),
@@ -535,21 +552,36 @@ end
 // active-video pixels of those frames as PPM files (dump<frame>.ppm in cwd)
 integer dump_at, dump_n, dump_fd = 0, dump_x, dump_y, dump_every;
 reg dumping = 0;
+// Alien 3 gameplay probe. Count live sprite pixels in the two static UI areas
+// implicated by the hardware report: P1 LIFE/POWER and the centred gun sight.
+// This is deliberately based on the sprite scanout, not PPM output; PPM capture
+// crosses the pixel/mixer pipeline and is unsuitable as a field-parity oracle.
+integer alien3_ui_at, alien3_ui_n;
+integer alien3_hud_opq = 0, alien3_sight_opq = 0;
+integer alien3_sight_green = 0;
+integer alien3_ui_samples = 0, alien3_hud_lows = 0, alien3_sight_lows = 0;
+integer alien3_hud_lows_next, alien3_sight_lows_next;
+reg alien3_ui_done = 0;
 initial begin
     if (!$value$plusargs("DUMPAT=%d", dump_at)) dump_at = -1;
     if (!$value$plusargs("DUMPN=%d", dump_n)) dump_n = 1;
     // +DUMPEVERY=<n>: dump every n-th frame (stride) — maps the attract cycle
     if (!$value$plusargs("DUMPEVERY=%d", dump_every)) dump_every = 1;
+    if (!$value$plusargs("ALIEN3UIAT=%d", alien3_ui_at)) alien3_ui_at = -1;
+    if (!$value$plusargs("ALIEN3UIN=%d", alien3_ui_n)) alien3_ui_n = 8;
 end
 
 // +DUMPSPRAT=<frame>: dump the V60-written sprite command RAM (0x400000, the
 // display list) to sim_spriteram.hex so it can be diffed against MAME's list.
-integer sprdump_at, sprdump_fd, sprdump_i;
-reg vb_d2 = 0, sprdump_done = 0;
+integer sprdump_at, sprdump_at2, sprdump_fd, sprdump_i;
+reg vb_d2 = 0, sprdump_done = 0, sprdump2_wdone = 0;
 integer sprdump_last = -1;
 integer wdump_fd;
 reg wdone250 = 0, wdone400 = 0, wdone500 = 0;
-initial if (!$value$plusargs("DUMPSPRAT=%d", sprdump_at)) sprdump_at = -1;
+initial begin
+    if (!$value$plusargs("DUMPSPRAT=%d", sprdump_at)) sprdump_at = -1;
+    if (!$value$plusargs("DUMPSPRAT2=%d", sprdump_at2)) sprdump_at2 = -1;
+end
 integer sprdump_cur = 0;
 always @(posedge clk_sys) begin
     if (vb & ~vb_d2) sprdump_cur = sprdump_cur + 1;
@@ -568,6 +600,24 @@ always @(posedge clk_sys) begin
             $fwrite(sprdump_fd, "%04x\n", core.sprite_ram.mem[sprdump_i]);
         $fclose(sprdump_fd);
         $display("[sprdump] wrote sim_spr_%0d.hex", sprdump_cur);
+    end
+    if (sprdump_at2 >= 0 && sprdump_cur >= sprdump_at2 && sprdump_cur <= sprdump_at2+2
+        && core.vcnt == 9'd150 && sprdump_last != sprdump_cur) begin
+        sprdump_last = sprdump_cur;
+        sprdump_fd = $fopen($sformatf("sim_spr_%0d.hex", sprdump_cur), "w");
+        for (sprdump_i = 0; sprdump_i < 65536; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.sprite_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[sprdump] wrote sim_spr_%0d.hex", sprdump_cur);
+    end
+    if (sprdump_at2 >= 0 && sprdump_cur == sprdump_at2 && !sprdump2_wdone
+        && core.vcnt == 9'd150) begin
+        sprdump2_wdone = 1'b1;
+        sprdump_fd = $fopen($sformatf("sim_wram_%0d.hex", sprdump_cur), "w");
+        for (sprdump_i = 0; sprdump_i < 16'h8000; sprdump_i = sprdump_i + 1)
+            $fwrite(sprdump_fd, "%04x\n", core.work_ram.mem[sprdump_i]);
+        $fclose(sprdump_fd);
+        $display("[wramdump] wrote second synchronized work-RAM snapshot");
     end
     if (sprdump_at >= 0 && sprdump_cur == sprdump_at && !sprdump_done
         && core.vcnt == 9'd150) begin
@@ -682,6 +732,31 @@ always @(posedge clk_sys) begin
     vb_d <= vb;
     if (vb & ~vb_d) begin              // end of visible field
         cur_frame = cur_frame + 1;
+        if (alien3_ui_at >= 0 && cur_frame - 1 >= alien3_ui_at &&
+            cur_frame - 1 < alien3_ui_at + alien3_ui_n) begin
+            alien3_hud_lows_next = alien3_hud_lows + (alien3_hud_opq < 1000);
+            alien3_sight_lows_next = alien3_sight_lows + (alien3_sight_green < 150);
+            alien3_ui_samples = alien3_ui_samples + 1;
+            alien3_hud_lows = alien3_hud_lows_next;
+            alien3_sight_lows = alien3_sight_lows_next;
+            $display("[alien3-ui] f=%0d hud_opq=%0d sight_green=%0d sight_opq=%0d scan=%0d disp=%0d ctl3=%02x count=%0d rs=%0d work=%0d ready=%0d/%0d",
+                cur_frame - 1, alien3_hud_opq, alien3_sight_green, alien3_sight_opq,
+                core.sprite.scan_buf, core.sprite.disp_buf, core.sprite.ctl[3],
+                core.sprite.render_count, core.sprite.rs, core.sprite.work_buf,
+                core.sprite.ready_valid, core.sprite.ready_buf);
+            if (cur_frame - 1 == alien3_ui_at + alien3_ui_n - 1) begin
+                alien3_ui_done = 1'b1;
+                if (alien3_hud_lows_next != 0 || alien3_sight_lows_next != 0)
+                    $fatal(1, "ALIEN3 UI FLICKER FAIL: hud_low=%0d sight_low=%0d over %0d fields",
+                        alien3_hud_lows_next, alien3_sight_lows_next, alien3_ui_samples);
+                else
+                    $display("ALIEN3 UI FLICKER PASS: HUD and sight solid over %0d fields",
+                        alien3_ui_samples);
+            end
+        end
+        alien3_hud_opq = 0;
+        alien3_sight_opq = 0;
+        alien3_sight_green = 0;
         // +OVLOG=1: per-frame tilemap line-overrun + sprite-fb underrun telemetry
         if (ovlog) $display("[ov] f=%0d tile_overrun sticky=%b cnt=%0d  fb_underrun sticky=%b cnt=%0d",
             cur_frame, core.tm_line_overrun_sticky, core.tm_line_overrun_count,
@@ -746,6 +821,20 @@ always @(posedge clk_sys) begin
             dump_x = dump_x + 1;
         end
     end
+    if (ce_pix && !hb && !vb && core.mix0.spr_opaque) begin
+        if (core.hcnt >= 9'd8 && core.hcnt < 9'd145 &&
+            core.vcnt >= 9'd181 && core.vcnt < 9'd224)
+            alien3_hud_opq = alien3_hud_opq + 1;
+        if (core.hcnt >= 9'd145 && core.hcnt < 9'd177 &&
+            core.vcnt >= 9'd90 && core.vcnt < 9'd122)
+            alien3_sight_opq = alien3_sight_opq + 1;
+    end
+    // These two palette outputs are exclusive to the green sight in the
+    // deterministic centred-aim frame. Count globally because rgb_a exits the
+    // pipelined mixer several pixel clocks behind hcnt/vcnt.
+    if (ce_pix && !hb && !vb &&
+        (rgb_a == 24'h20f860 || rgb_a == 24'h00a000))
+        alien3_sight_green = alien3_sight_green + 1;
 end
 
 // instruction trace window (+TRLO/+TRHI plusargs): pc, opcode, key regs
@@ -958,7 +1047,7 @@ always @(posedge clk_sys) begin
     if (core.m_req && !core.m_ack) begin
         hang_cnt = hang_cnt + 1;
         if (hang_cnt == 20000)
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_V25_GAME_ONLY
             $display("[HANG] pc=%08x A=%06x we=%b be=%b st=%0d p0req=%b",
                 core.v60.dbg_pc, {core.A[23:1],1'b0}, core.m_we, core.m_be,
                 core.v60.st, p0_req);
@@ -1166,13 +1255,17 @@ integer frames, f, p1_ev;
 integer arab_perf_at, arab_perf_n;
 integer arab_perf_samples = 0, arab_perf_misses = 0;
 reg arab_perf_done = 0;
-reg playmagic = 0, playfight = 0;
+reg playmagic = 0, playfight = 0, arabentry = 0;
+integer arab_entry_x0 = 0, arab_entry_x1 = 0;
+integer arab_entry_dx = 0;
+reg arab_entry_done = 0, arab_entry_failed = 0;
 initial begin
     if (!$value$plusargs("FRAMES=%d", frames)) frames = 3;
     if (!$value$plusargs("ARABPERFAT=%d", arab_perf_at)) arab_perf_at = -1;
     if (!$value$plusargs("ARABPERFN=%d", arab_perf_n)) arab_perf_n = 13;
     playmagic = $test$plusargs("PLAYMAGIC");
     playfight = $test$plusargs("PLAYFIGHT");
+    arabentry = $test$plusargs("ARABENTRY");
     // Model the long board ROM-load reset: this fully flushes the production
     // jt12's 24-stage rings at its internally divided operator cadence.
     repeat (2048) @(posedge clk_sys);
@@ -1193,10 +1286,10 @@ initial begin
         end
         if (coin_at >= 0 && coin_len > 0 &&
             f >= coin_at && f < coin_at + coin_len) begin
-            in_svc12_r[2] = 1'b0;
+            in_svc12_r[p1_coin_bit] = 1'b0;
             if (f == coin_at)
-                $display("[input] frames %0d..%0d: P1 coin low (port E bit 2)",
-                    coin_at, coin_at + coin_len - 1);
+                $display("[input] frames %0d..%0d: P1 coin low (port E bit %0d)",
+                    coin_at, coin_at + coin_len - 1, p1_coin_bit);
         end
         if (start_at >= 0 && start_len > 0 &&
             f >= start_at && f < start_at + start_len) begin
@@ -1216,7 +1309,7 @@ initial begin
         // (0x40) toward the scripted rocks-flame and run a magic (Button3 0x04)
         // charge/release duty cycle to cast the fire spell. Both are the flame
         // triggers the user reports killing all sprites (#3).
-        if (playmagic || playfight) begin
+        if (playmagic || playfight || arabentry) begin
             // Char-select confirm (user tip): tap START + ATTACK a few times, then
             // STOP and let the select screen TIME OUT into the level. Taps at
             // 470/510/550/590, then quiet 600..660 so the timeout fires.
@@ -1224,8 +1317,19 @@ initial begin
                 in_p1a_r[0]  = 1'b0;   // Button1 (attack)
                 in_svc12_r[4] = 1'b0;  // Start
             end
-            // gameplay: hold Right from 680 (advance toward enemies / rocks)
-            if (f >= 680) in_p1a_r[6] = 1'b0;                            // Right
+            // GA2 gameplay: hold Right from 680 (advance toward enemies / rocks)
+            if (!arabentry && f >= 680) in_p1a_r[6] = 1'b0;              // Right
+        end
+        if (arabentry) begin
+            // Arabian Fight reference replay: Button2 taps advance the
+            // noninteractive ship dialogue, then stop before level 1.  No
+            // direction is supplied: the player entrance must be autonomous.
+            if (f >= 1200 && f < 1450 && (f % 20) < 5)
+                in_p1a_r[1] = 1'b0;
+            // Exercise the reported magic close-up only after the autonomous
+            // entry motion has been measured, so it cannot affect that check.
+            if (f >= 1670 && f < 1675)
+                in_p1a_r[1] = 1'b0;
         end
         if (playmagic) begin
             // magic charge(45)/release(20) cycle from 700 -> casts fire on release
@@ -1237,6 +1341,31 @@ initial begin
             if (f >= 700 && (f % 25) < 5) in_p1a_r[0] = 1'b0;           // Button1 attack
         end
         repeat (804000) @(posedge clk_sys);
+        if (arabentry && (f == 1620 || f == 1660)) begin
+            integer arab_jump_x;
+            integer arab_raw_x;
+            arab_jump_x = $signed({{20{core.sprite_ram.mem[16'h0002][11]}},
+                                    core.sprite_ram.mem[16'h0002][11:0]});
+            arab_raw_x = $signed({{20{core.sprite_ram.mem[16'h0065][11]}},
+                                   core.sprite_ram.mem[16'h0065][11:0]});
+            if (f == 1620) arab_entry_x0 = arab_jump_x + arab_raw_x;
+            else begin
+                arab_entry_x1 = arab_jump_x + arab_raw_x;
+                arab_entry_dx = arab_entry_x1 - arab_entry_x0;
+                arab_entry_done = 1'b1;
+                $display("[arab-entry] f=1620 x=%0d f=1660 x=%0d dx=%0d jump=%0d raw=%0d",
+                    arab_entry_x0, arab_entry_x1, arab_entry_dx,
+                    arab_jump_x, arab_raw_x);
+                if (arab_entry_dx < 20) begin
+                    arab_entry_failed = 1'b1;
+                    $display("ARABIAN FIGHT ENTRY FAIL: neutral-input player advanced only %0d pixels (need >=20)",
+                        arab_entry_dx);
+                end
+                else
+                    $display("ARABIAN FIGHT ENTRY PASS: neutral-input player advanced %0d pixels",
+                        arab_entry_dx);
+            end
+        end
         if (arab_perf_at >= 0 && f >= arab_perf_at &&
             f < arab_perf_at + arab_perf_n) begin
             arab_perf_samples = arab_perf_samples + 1;
@@ -1322,17 +1451,24 @@ initial begin
         $display("[input-summary] active CPU samples: coin=%0d start=%0d p1a=%0d",
             coin_active_samples, start_active_samples, p1a_active_samples);
     if (coin_at >= 0 && coin_active_samples == 0)
-        $fatal(1, "ROMBOOT P1 coin was never returned on SERVICE12 bit 2");
+        $fatal(1, "ROMBOOT physical P1 coin was never returned on SERVICE12");
     if (start_at >= 0 && start_active_samples == 0)
         $fatal(1, "ROMBOOT P1 start was never returned on SERVICE12 bit 4");
     if (p1_event_count > 0 && p1a_active_samples == 0)
         $fatal(1, "ROMBOOT P1 digital event was never returned on P1A");
+    if (alien3_ui_at >= 0 && !alien3_ui_done)
+        $fatal(1, "ALIEN3 UI window was not completed: at=%0d fields=%0d samples=%0d",
+            alien3_ui_at, alien3_ui_n, alien3_ui_samples);
     if (arab_perf_at >= 0 && !arab_perf_done)
         $fatal(1, "ARABIAN FIGHT PERF window was not completed: at=%0d frames=%0d samples=%0d",
             arab_perf_at, arab_perf_n, arab_perf_samples);
     if (arab_heavy_at >= 0 && !arab_heavy_done)
         $fatal(1, "ARABIAN FIGHT HEAVY window was not completed: at=%0d fields=%0d samples=%0d",
             arab_heavy_at, arab_heavy_n, arab_heavy_samples);
+    if (arabentry && !arab_entry_done)
+        $fatal(1, "ARABIAN FIGHT ENTRY window was not completed");
+    if (arabentry && arab_entry_failed)
+        $fatal(1, "ARABIAN FIGHT ENTRY regression failed: neutral-input dx=%0d", arab_entry_dx);
 `ifdef S32_REAL_FB_SIM
     if (fb_deadline_fail)
         $fatal(1, "GA2 production framebuffer reported a service deadline failure");
