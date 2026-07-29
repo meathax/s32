@@ -48,3 +48,34 @@ PC `101EAC` one byte, PC `101F23` state `0000`, PC `101F56` stream
 `001020C5`, and PC `102097` palette `0191`. Use `--help` for alternate paths or
 JSON output, and `--self-test` for the lightweight embedded positive/negative
 test.
+
+## Golden Axe PCB-accuracy register trace (T-A..T-D)
+
+`ga2_regtrace.lua` answers the four open questions that gate the remaining work
+in `docs/ga2-pcb-accuracy-plan.md`. Run it against a local `ga2` set:
+
+```sh
+mame ga2 -autoboot_script verif/mame/ga2_regtrace.lua -autoboot_delay 0
+```
+
+Environment: `GA2_TRACE_OUT` (default `/tmp/ga2_regtrace.txt`),
+`GA2_TRACE_FRAMES` (default 3600, `0` = unlimited).
+
+Play into the **stage-2 cave and light the wall torch** while it records — that
+is the scene MAME's own source names as broken, and the one MAMETesters 05233
+has real-PCB reference footage for.
+
+What each answer decides:
+
+| Look for | Decides |
+| --- | --- |
+| writes to `61004E` with bits 4-7 set | the torch is the **gradation/blur** effect, which MAME implements *not at all* (it reads only bits 8-11) |
+| writes to `1FF00_06` touching `$1FF04` | the torch is the **rowscroll/rowselect line window**, and we must extend those tables to NBG0/1 |
+| `$1FF00` bits 12/13 ever set | whether our NBG2/3 disable decode is right — it is undocumented in MAME's own register block *and* in MacDonald |
+| `$1FF8E` bits 8-11 ever set | whether the tilemap opaque feature matters for ga2 (FBNeo enables it only for `darkedge`/`radr`) |
+| any `sprstat` read | whether ga2 polls the render status MAME and FBNeo both hardcode to "normal" |
+| any `timercnt` read | whether ga2 polls the timer counts MAME returns `0xFF` for |
+
+A trace with **no** `61004E` bit-4-7 writes and **no** `$1FF04` writes in the
+torch scene would mean both current hypotheses are wrong and the effect comes
+from somewhere else entirely — that is a useful result too.
