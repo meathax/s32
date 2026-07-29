@@ -1,13 +1,13 @@
 //============================================================================
 //  NEC V60 (uPD70616) / V70 (uPD70632) CPU core for the Sega System 32
-//  MiSTer core.  DESIGN.md §5.
+//  MiSTer core.  design note §5.
 //
 //  Instruction-accurate microsequenced implementation. Behavioral contract
 //  is MAME's v60 core (BSD-3-Clause, Farfetch'd / R. Belmont): opcode
 //  dispatch per optable.hxx, addressing modes per am1-3.hxx, exception
 //  entry per v60.cpp.
 //
-//  Scope (per DESIGN.md §5.2/§5.3):
+//  Scope (per design note §5.2/§5.3):
 //   - Full integer ISA: F1/F2 two-operand ops, short-format ops, branches,
 //     DBcc/TB, JMP/JSR/CALL/RET/RETIU/RETIS, PREPARE/DISPOSE, PUSH(M)/POP(M),
 //     string ops incl. the fill/stop variants (MOVC*/CMPC*/SCHC*/SKPC*), TASI,
@@ -851,7 +851,15 @@ else if (ce) begin
         // ---- one-byte / special ----
         8'h00: begin halted <= 1'b1; st <= S_HALT; end                    // HALT
         8'hcd: begin pc <= pc + 1; st <= S_FILL; st_after_fill <= S_DECODE; end // NOP
-        8'hc8: begin // BRK — MAME skips this opcode (A4)
+        8'hc8: begin // BRK
+            // TODO(provenance, audit CPU10): treated as a one-byte NOP because
+            // MAME skips this opcode (A4).  Architecturally BRK should take a
+            // breakpoint exception through S_EXC_PUSH1, but its vector number
+            // and frame format are NOT established -- see the CPU8 note on the
+            // DIV path for the vectors this core actually knows.  A wrong
+            // vector would jump into an arbitrary handler, so the skip is
+            // retained until a V60 exception table is obtained.  ga2 only
+            // reaches this on a wild jump, where the NOP is the safer failure.
             // synthesis translate_off
             $display("V60: BRK skipped at %08x", pc);
             // synthesis translate_on
@@ -1212,6 +1220,16 @@ else if (ce) begin
             end
         end
         8'h10: begin // CLRTLBA: no MMU -> one-byte NOP
+            // TODO(provenance, audit CPU11): architecturally this should fault
+            // when executed below the required privilege level (PSW.EL, held in
+            // psw_el).  Not implemented, and deliberately not guessed: the V60
+            // privileged-violation vector is undocumented here, and the rest of
+            // the privileged group (LDPR/STPR above) has no EL check either --
+            // their vector-8 path is the *reserved instruction* fault for an
+            // out-of-range register number, which is a different fault, so it
+            // cannot be borrowed.  Adding the check with a guessed vector would
+            // send a violation to an arbitrary handler.  Moot for ga2, which
+            // runs at EL0 with translation disabled.  See the CPU8 note.
             pc <= pc + 1;
             st <= S_FILL; st_after_fill <= S_DECODE;
         end
@@ -3519,9 +3537,18 @@ task automatic exec_op;
     8'ha1, 8'ha3, 8'ha5, 8'hb1, 8'hb3, 8'hb5,       // DIV/DIVU
     8'h50, 8'h51, 8'h52, 8'h53, 8'h54, 8'h55: begin // REM/REMU
         if (dimext(a, d2) == 0) begin
-            // MAME divide-by-zero: destination unchanged and no trap, but Z/S
-            // are still set from the (unchanged) destination = the dividend, and
-            // OV is cleared (audit R20 V60-8); the old code left flags stale.
+            // TODO(provenance, audit CPU8): this is MAME's non-trapping DIV
+            // behaviour -- destination unchanged, no exception -- with Z/S set
+            // from the unchanged destination (the dividend) and OV cleared
+            // (audit R20 V60-8).  A real uPD70616 is expected to raise a
+            // zero-divide exception instead, but its vector number and frame
+            // format are NOT established: the vectors this core knows are 2,
+            // 8 (reserved instruction), 15, 21 (BRKV), 24+n and 48+n (TRAP),
+            // and no public source documents a zero-divide entry.  Guessing
+            // one would vector to an arbitrary handler, which is strictly
+            // worse than the current benign fall-through, so the MAME
+            // behaviour is retained deliberately until a V60 exception table
+            // is obtained.  Do not "fix" this without that document.
             set_zs(dimext(b, d2), d2);
             f_ov <= 1'b0;
             st <= S_NEXT;

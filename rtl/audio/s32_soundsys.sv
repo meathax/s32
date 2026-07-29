@@ -1,5 +1,5 @@
 //============================================================================
-//  System 32 / Multi 32 sound subsystem glue (DESIGN.md §7, Appendix B)
+//  System 32 / Multi 32 sound subsystem glue (design note §7, Appendix B)
 //  Z80 (T80s) + memory/IO decode + banking + interrupt controller +
 //  2x jt12 (YM3438) or 1x jt12 + MultiPCM, RF5C68, shared RAM.
 //============================================================================
@@ -236,7 +236,11 @@ jt12 fm1 (
     .din(z_dout), .addr(z_addr[1:0]),
     .cs_n(~fm1_cs), .wr_n(z_wr_n | z_iorq_n),
     .dout(fm1_dout), .irq_n(fm1_irq_n),
-    .en_hifi_pcm(1'b1),
+    // Audit AU4: jt12's DAC-channel interpolator is an ENHANCEMENT with no
+    // hardware counterpart -- jt12_top.v states "this feature is not present
+    // in original YM2612".  A real YM3438 zero-order-holds channel-6 DAC
+    // writes.  Keep it off for hardware accuracy.
+    .en_hifi_pcm(1'b0),
     .snd_left(fm1_l), .snd_right(fm1_r), .snd_sample()
 );
 
@@ -245,7 +249,11 @@ jt12 fm2 (
     .din(z_dout), .addr(z_addr[1:0]),
     .cs_n(~fm2_cs), .wr_n(z_wr_n | z_iorq_n),
     .dout(fm2_dout), .irq_n(fm2_irq_n),
-    .en_hifi_pcm(1'b1),
+    // Audit AU4: jt12's DAC-channel interpolator is an ENHANCEMENT with no
+    // hardware counterpart -- jt12_top.v states "this feature is not present
+    // in original YM2612".  A real YM3438 zero-order-holds channel-6 DAC
+    // writes.  Keep it off for hardware accuracy.
+    .en_hifi_pcm(1'b0),
     .snd_left(fm2_l), .snd_right(fm2_r), .snd_sample()
 );
 

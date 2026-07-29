@@ -1,5 +1,5 @@
 //============================================================================
-//  V60 logical-bus adapter (DESIGN.md §5.4 "bus unit")
+//  V60 logical-bus adapter (design note §5.4 "bus unit")
 //  Turns the CPU's logical accesses (any address, size 1/2/4 bytes) into
 //  1..3 aligned 16-bit cycles on the system bus (V60 has a 16-bit external
 //  data bus).  V70 (IS_V70=1) uses 1..2 aligned 32-bit cycles.

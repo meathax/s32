@@ -4,7 +4,7 @@ import argparse
 import random
 from pathlib import Path
 
-from verif.reference.s32_mixer_ref import mix_pixel
+from verif.reference.s32_mixer_ref import SEM_HARDWARE, SEM_MAME, mix_pixel
 
 
 VECTOR_BITS = 1179
@@ -28,7 +28,14 @@ def _pack(parts: list[tuple[int, int]]) -> int:
     return packed
 
 
-def generate(seed: int, count: int) -> list[int]:
+def generate(seed: int, count: int, semantics: str = SEM_HARDWARE) -> list[int]:
+    """Build differential vectors against the chosen mixer oracle.
+
+    Defaults to the hardware-truth oracle -- this is the accuracy gate for
+    ``rtl/video/s32_mixer.sv``.  ``SEM_MAME`` is available only as a legacy
+    change-detector; a pass under it proves the RTL still matches MAME, which
+    is not an accuracy claim.  See ``verif/reference/s32_mixer_ref.py``.
+    """
     rng = random.Random(seed)
     vectors: list[int] = []
     for _ in range(count):
@@ -44,7 +51,8 @@ def generate(seed: int, count: int) -> list[int]:
         bg_ctrl = rng.getrandbits(16)
         y = rng.randrange(224)
         expected = mix_pixel(
-            regs, pixels, sprite, layer_off, bg_ctrl, y, palette
+            regs, pixels, sprite, layer_off, bg_ctrl, y, palette,
+            semantics=semantics,
         ).rgb
         parts = [
             (expected, 24), (layer_off, 6), (bg_ctrl, 16), (y, 9),
@@ -56,10 +64,12 @@ def generate(seed: int, count: int) -> list[int]:
     return vectors
 
 
-def write_vectors(path: Path, seed: int, count: int) -> None:
+def write_vectors(path: Path, seed: int, count: int,
+                  semantics: str = SEM_HARDWARE) -> None:
     digits = (VECTOR_BITS + 3) // 4
     path.write_text(
-        "".join(f"{vector:0{digits}x}\n" for vector in generate(seed, count)),
+        "".join(f"{vector:0{digits}x}\n"
+                for vector in generate(seed, count, semantics)),
         encoding="ascii",
     )
 
@@ -69,8 +79,13 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--seed", type=lambda value: int(value, 0), default=5387)
     parser.add_argument("--count", type=int, default=512)
+    parser.add_argument(
+        "--semantics", choices=(SEM_HARDWARE, SEM_MAME), default=SEM_HARDWARE,
+        help="oracle to generate against; 'mame' is a legacy change-detector "
+             "and is not an accuracy gate",
+    )
     args = parser.parse_args()
-    write_vectors(args.output, args.seed, args.count)
+    write_vectors(args.output, args.seed, args.count, args.semantics)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 //============================================================================
-//  Full-core soak / acceptance test (DESIGN.md §11.6, simulator tier).
+//  Full-core soak / acceptance test (design note §11.6, simulator tier).
 //
 //  §11.6 acceptance = "run on real hardware or high-fidelity simulator;
 //  verify audio/video output, confirm no crashes over extended play."

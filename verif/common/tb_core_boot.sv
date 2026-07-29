@@ -1,5 +1,5 @@
 //============================================================================
-//  Full-core integration boot test (DESIGN.md §11 integration tier).
+//  Full-core integration boot test (design note §11 integration tier).
 //  Boots s32_core with a synthetic V60 program served from a behavioral
 //  SDRAM model. The program (in "ROM"):
 //    - sets SP

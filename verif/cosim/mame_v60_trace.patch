@@ -1,4 +1,4 @@
-MAME-side patch for the V60 co-simulation corpus (DESIGN.md §11.2).
+MAME-side patch for the V60 co-simulation corpus (design note §11.2).
 Apply to src/devices/cpu/v60/v60.cpp; build MAME; run with
   -log -debug "trace cosim.tr,maincpu,noloop"
 or set V60_COSIM=1 to stream the binary format below to v60_trace.bin.

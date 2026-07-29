@@ -1,6 +1,6 @@
 //============================================================================
 //  System 32 palette RAM — one bank (0x4000 x 16), format aliasing per
-//  DESIGN.md §6.7:
+//  design note §6.7:
 //    CPU A14=0: xBBBBBGGGGGRRRRR (native storage)
 //    CPU A14=1: xBGRBBBBGGGGRRRR (converted on the fly both directions)
 //  Mixer blend-pair mirror write when mixer reg 0x4E & 0x0880.
@@ -50,6 +50,25 @@ endfunction
 wire [15:0] rd_native;
 assign cpu_rdata = conv ? to_alt(rd_native) : rd_native;
 
+// TODO(provenance, audit MX11): the trigger is an OR of $61004E bits 11 and 7.
+// Audit MX11 proposed tightening it to the exact two-bit test
+// ((mixer_r4e & 16'h0880) == 16'h0880).  MEASURED 2026-07-28 and deliberately
+// NOT changed:
+//   * ga2 writes $61004E as 0F00/0B00/0E00/0D00/0C00 only -- bit 11 always set,
+//     bit 7 NEVER set.  So the OR arms write-both permanently for ga2 while the
+//     proposed AND would disable it permanently: the two are not a refinement
+//     of each other, they are opposites.
+//   * ga2 never touches the mirrored bank at all -- across 286,915 palette
+//     writes, zero addresses reach word >= 0x2000 (verif/mame/ga2_torchtrace.lua).
+//     write_both is therefore a NO-OP for ga2 either way, so this game cannot
+//     settle the question.
+//   * bit 7 has no plausible claim to being part of this control: MacDonald
+//     documents $61004E bit 7 as the GRADATION EFFECT ENABLE, which has nothing
+//     to do with palette bank mirroring.  Gating palette writes on it would be
+//     incoherent under either register interpretation.
+// Since a game that DOES use bank 0x2000 would lose mirroring entirely under
+// the AND test, the looser OR is the safer of two unsourced options.  Settling
+// this needs a title that actually writes the mirrored bank.
 wire write_both = |(mixer_r4e & 16'h0880);
 
 // Palette addresses 0x0000 and 0x2000 form the pair affected by the

@@ -1,9 +1,39 @@
-"""Independent, scalar reference for the System 32 315-5387 mixer.
+"""Independent, scalar reference for the System 32 315-5388 mixer.
 
-The implementation follows MAME ``segas32_v.cpp::mix_all_layers`` rather
-than the pipelined structure of ``rtl/video/s32_mixer.sv``.  Line-buffer
-pixels use the RTL boundary format: bit 13 is opaque and bits 12:0 are the
-MAME layer pixel value.
+Structure follows MAME ``segas32_v.cpp::mix_all_layers`` rather than the
+pipelined shape of ``rtl/video/s32_mixer.sv``.  Line-buffer pixels use the RTL
+boundary format: bit 13 is opaque and bits 12:0 are the layer pixel value.
+
+TWO SEMANTICS, SELECTED BY ``semantics=``
+-----------------------------------------
+``"hardware"`` (default) is the **accuracy gate**.  Where MAME's C code and the
+real board disagree, this models the board.
+
+``"mame"`` is a **legacy change-detector only**.  It reproduces MAME's integer
+semantics bit-for-bit.  Passing it does NOT mean the RTL is correct -- it means
+the RTL still matches MAME.  Never promote a "mame" comparison to an accuracy
+argument.
+
+Where the two differ, and why:
+
+1. Colour packing.  MAME zero-fills 5-bit channels into 8 bits
+   (``(r << 19) | (g << 11) | (b << 3)``), so code 31 emits 0xF8 and full white
+   is unreachable.  Hardware replicates the high bits.
+   Evidence: furrtek's decap of the 315-5242 shows it contains an OKI M71064,
+   "a triple DAC made of printed resistors and 3 output transistors" -- a
+   passive linear ladder with nothing between it and the monitor.  MacDonald
+   measured the mixer colour-offset endpoints directly: ``$1F,$1F,$1F`` =
+   "Screen is completely white", ``$20,$20,$20`` = "completely black".
+
+2. Saturation.  MAME applies colour offset, blend and shadow to unclamped C
+   integers and clamps once at the very end, so an out-of-range intermediate
+   can propagate through the blend.  Hardware saturates at each stage.
+   Evidence: MacDonald documents the offset stage as a clamped signed add in
+   5-bit colour space ("result CLAMPED (no wrapping)") with the measured
+   endpoints above.
+
+See docs/ga2-pcb-accuracy-plan.md (MX8, MX3) and
+docs/reference/s32tech-macdonald-2005.txt.
 """
 
 from __future__ import annotations
@@ -13,6 +43,28 @@ from typing import Callable, Sequence
 
 
 TEXT, NBG0, NBG1, NBG2, NBG3, BITMAP, SPRITE, BACKGROUND = range(8)
+
+#: Accuracy gate -- models the real 315-5388/315-5242 behaviour.
+SEM_HARDWARE = "hardware"
+#: Legacy change-detector -- reproduces MAME's integer semantics exactly.
+SEM_MAME = "mame"
+
+
+def _clamp5(value: int) -> int:
+    """Saturate one colour channel into the 5-bit display domain."""
+    return 31 if value > 31 else 0 if value < 0 else value
+
+
+def _pack_rgb(rgb: Sequence[int], semantics: str) -> int:
+    """Pack three 5-bit channels into 24-bit RGB.
+
+    Hardware replicates the high bits so 31 -> 0xFF (full-scale on the
+    315-5242's resistor ladder).  MAME zero-fills, so 31 -> 0xF8.
+    """
+    if semantics == SEM_MAME:
+        return (rgb[0] << 19) | (rgb[1] << 11) | (rgb[2] << 3)
+    expand = [(value << 3) | (value >> 2) for value in rgb]
+    return (expand[0] << 16) | (expand[1] << 8) | expand[2]
 
 
 @dataclass(frozen=True)
@@ -93,12 +145,19 @@ def mix_pixel(
     bg_ctrl: int,
     y: int,
     palette: Callable[[int], int],
+    semantics: str = SEM_HARDWARE,
 ) -> MixResult:
-    """Mix one visible pixel using the MAME layer-scan contract.
+    """Mix one visible pixel using the layer-scan contract.
 
     ``regs`` contains 64 mixer words. ``layer_pixels`` contains TEXT through
     BITMAP in that order, each as ``{opaque, pixel[12:0]}``.
+
+    ``semantics`` selects :data:`SEM_HARDWARE` (default, the accuracy gate) or
+    :data:`SEM_MAME` (legacy change-detector).  See the module docstring.
     """
+    if semantics not in (SEM_HARDWARE, SEM_MAME):
+        raise ValueError(f"unknown semantics {semantics!r}")
+    saturating = semantics == SEM_HARDWARE
 
     if len(regs) != 64 or len(layer_pixels) != 6:
         raise ValueError("expected 64 mixer registers and six layer pixels")
@@ -188,6 +247,10 @@ def mix_pixel(
     first_delta = offsets[first.coloroffs]
     rgb = [((first_color >> (5 * channel)) & 0x1F) + first_delta[channel]
            for channel in range(3)]
+    # Hardware saturates at the offset adder (MacDonald: "result CLAMPED (no
+    # wrapping)"); MAME lets the intermediate run out of range into the blend.
+    if saturating:
+        rgb = [_clamp5(value) for value in rgb]
 
     partner: _Layer | None = None
     second_index: int | None = None
@@ -204,15 +267,20 @@ def mix_pixel(
             factor = (r4e >> 8) & 7
             for channel in range(3):
                 second_value = ((second_color >> (5 * channel)) & 0x1F) + second_delta[channel]
+                if saturating:
+                    second_value = _clamp5(second_value)
                 rgb[channel] = (rgb[channel] * (7 - factor)
                                 + second_value * (factor + 1)) >> 3
             blended = True
+            # Saturate the blend result before the shadow stage.
+            if saturating:
+                rgb = [_clamp5(value) for value in rgb]
 
     if shadow:
         rgb = [value >> 1 for value in rgb]
 
-    rgb = [min(31, max(0, value)) for value in rgb]
-    packed = (rgb[0] << 19) | (rgb[1] << 11) | (rgb[2] << 3)
+    rgb = [_clamp5(value) for value in rgb]
+    packed = _pack_rgb(rgb, semantics)
     return MixResult(
         rgb=packed,
         winner=first.index,

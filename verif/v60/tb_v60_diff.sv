@@ -1,5 +1,5 @@
 //============================================================================
-//  V60 differential bench (DESIGN.md §11.2)
+//  V60 differential bench (design note §11.2)
 //  Loads a $readmemh program image (from gen_diff_program.py), runs s32_v60
 //  to HALT, prints the final register file + scratch memory in the exact
 //  format run_diff.sh compares against the reference model's .expected file.

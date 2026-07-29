@@ -230,26 +230,26 @@ initial begin
                  mix.ph, mix_addr);
     end
     repeat (7) @(posedge clk_ram); #1;
-    check(rgb, 24'hF8F8F8, 9'd10);
+    check(rgb, 24'hFFFFFF, 9'd10);
 
     // --- 1: winner pixel ---
     px(9'd9);                          // background -> black
     check(rgb, 24'h000000, 9'd9);
-    px(9'd10);                         // NBG0 pen1 -> white (31<<3 = F8)
-    check(rgb, 24'hF8F8F8, 9'd10);
-    px(9'd12);                         // NBG1 pen2 -> palette[2]=B=8 -> B 8<<3=40
-    check(rgb, 24'h000040, 9'd12);
+    px(9'd10);                         // NBG0 pen1 -> full white (31 -> FF, MX8)
+    check(rgb, 24'hFFFFFF, 9'd10);
+    px(9'd12);                         // NBG1 pen2 -> palette[2]=B=8 -> B 42 (MX8)
+    check(rgb, 24'h000042, 9'd12);
     px(9'd14);                         // NBG0 idx 0x21 -> R=15 -> 78,0,0
-    check(rgb, 24'h780000, 9'd14);
+    check(rgb, 24'h7B0000, 9'd14);
 
     // --- backdrop source: VRAM $1FF5E, including the per-line low 9 bits ---
     bg_ctrl = 16'h0400;                // static palette index $0400
     px(9'd9);
-    check(rgb, 24'h780000, 9'd9);
+    check(rgb, 24'h7B0000, 9'd9);
     bg_ctrl = 16'h8200;                // base $0200 + (0 + y)
     disp_y = 9'd3;
     px(9'd9);
-    check(rgb, 24'h00F800, 9'd9);       // palette[$0203]
+    check(rgb, 24'h00FF00, 9'd9);       // palette[$0203]
     bg_ctrl = 16'h0000;
     disp_y = 9'd0;
 
@@ -261,7 +261,7 @@ initial begin
     px(9'd10);
     // white(31,31,31) * (7-3) + blue(0,0,8)... palette[2]=0x2000: B=8,G=0,R=0
     // r = (31*4 + 0*4)>>3 = 15 -> 78; g likewise 15 -> 78; b = (31*4+8*4)>>3=19 -> 98
-    check(rgb, 24'h787898, 9'd10);
+    check(rgb, 24'h7B7B9C, 9'd10);
     wreg(6'h27, 16'h0000);             // blend off again
     wreg(6'h19, 16'h0000);
 
@@ -272,17 +272,17 @@ initial begin
     wreg(6'h00, 16'h000F);             // sprite group 0 prio F
     spr_pix = 16'h07FE;                // shadow pen (transparent, shadows below)
     px(9'd10);                         // white halved: 31>>1=15 -> 78
-    check(rgb, 24'h787878, 9'd10);
+    check(rgb, 24'h7B7B7B, 9'd10);
     spr_pix = 16'hffff;
     px(9'd10);                         // back to full white
-    check(rgb, 24'hF8F8F8, 9'd10);
+    check(rgb, 24'hFFFFFF, 9'd10);
 
     // --- 4: opaque sprite wins over NBG0 ---
     // sprite pen 1 group 0: pix = 0x8001 -> masked pen 1 -> palette[1] white
     // group reg 0 palbase 0 shift 0 prio F (rank 7 beats NBG0 rank 5)
     spr_pix = 16'h8001;
     px(9'd10);
-    check(rgb, 24'hF8F8F8, 9'd10);
+    check(rgb, 24'hFFFFFF, 9'd10);
     spr_pix = 16'hffff;
 
     // --- 5: blend mask uses raw sprite group, not effective register group ---
@@ -295,7 +295,7 @@ initial begin
     wreg(6'h19, 16'h1000);             // NBG0 blends with sprite; code=raw group 0
     spr_pix = 16'h8002;                // raw group 0, palette[2] blue
     px(9'd10);
-    check(rgb, 24'h787898, 9'd10);
+    check(rgb, 24'h7B7B9C, 9'd10);
     spr_pix = 16'hffff;
     wreg(6'h27, 16'h0000);
     wreg(6'h19, 16'h0000);
@@ -303,13 +303,13 @@ initial begin
     // --- 6: line parity selects the matching synchronous RAM bank ---
     disp_y = 9'd0;
     px(9'd20);
-    check(rgb, 24'hF8F8F8, 9'd20);     // even line -> bank 0, white
+    check(rgb, 24'hFFFFFF, 9'd20);     // even line -> bank 0, white
     disp_y = 9'd1;
     px(9'd20);
-    check(rgb, 24'h780000, 9'd20);     // odd line -> bank 1, red
+    check(rgb, 24'h7B0000, 9'd20);     // odd line -> bank 1, red
     disp_y = 9'd0;
     px(9'd20);
-    check(rgb, 24'hF8F8F8, 9'd20);     // switch back without stale bank data
+    check(rgb, 24'hFFFFFF, 9'd20);     // switch back without stale bank data
 
     // --- 7: color-offset mode/bank decode ---
     // Bank 0 offsets RGB=(+1,+2,+3); bank 1=(-1,-2,-3). Applied to
@@ -324,19 +324,19 @@ initial begin
 
     // mode 00 -> bank !layerflag
     wreg(6'h1f, 16'h0000); wreg(6'h19, 16'h0000);
-    px(9'd22); check(rgb, 24'h787068, 9'd22);
+    px(9'd22); check(rgb, 24'h7B736B, 9'd22);
     wreg(6'h19, 16'h4000);
-    px(9'd22); check(rgb, 24'h889098, 9'd22);
+    px(9'd22); check(rgb, 24'h8C949C, 9'd22);
 
     // mode 01 -> bank 2 (no offset), independent of layerflag
     wreg(6'h1f, 16'h0002); wreg(6'h19, 16'h0000);
-    px(9'd22); check(rgb, 24'h808080, 9'd22);
+    px(9'd22); check(rgb, 24'h848484, 9'd22);
 
     // mode 10 -> flag 0 selects bank 2; flag 1 selects bank 0
     wreg(6'h1f, 16'h8000); wreg(6'h19, 16'h0000);
-    px(9'd22); check(rgb, 24'h808080, 9'd22);
+    px(9'd22); check(rgb, 24'h848484, 9'd22);
     wreg(6'h19, 16'h4000);
-    px(9'd22); check(rgb, 24'h889098, 9'd22);
+    px(9'd22); check(rgb, 24'h8C949C, 9'd22);
 
     // --- 8: signed offsets occur before blending; second lookup is distinct ---
     // NBG0 white uses bank1 (-32) => -1/channel. NBG1 blue uses bank0
@@ -350,7 +350,7 @@ initial begin
     wreg(6'h1a, 16'h4000);             // NBG1 flag1(bank0)
     wreg(6'h27, 16'h0800);             // blend enable, factor 0
     px(9'd10);
-    check(rgb, 24'h181820, 9'd10);
+    check(rgb, 24'h181818, 9'd10);
 
     wreg(6'h20, 16'h0001); wreg(6'h21, 16'h0002); wreg(6'h22, 16'h0003);
     wreg(6'h23, 16'h003f); wreg(6'h24, 16'h003e); wreg(6'h25, 16'h003d);
@@ -358,9 +358,9 @@ initial begin
 
     // mode 11 -> bank !layerflag, like mode 00
     wreg(6'h1f, 16'h8002); wreg(6'h19, 16'h0000);
-    px(9'd22); check(rgb, 24'h787068, 9'd22);
+    px(9'd22); check(rgb, 24'h7B736B, 9'd22);
     wreg(6'h19, 16'h4000);
-    px(9'd22); check(rgb, 24'h889098, 9'd22);
+    px(9'd22); check(rgb, 24'h8C949C, 9'd22);
 
     // --- 10: alien3's exact production config (MAME segas32_v.cpp mixer dump:
     // 0x40=0x42=0x44=0xFFEB, 0x4E=0x0C00).  util::sext(0xFFEB,6) = -21 must
@@ -374,7 +374,7 @@ initial begin
     wreg(6'h19, 16'h4000);             // NBG0 flag=1 -> bank 0 (-21)
     wreg(6'h1a, 16'h0000);
     px(9'd10);                          // white (31,31,31) - 21 = (10,10,10)
-    check(rgb, 24'h505050, 9'd10);
+    check(rgb, 24'h525252, 9'd10);
     px(9'd22);                          // grey (16,16,16) - 21 clamps to 0
     check(rgb, 24'h000000, 9'd22);
     // alien3 blend: 0x4E=0x0C00 (enable, factor 4). Winner NBG0 darkened by
@@ -384,7 +384,7 @@ initial begin
     wreg(6'h27, 16'h0C00);
     wreg(6'h19, 16'h4100);             // bank 0 + blendmask NBG1
     px(9'd10);
-    check(rgb, 24'hB8B8B8, 9'd10);
+    check(rgb, 24'hBDBDBD, 9'd10);
     wreg(6'h27, 16'h0000);
     wreg(6'h19, 16'h0000);
     wreg(6'h20, 16'h0000); wreg(6'h21, 16'h0000); wreg(6'h22, 16'h0000);

@@ -1,5 +1,5 @@
 #!/bin/sh
-# System 32 core regression (DESIGN.md §11): grows with each milestone.
+# System 32 core regression (design note §11): grows with each milestone.
 set -e
 cd "$(dirname "$0")/.."
 echo "[1/35] full-core lint compile (universal + System32-only profile)"

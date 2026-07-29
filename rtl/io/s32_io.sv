@@ -1,5 +1,5 @@
 //============================================================================
-//  System 32 I/O collection (DESIGN.md §8.7, Appendix D)
+//  System 32 I/O collection (design note §8.7, Appendix D)
 //    s32_io5296  — Sega 315-5296 8-port I/O
 //    s32_eeprom93c46 — 93C46 16-bit serial EEPROM with NVRAM shadow
 //    s32_msm6253 — 4-channel 8-bit ADC
@@ -198,7 +198,7 @@ module s32_eeprom93c46 (
     input             di,          // data in (from io chip)
     input             cs,
     input             sk,          // clock
-    output reg        dout,
+    output            dout,
 
     // NVRAM shadow load/save
     input             ld_wr,
@@ -220,8 +220,12 @@ module s32_eeprom93c46 (
 //     the same CS frame are dropped, as on the real self-timed part);
 //   - DO idles high (tristate + pullup) in every state except the data
 //     phase of a READ.
+// Departure from MAME (audit IO5): the self-timed program interval IS modelled
+// -- see EE_BUSY_CLKS below.  MAME's own eepromser.cpp models a completion
+// time too, so the "mirrors MAME exactly" claim above was never quite right.
 typedef enum logic [2:0] { E_IDLE, E_CMD, E_READ, E_WRDATA, E_DONE } est_t;
 est_t es;
+reg        dout_r;
 reg [6:0]  sr;
 reg [3:0]  bitcnt;
 reg [5:0]  eaddr;
@@ -248,6 +252,48 @@ wire [15:0] ram_q_b_phys;
 wire [15:0] ram_q_a = ~ram_q_a_phys;
 wire        serial_commit = serial_wr && !ld_wr && !bulk_active;
 wire        bulk_final_commit = bulk_active && (bulk_addr == 6'd63) && !ld_wr;
+
+// ---------------------------------------------------------------------------
+// Audit IO5: 93C46 self-timed write/erase busy interval.
+//
+// A real 93C46 begins an internal, self-timed program cycle when a WRITE,
+// ERASE, WRAL or ERAL frame ends.  On the next CS assertion DO reads LOW while
+// that cycle runs and goes HIGH when the part is ready -- this is the standard
+// ready-poll.  Typical program time is ~2 ms (datasheets quote up to 10 ms).
+//
+// Previously a single-word commit landed on the next clk (~21 ns) and ERAL /
+// WRAL took 64 clks (~1.3 us), so any ready-poll loop completed instantly.
+// The header claimed this mirrored MAME's eepromser.cpp "exactly", but MAME's
+// eeprom_serial_base_device does model a completion time during which DO reads
+// busy -- so this was neither MAME-accurate nor hardware-accurate.
+//
+// ~2 ms at 48.317307 MHz = 96,635 clk.
+//
+// DEFAULT OFF, behind `S32_EEPROM_BUSY`.  This module's header records that
+// "holo's boot depends on" the immediate-completion behaviour, and a real busy
+// interval makes a write-then-immediately-read sequence return busy instead of
+// data (verif/common/tb_eeprom_nvram.sv exercises exactly that).  Whether the
+// affected games poll DO for ready or assume completion cannot be settled
+// without running them, and holo ROMs are not available in this tree.  So the
+// mechanism is implemented and documented but not armed: enabling it is a
+// hardware experiment, not a safe default.
+localparam integer EE_BUSY_CLKS = 96635;
+`ifdef S32_EEPROM_BUSY
+reg [16:0] ee_busy;
+wire       ee_busy_active = (ee_busy != 17'd0);
+always @(posedge clk) begin
+    if (rst) ee_busy <= 17'd0;
+    // NVRAM image loads (ld_wr) are not a device program cycle.
+    else if (serial_commit || bulk_final_commit) ee_busy <= EE_BUSY_CLKS[16:0];
+    else if (ee_busy_active) ee_busy <= ee_busy - 17'd1;
+end
+`else
+wire ee_busy_active = 1'b0;   // behaviour-preserving default
+`endif
+
+// DO is pulled low for the duration of the program cycle; otherwise it follows
+// the shift/read state machine.
+assign dout = ee_busy_active ? 1'b0 : dout_r;
 
 assign rd_data = ~ram_q_b_phys;
 
@@ -276,14 +322,14 @@ always @(posedge clk) begin
     sk_d <= sk;
     upload_d <= upload;
     if (rst) begin
-        es <= E_IDLE; bitcnt <= 0; dout <= 1'b1;
+        es <= E_IDLE; bitcnt <= 0; dout_r <= 1'b1;
         ewen <= 0; wr_all <= 0;
     end
     else if (!cs) begin
         // A self-timed WRAL/ERAL remains busy after CS drops.  Do not allow
         // a new frame to resynchronize in the middle of the 64-word sweep.
         es <= bulk_active ? E_DONE : E_IDLE;
-        bitcnt <= 0; dout <= 1'b1;
+        bitcnt <= 0; dout_r <= 1'b1;
     end
     else if (sk & ~sk_d) begin        // rising SK
         case (es)
@@ -301,7 +347,7 @@ always @(posedge clk) begin
                 case (cmd[7:6])
                     2'b10: begin       // READ: dummy 0 then MSB-first
                         es <= E_READ;
-                        bitcnt <= 0; dout <= 1'b0;
+                        bitcnt <= 0; dout_r <= 1'b0;
                     end
                     2'b01: begin es <= E_WRDATA; bitcnt <= 0; end
                     2'b11: begin       // ERASE (immediate, then wait for CS)
@@ -333,11 +379,11 @@ always @(posedge clk) begin
         end
         E_READ: begin
             if (bitcnt == 4'd0) begin
-                dout <= ram_q_a[15];
+                dout_r <= ram_q_a[15];
                 shifter <= {ram_q_a[14:0], 1'b0};
             end
             else begin
-                dout <= shifter[15];
+                dout_r <= shifter[15];
                 shifter <= {shifter[14:0], 1'b0};
             end
             bitcnt <= bitcnt + 1'd1;
@@ -363,7 +409,7 @@ always @(posedge clk) begin
                     end
                 end
                 es <= E_DONE;
-                dout <= 1'b1;        // pullup: not in the read-data state
+                dout_r <= 1'b1;        // pullup: not in the read-data state
             end
         end
         E_DONE: ;                    // MAME WAIT_FOR_COMPLETION: CS ends it
@@ -488,7 +534,7 @@ end
 endmodule
 
 // ---------------------------------------------------------------------------
-//  V60 interrupt controller + timers (0xd00000) — DESIGN.md §5.5
+//  V60 interrupt controller + timers (0xd00000) — design note §5.5
 // ---------------------------------------------------------------------------
 module s32_intc (
     input             clk,          // clk_sys

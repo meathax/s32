@@ -1,5 +1,5 @@
 //============================================================================
-//  Sega System 32 — ioctl ROM loader  (DESIGN.md §9.3)
+//  Sega System 32 — ioctl ROM loader  (design note §9.3)
 //  Legacy stream layout (ioctl index 0):
 //    [0x00..0x3f]  board descriptor (64 bytes)
 //    [maincpu 2MB][soundcpu 4MB][tiles 4MB][multipcm 4MB][mcu 64KB]
@@ -10,7 +10,7 @@
 //  MCU bytes are address-descrambled into the reserved external-SDRAM slot,
 //  avoiding a duplicate 64 KiB on-chip ROM that cannot fit alongside the real
 //  V25. The inverse of MAME's destination-to-source address lookup is applied
-//  (see v25_stream_to_dst below and DESIGN.md §8.1).
+//  (see v25_stream_to_dst below and design note §8.1).
 //  Optimized MRAs use index 4 main, 5 sound, 6 tiles, 7 PCM, 8 MCU and
 //  9 sprites. A descriptor-only index-0 transfer is emitted last so reset is
 //  released only after all populated regions have completed.

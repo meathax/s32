@@ -1,5 +1,5 @@
 //============================================================================
-//  V60 directed test suite (DESIGN.md §11.2 directed tier)
+//  V60 directed test suite (design note §11.2 directed tier)
 //  Exercises: memory operands (displacement/register-indirect/autoinc/dec),
 //  PUSH/POP, JSR/RET, PREPARE/DISPOSE, interrupt entry + RETIU, flags across
 //  SUB/CMP borrow chains, unaligned word access through the 16-bit bus.

@@ -1,6 +1,6 @@
 //============================================================================
 //  Arcade: Sega System 32 / Multi 32 for MiSTer  (emu top)
-//  DESIGN.md §9 — framework integration.
+//  design note §9 — framework integration.
 //============================================================================
 
 module emu
@@ -174,6 +174,15 @@ localparam CONF_STR = {
     "O[6],Screen (Multi32),A,B;",
 `endif
     "O[7],Service Mode,Off,On;",
+    // Audit IO3: SW1 is a real 4-position DIP on the System 32 main board
+    // (837-7428) that was previously hardwired all-Off and unreachable.  Most
+    // System 32 settings live in the EEPROM-backed service menu, so the per-game
+    // meaning of these four switches is not documented here -- they are exposed
+    // as the physical switches so they can be used and probed.
+    "O[8],DIP SW1-1,Off,On;",
+    "O[9],DIP SW1-2,Off,On;",
+    "O[10],DIP SW1-3,Off,On;",
+    "O[11],DIP SW1-4,Off,On;",
 `ifndef S32_GOLDENAXE_ONLY
     "O[16:15],CPU Turbo,Normal,x2,x3,x4;",
 `endif
@@ -222,7 +231,7 @@ always @(posedge clk_sys) begin
     end
 end
 
-// fractional clock enables (DESIGN.md §3.3)
+// fractional clock enables (design note §3.3)
 // OSD Pause freezes the CPU/sound enables (state preserved, video keeps
 // scanning the same frame — stable for screenshots); audio is muted below.
 reg ce_cpu, ce_z80, ce_fm, ce_pcm;
@@ -664,7 +673,11 @@ wire [7:0] svc12 = ~{(active_board.prot_sel == PROT_SONIC) ? joystick_0[10] : 1'
 // EEPROM DO line inside s32_core.  Some games poll the PCB push switches
 // rather than the cabinet Test line, so drive them from the same buttons —
 // physically equivalent to pressing the matching switch on the board.
-wire [7:0] svc34 = ~{2'b00, test_btn, svc_btn, 4'b0000};
+// Audit IO3: bits 3:0 now follow the OSD DIP SW1 toggles instead of being tied
+// off.  The whole byte is active-low, so an ON switch presents 1 here and reads
+// back as 0, matching a closed switch on the board.
+wire [7:0] svc34 = ~{2'b00, test_btn, svc_btn,
+                     status[11], status[10], status[9], status[8]};
 // GA2's 4-player i8255 port C is MAME EXTRA3 (ppi.in_pc_callback -> "EXTRA3").
 // Base sets: bit0=Start3, bit1=Start4, bits[7:2] unused. The US sets (ga2u,
 // spidmanu, arabfgtu) instead read COIN1 on bit3 (0x08) and COIN2 on bit2

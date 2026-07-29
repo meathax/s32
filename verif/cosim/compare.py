@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V60 co-simulation comparator (DESIGN.md §11.2).
+"""V60 co-simulation comparator (design note §11.2).
 
 Compares a MAME trace (mame_v60_trace.patch format) against the RTL trace
 emitted by the Verilator/iverilog bench (same 24-byte record format,

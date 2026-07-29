@@ -25,5 +25,5 @@ Re-run `bash verif/v60/run_v60_verilator.sh` and compare after each phase.
 
 ## Targets after prefetch (docs/v60-prefetch-plan.md)
 - CPI ~10-12 (P2), ~9-11 (P3); S_FILLW < 10%
-- select work ~18-22%, attract idle ~55-65% (within DESIGN.md +/-20% policy band)
+- select work ~18-22%, attract idle ~55-65% (within the historical design notes +/-20% policy band)
 - tb_v60_fetch budget tightened to ~<=2200 cyc at P4

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Constrained-random V60 program generator + reference runner (DESIGN.md §11.2).
+Constrained-random V60 program generator + reference runner (design note §11.2).
 
 Emits:
   - a flat little-endian memory image (program at 0, data scratch at 0x8000)

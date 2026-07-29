@@ -1,4 +1,4 @@
-# V60 co-simulation harness (DESIGN.md §11.2)
+# V60 co-simulation harness (design note §11.2)
 
 Infrastructure for instruction-level equivalence checking of `s32_v60`
 against MAME's v60 core:

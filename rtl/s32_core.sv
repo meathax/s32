@@ -1,5 +1,5 @@
 //============================================================================
-//  Sega System 32 / Multi 32 — board top (DESIGN.md §3.1)
+//  Sega System 32 / Multi 32 — board top (design note §3.1)
 //  Wires: V60 + bus decode (Appendix A), video pipeline, sound subsystem,
 //  I/O chips, interrupt controller, protection modules, SDRAM/DDR3.
 //============================================================================
@@ -283,6 +283,11 @@ wire sel_io1    = is_multi32 && (A[23:20] == 4'hC) && A[19] &&
 wire sel_intc   = (A[23:20] == 4'hD) && !A[19];
 wire sel_rand   = (A[23:20] == 4'hD) &&  A[19];
 wire sel_romhi  = (A[23:20] == 4'hF);
+// Audit SY-C1: memory wait-state control, one byte per 1 MB region.
+// $E00000 ROM-L, $E00001 ROM-H, $E00002 WRAM, $E00003 VRAM, $E00004 OBJ RAM,
+// $E00005 OBJ REG, $E00006 CRAM, $E00007 Z80 RAM, ... $E0000C I/O,
+// $E0000D ASIC, $E0000E ASIC, $E0000F ROM-L.
+wire sel_waitcfg = (A[23:20] == 4'hE) && (A[19:4] == 16'h0000);
 
 // Palette/mixer windows are mirrored through bits 19:17 (System 32) or
 // 18:17 (Multi 32); A16 alone distinguishes palette RAM from mixer regs.
@@ -841,6 +846,14 @@ assign sdr_p4_addr = SDR_MULTIPCM_BASE[24:1] + {3'b000, mpcm_ba[21:1]};
 // 0x80xxxx page read link-not-connected (0xFFFF, handled in the read mux).
 // ---------------------------------------------------------------------------
 wire       sel_comm_ram = sel_comm && (A[15:12] == 4'h0);
+`ifdef S32_GOLDENAXE_ONLY
+// Golden Axe is a standalone cabinet: it has no comm-link board and never
+// decodes $800000.  The 2 KB link RAM inferred below costs 2 M10K blocks, and
+// this design fits at 516/553 (93%) RAM blocks, so the array is compiled out of
+// the dedicated revision.  The read mux already returns link-not-connected
+// (0xFFFF) for the whole $80xxxx page when the RAM is absent.
+wire [7:0] comm_q = 8'hff;
+`else
 reg [7:0]  comm_ram [0:2047];
 reg [7:0]  comm_q;
 integer    comm_init_i;
@@ -858,6 +871,7 @@ end
 function automatic [7:0] comm_peek(input [10:0] addr);
     comm_peek = comm_ram[addr];
 endfunction
+`endif
 `endif
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1198,42 @@ s32_v25 v25 (
 );
 
 // ---------------------------------------------------------------------------
+// Audit PR1: the MAME-derived V25 HLE must never stand in for the real V25 in
+// a shipped Golden Axe RBF.  `Arcade-SegaSystem32.qsf` does not define
+// S32_REAL_V25, so the universal build compiles the HLE for every V25 board;
+// today only an MRA convention plus verif/check_ga2_release.py keeps Golden
+// Axe off it, and there is no visible failure mode because the HLE answers the
+// wake poll and the game boots looking nearly right.
+//
+// Simulation profiles legitimately exercise the HLE (see the ga2 sim tiers in
+// verif/run_regression.sh), so this guard is scoped to integrated synthesis:
+// a Quartus compile of the Golden Axe revision without S32_REAL_V25 fails to
+// elaborate on the missing module below rather than producing a silently
+// protection-simulated core.
+`ifdef ALTERA_RESERVED_QIS
+`ifdef S32_GOLDENAXE_ONLY
+`ifndef S32_REAL_V25
+s32_goldenaxe_synthesis_requires_S32_REAL_V25 __v25_profile_guard ();
+`endif
+`endif
+`endif
+
+`ifdef SIMULATION
+// Loud in sim when the HLE is the active protection path for a board that has
+// a real V25, so an unintended profile shows up in the log instead of quietly
+// passing.
+`ifndef S32_REAL_V25
+reg v25_hle_notice_done = 1'b0;
+always @(posedge clk_sys) begin
+    if (cfg_has_v25 && !v25_hle_notice_done) begin
+        v25_hle_notice_done <= 1'b1;
+        $display("NOTE: V25 protection HLE active (S32_REAL_V25 undefined) -- simulation profile only, never a release build");
+    end
+end
+`endif
+`endif
+
+// ---------------------------------------------------------------------------
 
 `ifdef S32_REAL_V25
 // Registered so the sweep/V25 mux + base add never sits combinationally on
@@ -1414,6 +1464,95 @@ always @(posedge clk_sys) begin
 end
 wire [15:0] rng_read = rng[31:16] ^ rng[15:0];
 
+// ---------------------------------------------------------------------------
+// Memory wait-state registers $E00000-$E0000F (audit SY-C1)
+//
+// MacDonald probed these on a real board: one register per 1 MB region, bits
+// 1:0 selecting "the length of the wait state portion of a V60 bus access
+// cycle" (0 = Moderate, 1 = Short, 2 = Moderate (same as 0), 3 = Long), with
+// the measured default that most/all games program:
+//     00 00 03 02 02 00 00 02 00 00 00 00 03 02 00 00
+// i.e. WRAM and I/O take a LONG wait; VRAM, OBJ RAM, Z80 RAM and ASIC-D take a
+// moderate one.  See docs/reference/s32tech-macdonald-2005.txt.
+//
+// NEITHER MAME NOR FBNEO IMPLEMENTS THIS AT ALL -- MAME's system32_map has no
+// $E00000 entry and FBNeo explicitly discards the range as "nop?".  Before
+// this, our writes here fell through to the default path and were silently
+// dropped, so the registers did not read back.
+//
+// TIMING MAGNITUDE IS DELIBERATELY DISABLED BY DEFAULT.  MacDonald states
+// plainly that "The exact timing values aren't known" -- only the relative
+// encoding is documented.  Turning guessed cycle counts on by default would
+// change ga2's frame budget on a currently-working build with no way to verify
+// short of a real MiSTer run.  So WAIT_TICKS below defaults to zero extra
+// ce_cpu ticks for every code, which is bit-for-bit the previous behaviour,
+// and `S32_WAIT_STATES` enables a first-guess mapping for hardware A/B
+// testing.  The register file itself is always active, because the registers
+// genuinely exist and reading back what was written is strictly more correct.
+reg [1:0] wait_cfg [0:15];
+integer wcfg_i;
+initial begin
+    for (wcfg_i = 0; wcfg_i < 16; wcfg_i = wcfg_i + 1) wait_cfg[wcfg_i] = 2'd0;
+    wait_cfg[2]  = 2'd3;   // WRAM   - long
+    wait_cfg[3]  = 2'd2;   // VRAM   - moderate
+    wait_cfg[4]  = 2'd2;   // OBJ RAM- moderate
+    wait_cfg[7]  = 2'd2;   // Z80 RAM- moderate
+    wait_cfg[12] = 2'd3;   // I/O    - long
+    wait_cfg[13] = 2'd2;   // ASIC   - moderate
+end
+
+// Extra ce_cpu ticks per wait code. Codes 0 and 2 are the same "moderate"
+// setting on hardware, so they must map to the same value here.
+function automatic [2:0] wait_ticks(input [1:0] code);
+`ifdef S32_WAIT_STATES
+    case (code)
+        2'd1:    wait_ticks = 3'd0;   // short
+        2'd3:    wait_ticks = 3'd2;   // long
+        default: wait_ticks = 3'd1;   // moderate (codes 0 and 2)
+    endcase
+`else
+    wait_ticks = 3'd0;                // behaviour-preserving default
+`endif
+endfunction
+
+reg  [2:0] wait_cnt;
+reg        m_req_d;
+wire [2:0] region_ticks = wait_ticks(wait_cfg[A[23:20]]);
+wire       wait_ok      = (wait_cnt == 3'd0);
+always @(posedge clk_sys) begin
+    m_req_d <= m_req;
+    if (rst) begin
+        wait_cnt <= 3'd0;
+        m_req_d  <= 1'b0;
+    end
+    // Load once per transaction, then retire one tick per CPU clock enable so
+    // the stall is charged in real V60 cycles rather than free clk_sys edges.
+    else if (m_req && !m_req_d) wait_cnt <= region_ticks;
+    else if (m_req && ce_cpu && wait_cnt != 3'd0) wait_cnt <= wait_cnt - 3'd1;
+end
+
+always @(posedge clk_sys) begin
+    if (rst) begin
+        for (wcfg_i = 0; wcfg_i < 16; wcfg_i = wcfg_i + 1)
+            wait_cfg[wcfg_i] <= 2'd0;
+        wait_cfg[2]  <= 2'd3;
+        wait_cfg[3]  <= 2'd2;
+        wait_cfg[4]  <= 2'd2;
+        wait_cfg[7]  <= 2'd2;
+        wait_cfg[12] <= 2'd3;
+        wait_cfg[13] <= 2'd2;
+    end
+    else if (wr_stb && m_we && sel_waitcfg) begin
+        // Byte-addressed registers on a 16-bit bus: A[3:1] picks the pair and
+        // the byte enables pick the half.
+        if (m_be[0]) wait_cfg[{A[3:1], 1'b0}] <= m_wdata[1:0];
+        if (m_be[1]) wait_cfg[{A[3:1], 1'b1}] <= m_wdata[9:8];
+    end
+end
+
+wire [15:0] waitcfg_q = {6'h3f, wait_cfg[{A[3:1], 1'b1}],
+                         6'h3f, wait_cfg[{A[3:1], 1'b0}]};
+
 reg ack_d;
 reg rd_wait;   // BRAM/register reads: one dead cycle so the registered q
                // (wram_q, v25 rdata, io rdata, ...) reflects THIS address.
@@ -1425,15 +1564,17 @@ always @(posedge clk_sys) begin
     if (!m_req) begin ack_r <= 0; rd_wait <= 0; end
     else if (!ack_r) begin
         if (sel_rom || sel_romhi) begin
-            if (m_we) ack_r <= 1'b1;   // writes to ROM: ack + discard
-            else if (rom_ready) begin rmux <= rom_word_r; ack_r <= 1'b1; end
+            // wait_ok is constantly true unless S32_WAIT_STATES is defined.
+            if (m_we && wait_ok) ack_r <= 1'b1;   // writes to ROM: ack + discard
+            else if (rom_ready && wait_ok) begin rmux <= rom_word_r; ack_r <= 1'b1; end
         end
         else if (!m_we && !rd_wait) rd_wait <= 1'b1;
-        else begin
+        else if (wait_ok) begin
             rd_wait <= 1'b0;
             ack_r <= 1'b1;   // BRAM/regs
             casez (1'b1)
                 br_trap:     rmux <= br_trap_q;
+                sel_waitcfg: rmux <= waitcfg_q;   // audit SY-C1
                 sel_wram:    rmux <= wram_q;
                 sel_vram:    rmux <= vram_cpu_q;
                 sel_sprram:  rmux <= sprram_q;

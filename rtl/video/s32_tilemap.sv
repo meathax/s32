@@ -1,5 +1,5 @@
 //============================================================================
-//  System 32 tilemap engine (DESIGN.md §6.2, Appendix C)
+//  System 32 tilemap engine (design note §6.2, Appendix C)
 //  Renders one scanline of each enabled layer into per-layer line buffers:
 //    NBG0/1: MAME-exact 12.20 X/Y zoom and fractional scroll
 //            ($1FF10-1E, $1FF50-56, 0x200=1.0)
@@ -13,7 +13,7 @@
 //
 //  Time budget: renders during previous line's active+blank at clk_ram/2;
 //  worst case 4 layers x 416 px + text + bitmap ≈ 2700 fetch-limited cycles,
-//  available ≈ 3000 (DESIGN.md §10.2).
+//  available ≈ 3000 (design note §10.2).
 //============================================================================
 
 module s32_tilemap (

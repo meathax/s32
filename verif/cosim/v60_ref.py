@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Independent NEC V60 reference model (DESIGN.md §11.2).
+Independent NEC V60 reference model (design note §11.2).
 
 A second, from-scratch implementation of the V60 integer core in Python,
 written to the same NEC/MAME behavioral contract as the RTL but sharing no

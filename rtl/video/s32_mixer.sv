@@ -1,5 +1,5 @@
 //============================================================================
-//  System 32 mixer — 315-5387 (DESIGN.md §6.6, Appendix C.8)
+//  System 32 mixer — 315-5387 (design note §6.6, Appendix C.8)
 //  Per-pixel priority resolution across TEXT/NBG0-3/BITMAP/SPRITE/BACKGROUND
 //  with sprite grouping, palette lookup, blending, color offsets and shadow.
 //  One instance per screen (Multi 32 = two).
@@ -162,6 +162,14 @@ always @(*) begin
     //  pen[3:0] here)
     // disabled layers never mix (MAME enablemask) — a disabled layer's
     // line buffer keeps stale pixels, so it must be gated here
+    //
+    // The `[3:0] != 0` priority test below is HARDWARE-CORRECT, not a MAME
+    // artifact: MacDonald documents the mixer priority field as
+    // "$0 = not shown, $1 = lowest, $F = highest", so priority 0 genuinely
+    // removes a layer on the real 315-5388.  Audit MX4 proposed dropping these
+    // guards as a MAME "sorted-list" artifact -- doing so would make
+    // priority-0 layers visible and INTRODUCE a bug.  Do not remove.
+    // (docs/reference/s32tech-macdonald-2005.txt, mixer section.)
     ep_text = (!layer_off[0] && px_text[13] && lr_t[3:0] != 0) ? {lr_t[3:0], 3'd6} : 7'd0;
     ep_nbg0 = (!layer_off[1] && px_nbg0[13] && lr_0[3:0] != 0) ? {lr_0[3:0], 3'd5} : 7'd0;
     ep_nbg1 = (!layer_off[2] && px_nbg1[13] && lr_1[3:0] != 0) ? {lr_1[3:0], 3'd4} : 7'd0;
@@ -178,69 +186,92 @@ end
 reg [6:0] ep_spr_s, ep_text_s, ep_nbg0_s, ep_nbg1_s;
 reg [6:0] ep_nbg2_s, ep_nbg3_s, ep_bmp_s, ep_spr_nom_s;
 
+// Per-layer palette indices, snapshotted alongside the priority keys.  The
+// variable shift and palette-base add are done before the snapshot so the
+// tournament below sees a settled value (see mk_palidx).  Declared here rather
+// than next to the pipeline because the tournament carries them (audit: mixer
+// critical-path reduction).
+reg [13:0] idx_text_s, idx_nbg0_s, idx_nbg1_s, idx_nbg2_s;
+reg [13:0] idx_nbg3_s, idx_bmp_s, idx_spr_s, idx_bg_s;
+
 // Winner select (8-way max), evaluated from the candidate snapshot. Keep the
 // priority key and layer selector together through a balanced tournament. In
 // addition to the winner, retain the three opponents it defeated. The largest
 // of those opponents is the runner-up, so the following pipeline stage needs
 // only two comparisons instead of masking the winner and repeating all seven.
 // Rank makes every non-zero key unique.
-function automatic [10:0] max_candidate(input [10:0] a, input [10:0] b);
-    max_candidate = (a[10:4] > b[10:4]) ? a : b;
+//
+// CRITICAL-PATH NOTE: each candidate carries {key[6:0], sel[3:0], palidx[13:0]}
+// so the palette index rides through the tournament with its key.  Previously
+// the tree produced only {key, sel} and a trailing 8:1 mux selected the index
+// with `bestsel`, putting roughly two extra LUT levels between the final
+// comparator and `pal_addr_r` on the 96.6 MHz clk_ram domain -- the deepest
+// path in this module.  Widening the tournament muxes from 11 to 25 bits costs
+// a little area (the mux levels already exist; only their width grows) and
+// removes those levels entirely.  The same trick drops the runner-up's index
+// mux, since the loser vectors carry indices too.
+localparam integer CW = 25;   // 7 key + 4 sel + 14 palette index
+function automatic [CW-1:0] max_candidate(input [CW-1:0] a, input [CW-1:0] b);
+    max_candidate = (a[24:18] > b[24:18]) ? a : b;
 endfunction
 
-wire [10:0] cand_spr  = {ep_spr_s,  4'd6};
-wire [10:0] cand_text = {ep_text_s, 4'd0};
-wire [10:0] cand_nbg0 = {ep_nbg0_s, 4'd1};
-wire [10:0] cand_nbg1 = {ep_nbg1_s, 4'd2};
-wire [10:0] cand_nbg2 = {ep_nbg2_s, 4'd3};
-wire [10:0] cand_nbg3 = {ep_nbg3_s, 4'd4};
-wire [10:0] cand_bmp  = {ep_bmp_s,  4'd5};
-wire [10:0] cand_bg   = {ep_bg,     4'd7};
+wire [CW-1:0] cand_spr  = {ep_spr_s,  4'd6, idx_spr_s};
+wire [CW-1:0] cand_text = {ep_text_s, 4'd0, idx_text_s};
+wire [CW-1:0] cand_nbg0 = {ep_nbg0_s, 4'd1, idx_nbg0_s};
+wire [CW-1:0] cand_nbg1 = {ep_nbg1_s, 4'd2, idx_nbg1_s};
+wire [CW-1:0] cand_nbg2 = {ep_nbg2_s, 4'd3, idx_nbg2_s};
+wire [CW-1:0] cand_nbg3 = {ep_nbg3_s, 4'd4, idx_nbg3_s};
+wire [CW-1:0] cand_bmp  = {ep_bmp_s,  4'd5, idx_bmp_s};
+wire [CW-1:0] cand_bg   = {ep_bg,     4'd7, idx_bg_s};
 
 wire p0_left_wins = ep_spr_s  > ep_text_s;
 wire p1_left_wins = ep_nbg0_s > ep_nbg1_s;
 wire p2_left_wins = ep_nbg2_s > ep_nbg3_s;
 wire p3_left_wins = ep_bmp_s  > ep_bg;
-wire [10:0] win_p0  = p0_left_wins ? cand_spr  : cand_text;
-wire [10:0] lose_p0 = p0_left_wins ? cand_text : cand_spr;
-wire [10:0] win_p1  = p1_left_wins ? cand_nbg0 : cand_nbg1;
-wire [10:0] lose_p1 = p1_left_wins ? cand_nbg1 : cand_nbg0;
-wire [10:0] win_p2  = p2_left_wins ? cand_nbg2 : cand_nbg3;
-wire [10:0] lose_p2 = p2_left_wins ? cand_nbg3 : cand_nbg2;
-wire [10:0] win_p3  = p3_left_wins ? cand_bmp  : cand_bg;
-wire [10:0] lose_p3 = p3_left_wins ? cand_bg   : cand_bmp;
+wire [CW-1:0] win_p0  = p0_left_wins ? cand_spr  : cand_text;
+wire [CW-1:0] lose_p0 = p0_left_wins ? cand_text : cand_spr;
+wire [CW-1:0] win_p1  = p1_left_wins ? cand_nbg0 : cand_nbg1;
+wire [CW-1:0] lose_p1 = p1_left_wins ? cand_nbg1 : cand_nbg0;
+wire [CW-1:0] win_p2  = p2_left_wins ? cand_nbg2 : cand_nbg3;
+wire [CW-1:0] lose_p2 = p2_left_wins ? cand_nbg3 : cand_nbg2;
+wire [CW-1:0] win_p3  = p3_left_wins ? cand_bmp  : cand_bg;
+wire [CW-1:0] lose_p3 = p3_left_wins ? cand_bg   : cand_bmp;
 
-wire q0_left_wins = win_p0[10:4] > win_p1[10:4];
-wire q1_left_wins = win_p2[10:4] > win_p3[10:4];
-wire [10:0] win_q0 = q0_left_wins ? win_p0 : win_p1;
-wire [10:0] win_q1 = q1_left_wins ? win_p2 : win_p3;
-wire [10:0] lose_q0_first = q0_left_wins ? lose_p0 : lose_p1;
-wire [10:0] lose_q1_first = q1_left_wins ? lose_p2 : lose_p3;
-wire [10:0] lose_q0_second = q0_left_wins ? win_p1 : win_p0;
-wire [10:0] lose_q1_second = q1_left_wins ? win_p3 : win_p2;
+wire q0_left_wins = win_p0[24:18] > win_p1[24:18];
+wire q1_left_wins = win_p2[24:18] > win_p3[24:18];
+wire [CW-1:0] win_q0 = q0_left_wins ? win_p0 : win_p1;
+wire [CW-1:0] win_q1 = q1_left_wins ? win_p2 : win_p3;
+wire [CW-1:0] lose_q0_first = q0_left_wins ? lose_p0 : lose_p1;
+wire [CW-1:0] lose_q1_first = q1_left_wins ? lose_p2 : lose_p3;
+wire [CW-1:0] lose_q0_second = q0_left_wins ? win_p1 : win_p0;
+wire [CW-1:0] lose_q1_second = q1_left_wins ? win_p3 : win_p2;
 
-wire final_left_wins = win_q0[10:4] > win_q1[10:4];
-wire [10:0] win_max = final_left_wins ? win_q0 : win_q1;
-wire [10:0] win_loser_first = final_left_wins ? lose_q0_first : lose_q1_first;
-wire [10:0] win_loser_second = final_left_wins ? lose_q0_second : lose_q1_second;
-wire [10:0] win_loser_final = final_left_wins ? win_q1 : win_q0;
-wire [6:0] best = win_max[10:4];
-wire [3:0] bestsel = win_max[3:0]; // 0=text 1..4 nbg 5 bmp 6 spr 7 bg
+wire final_left_wins = win_q0[24:18] > win_q1[24:18];
+wire [CW-1:0] win_max = final_left_wins ? win_q0 : win_q1;
+wire [CW-1:0] win_loser_first = final_left_wins ? lose_q0_first : lose_q1_first;
+wire [CW-1:0] win_loser_second = final_left_wins ? lose_q0_second : lose_q1_second;
+wire [CW-1:0] win_loser_final = final_left_wins ? win_q1 : win_q0;
+wire [6:0] best = win_max[24:18];
+wire [3:0] bestsel = win_max[17:14]; // 0=text 1..4 nbg 5 bmp 6 spr 7 bg
+wire [13:0] idx_winner = win_max[13:0];   // falls out of the tree, no 8:1 mux
 
 reg [6:0] best_hold, best2_hold;
 reg [3:0] bestsel_hold, best2sel_hold;
-reg [10:0] runner_first_hold, runner_second_hold, runner_final_hold;
+reg [CW-1:0] runner_first_hold, runner_second_hold, runner_final_hold;
 
 // The only possible runner-up is one of the three candidates that lost
 // directly to the winner. Resolve those registered opponents here. When all
 // three keys are zero, background was the winner and there is no opaque blend
 // partner; retain the old tree's background selector sentinel in that case.
-wire [10:0] run_pair = max_candidate(runner_first_hold, runner_second_hold);
-wire [10:0] run_opponent_max = max_candidate(run_pair, runner_final_hold);
-wire [10:0] run_max = (run_opponent_max[10:4] == 7'd0)
-                    ? {7'd0, 4'd7} : run_opponent_max;
-wire [6:0] best2 = run_max[10:4];
-wire [3:0] best2sel = run_max[3:0];
+wire [CW-1:0] run_pair = max_candidate(runner_first_hold, runner_second_hold);
+wire [CW-1:0] run_opponent_max = max_candidate(run_pair, runner_final_hold);
+// Background sentinel keeps its palette index so the runner-up index also
+// falls straight out of the comparison (no 8:1 mux on best2sel).
+wire [CW-1:0] run_max = (run_opponent_max[24:18] == 7'd0)
+                    ? {7'd0, 4'd7, idx_bg_s} : run_opponent_max;
+wire [6:0] best2 = run_max[24:18];
+wire [3:0] best2sel = run_max[17:14];
+wire [13:0] idx_runner = run_max[13:0];
 
 // ---------------------------------------------------------------------------
 // backdrop pixel (MAME update_background): per line.  This control belongs
@@ -292,25 +323,10 @@ function automatic [13:0] mk_palidx(input [19:0] li);
     end
 endfunction
 
-// Do the variable shift and palette-base addition before the candidate
-// snapshot. The priority tree then drives only a shallow 8:1 index mux.
-reg [13:0] idx_text_s, idx_nbg0_s, idx_nbg1_s, idx_nbg2_s;
-reg [13:0] idx_nbg3_s, idx_bmp_s, idx_spr_s, idx_bg_s;
-reg [13:0] idx_winner, idx_runner;
-always @(*) begin
-    case (bestsel)
-        4'd0: idx_winner = idx_text_s; 4'd1: idx_winner = idx_nbg0_s;
-        4'd2: idx_winner = idx_nbg1_s; 4'd3: idx_winner = idx_nbg2_s;
-        4'd4: idx_winner = idx_nbg3_s; 4'd5: idx_winner = idx_bmp_s;
-        4'd6: idx_winner = idx_spr_s; default: idx_winner = idx_bg_s;
-    endcase
-    case (best2sel_hold)
-        4'd0: idx_runner = idx_text_s; 4'd1: idx_runner = idx_nbg0_s;
-        4'd2: idx_runner = idx_nbg1_s; 4'd3: idx_runner = idx_nbg2_s;
-        4'd4: idx_runner = idx_nbg3_s; 4'd5: idx_runner = idx_bmp_s;
-        4'd6: idx_runner = idx_spr_s; default: idx_runner = idx_bg_s;
-    endcase
-end
+// The variable shift and palette-base addition are done before the candidate
+// snapshot (mk_palidx into idx_*_s, declared with the priority snapshot above).
+// idx_winner and idx_runner are no longer muxed here -- they are carried
+// through the priority tournament and emerge from win_max / run_max directly.
 
 // ---------------------------------------------------------------------------
 // blend controls (reg 0x4E: bit11 enable, bits 10:8 factor;
@@ -455,27 +471,64 @@ function automatic [4:0] clamp5(input signed [11:0] v);
     else                 clamp5 = v[4:0];
 endfunction
 
-// MAME applies signed color offsets before blending and clamps only after the
-// weighted sum.  An offset channel can therefore be -32..62.  Letting the
-// expression inherit the eight-bit width of r1/r2 truncates products above
-// 127 (the simple no-offset directed case never exposed this).  Widen both
-// samples and coefficients before multiplication so the complete pre-clamp
-// range survives exactly.
+// 5-bit colour code -> 8-bit DAC drive by bit replication (audit MX8).
+function automatic [7:0] expand5(input [4:0] v);
+    expand5 = {v, v[4:2]};
+endfunction
+
+// Saturate one channel into the 5-bit display domain at the colour-offset
+// adder (audit MX3).  MAME applies signed offsets before blending and clamps
+// only after the weighted sum, so an out-of-range intermediate (-32..62) leaks
+// into the blend and brightens the result.  Real hardware saturates here:
+// MacDonald measured the offset stage on a board as a clamped signed add in
+// 5-bit colour space ("result CLAMPED (no wrapping)"), with $1F,$1F,$1F giving
+// a completely white screen and $20,$20,$20 a completely black one.
+// See docs/reference/s32tech-macdonald-2005.txt.
+// Implemented with bit tests rather than signed comparators: this sits on the
+// 96.6 MHz clk_ram offset-adder path, and the comparator form cost 0.317 ns of
+// setup slack (measured, seed 2 -- the design has almost none to spare).
+//
+// Valid because the input range is bounded and known: the palette channel is a
+// zero-extended 5-bit value (0..31) and off_chan contributes a signed 6-bit
+// offset (-32..+31), so the sum is always within -32..+62.  Over that range,
+// in 8-bit two's complement:
+//   negative  (-32..-1) => 0xE0..0xFF, so exactly v[7]
+//   above 31  (32..62)  => 0x20..0x3E, so exactly |v[6:5] with v[7] clear
+//   in range  (0..31)   => 0x00..0x1F, neither test hits
+// Equivalent to the comparator form for every reachable input.
+function automatic signed [7:0] clamp5_s8(input signed [7:0] v);
+    if (v[7])         clamp5_s8 = 8'sd0;                       // negative
+    else if (|v[6:5]) clamp5_s8 = 8'sd31;                      // > 31
+    else              clamp5_s8 = $signed({3'b000, v[4:0]});
+endfunction
+
+// Both blend inputs are saturated to 0..31 before this point, and the two
+// coefficients always sum to 8, so the weighted sum cannot leave 0..31 and
+// needs no separate post-blend clamp.  The widened intermediates remain so the
+// products are exact.
+// Narrow unsigned form, valid BECAUSE the colour-offset stage now saturates
+// (MX3): both operands are guaranteed 0..31, so the old 16-bit sign-extended
+// datapath -- sized for the -32..+62 range MAME's unclamped intermediates could
+// reach -- is dead weight.  The coefficients always sum to 8, so the weighted
+// sum cannot exceed 31*8 = 248 and fits in 9 bits unsigned; >>3 lands back in
+// 0..31 with no clamp needed.  This drops a 16x16 signed multiply pair and a
+// 16-bit adder per channel to 5x4 products and a 9-bit adder, cutting both
+// depth and area on the clk_ram critical path.
 function automatic signed [11:0] blend_chan(
     input signed [7:0] first,
     input signed [7:0] second,
     input        [2:0] factor
 );
-    logic signed [15:0] first_w, second_w;
-    logic signed [15:0] first_coeff, second_coeff;
-    logic signed [15:0] weighted;
+    logic [4:0] a, b;
+    logic [3:0] ca, cb;
+    logic [8:0] weighted;
     begin
-        first_w = {{8{first[7]}}, first};
-        second_w = {{8{second[7]}}, second};
-        first_coeff = 16'sd7 - $signed({1'b0, factor});
-        second_coeff = $signed({1'b0, factor}) + 16'sd1;
-        weighted = first_w * first_coeff + second_w * second_coeff;
-        blend_chan = weighted >>> 3;
+        a  = first[4:0];
+        b  = second[4:0];
+        ca = 4'd7 - {1'b0, factor};        // 0..7
+        cb = {1'b0, factor} + 4'd1;        // 1..8   (ca + cb == 8)
+        weighted = a * ca + b * cb;        // <= 248
+        blend_chan = $signed({6'b000000, weighted[8:3]});
     end
 endfunction
 
@@ -522,6 +575,23 @@ always @(posedge clk) begin
         idx_bg_s     <= mk_palidx(li_bg);
         spr_group_raw_s <= spr_group_raw;
         spr_shadow_src_s <= spr_shadow_src;
+        // TODO(provenance, audit MX7/A1b): the two available descriptions of
+        // $61004E are IRRECONCILABLE and this decode follows MAME's.
+        //   MAME:       bit 11 = blend enable, bits 10:8 = blend factor.
+        //   MacDonald:  bits 2:0 = layer select code, bit 3 = affect multiple
+        //               layers, bits 6:4 = gradation effect amount, bit 7 =
+        //               gradation effect enable, bit 11 = "selected layer has
+        //               no gradation but is at 1/2 brightness".
+        // They do not overlap: MAME reads only bits 11:8 and implements the
+        // gradation/blur effect not at all, while MacDonald's worked examples
+        // ($00e1 = "max blur on nbg0", $38e2 = "dropshadow") sit entirely in
+        // bits 7:0.  Under his layout MAME would render $00e1 as no effect --
+        // which is exactly the reported ga2 torch symptom (MAMETesters 05233:
+        // the light animates in a circle on the PCB, just fades in MAME).
+        // MacDonald's doc self-describes as "very preliminary"; MAME's blend
+        // nonetheless looks right in most games.  Do not change this decode on
+        // argument -- settle it with verif/mame/ga2_regtrace.lua, which logs
+        // every write to this register.
         blendenable_s <= r4e[11];
         blendfactor_s <= r4e[10:8];
         r3e_s <= r3e;
@@ -578,22 +648,24 @@ always @(posedge clk) begin
             first_pal <= pal_data_r;
         end
         else if (ph == 4'd4) begin
-            // Keep the offset-bank muxes out of the DSP/clamp path.
-            r1_pipe <= $signed({3'b0, first_pal[4:0]})
-                     + off_chan(co1_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
-            g1_pipe <= $signed({3'b0, first_pal[9:5]})
-                     + off_chan(co1_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
-            b1_pipe <= $signed({3'b0, first_pal[14:10]})
-                     + off_chan(co1_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
-            r2_pipe <= $signed({3'b0, pal_data_r[4:0]})
-                     + off_chan(co2_hold, 2'd0, coloroffs_bank0, coloroffs_bank1);
-            g2_pipe <= $signed({3'b0, pal_data_r[9:5]})
-                     + off_chan(co2_hold, 2'd1, coloroffs_bank0, coloroffs_bank1);
-            b2_pipe <= $signed({3'b0, pal_data_r[14:10]})
-                     + off_chan(co2_hold, 2'd2, coloroffs_bank0, coloroffs_bank1);
+            // Keep the offset-bank muxes out of the DSP/clamp path.  Each sum
+            // saturates here (MX3) so no out-of-range value reaches the blend.
+            r1_pipe <= clamp5_s8($signed({3'b0, first_pal[4:0]})
+                     + off_chan(co1_hold, 2'd0, coloroffs_bank0, coloroffs_bank1));
+            g1_pipe <= clamp5_s8($signed({3'b0, first_pal[9:5]})
+                     + off_chan(co1_hold, 2'd1, coloroffs_bank0, coloroffs_bank1));
+            b1_pipe <= clamp5_s8($signed({3'b0, first_pal[14:10]})
+                     + off_chan(co1_hold, 2'd2, coloroffs_bank0, coloroffs_bank1));
+            r2_pipe <= clamp5_s8($signed({3'b0, pal_data_r[4:0]})
+                     + off_chan(co2_hold, 2'd0, coloroffs_bank0, coloroffs_bank1));
+            g2_pipe <= clamp5_s8($signed({3'b0, pal_data_r[9:5]})
+                     + off_chan(co2_hold, 2'd1, coloroffs_bank0, coloroffs_bank1));
+            b2_pipe <= clamp5_s8($signed({3'b0, pal_data_r[14:10]})
+                     + off_chan(co2_hold, 2'd2, coloroffs_bank0, coloroffs_bank1));
         end
         else if (ph == 4'd5) begin
-            // Preserve MAME's order: offset, blend, then shadow.
+            // Stage order is offset, blend, then shadow.  The offset stage
+            // already saturated (MX3), so the blend cannot overflow.
             if (blend_hold) begin
                 rr = blend_chan(r1_pipe, r2_pipe, blendfactor_s);
                 gg = blend_chan(g1_pipe, g2_pipe, blendfactor_s);
@@ -610,10 +682,17 @@ always @(posedge clk) begin
             bb_pipe <= bb;
         end
         else if (ph == 4'd6) begin
+            // 5 -> 8 bit expansion by bit replication (audit MX8), so code 31
+            // emits 0xFF.  MAME zero-fills (v << 3), capping white at 0xF8 and
+            // making full scale unreachable.  The 315-5242 is an OKI M71064 --
+            // per furrtek's decap, "a triple DAC made of printed resistors and
+            // 3 output transistors" -- a passive linear ladder with nothing
+            // between the 5-bit code and the monitor, and MacDonald measured
+            // $1F,$1F,$1F as a completely white screen.
             rgb <= !act_hold ? 24'h000000
-                 : {clamp5(rr_pipe), 3'b000,
-                    clamp5(gg_pipe), 3'b000,
-                    clamp5(bb_pipe), 3'b000};
+                 : {expand5(clamp5(rr_pipe)),
+                    expand5(clamp5(gg_pipe)),
+                    expand5(clamp5(bb_pipe))};
             ph <= 4'hF;
         end
     end

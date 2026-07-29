@@ -1,13 +1,13 @@
 //============================================================================
 //  Sega System 32 / Multi 32 for MiSTer
 //  Common package: board descriptor, SDRAM region map, shared types
-//  Reference: docs/DESIGN.md §3.4, §4.2, §9.3
+//  Reference: docs/design note §3.4, §4.2, §9.3
 //============================================================================
 
 package s32_pkg;
 
     // ------------------------------------------------------------------
-    // SDRAM region bases (byte addresses) — DESIGN.md §4.2
+    // SDRAM region bases (byte addresses) — design note §4.2
     // ------------------------------------------------------------------
     localparam [24:0] SDR_MAINCPU_BASE  = 25'h000_0000; // 2 MB
     localparam [24:0] SDR_SOUNDCPU_BASE = 25'h020_0000; // 4 MB
@@ -18,7 +18,7 @@ package s32_pkg;
     localparam [24:0] SDR_SPRITES_BASE  = 25'h100_0000; // 16 MB
 
     // ------------------------------------------------------------------
-    // Board descriptor (first 64 bytes of ioctl stream) — DESIGN.md §3.4
+    // Board descriptor (first 64 bytes of ioctl stream) — design note §3.4
     // ------------------------------------------------------------------
     typedef struct packed {
         logic       multi32;       // V70 dual-screen board
@@ -51,7 +51,7 @@ package s32_pkg;
     localparam [6:0] PROT_JLEAGUE  = 7'd6;
 
     // ------------------------------------------------------------------
-    // V60 interrupt sources — DESIGN.md §5.5
+    // V60 interrupt sources — design note §5.5
     // ------------------------------------------------------------------
     localparam int MAIN_IRQ_VBSTART = 0;
     localparam int MAIN_IRQ_VBSTOP  = 1;
@@ -59,7 +59,7 @@ package s32_pkg;
     localparam int MAIN_IRQ_TIMER0  = 3;
     localparam int MAIN_IRQ_TIMER1  = 4;
 
-    // Z80 sound interrupt sources — DESIGN.md §7.2
+    // Z80 sound interrupt sources — design note §7.2
     localparam int SOUND_IRQ_YM3438 = 0;
     localparam int SOUND_IRQ_V60    = 1;
 

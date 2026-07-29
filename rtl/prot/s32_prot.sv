@@ -1,5 +1,5 @@
 //============================================================================
-//  System 32 protection & per-game custom hardware (DESIGN.md §8)
+//  System 32 protection & per-game custom hardware (design note §8)
 //  All modules sit on the V60 bus as snoopers/responders enabled by the
 //  board descriptor's prot_sel / flags.
 //============================================================================
@@ -391,7 +391,7 @@ endmodule
 
 // ---------------------------------------------------------------------------
 //  s32_v25: protection MCU subsystem (§8.1) — ga2 / arabfgt
-//  v1 strategy per DESIGN.md: HLE responder implementing the documented
+//  v1 strategy per the historical design notes: HLE responder implementing the documented
 //  wakeup/command protocol through the MB8421 dual-port RAM at 0xA00000,
 //  carrying the real opcode-decrypt tables for the future full-core swap.
 //  The 64KB descrambled program is loaded to BRAM by the ROM loader; a

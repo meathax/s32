@@ -1,5 +1,5 @@
 //============================================================================
-//  Ricoh RF5C68 (ASSP 5C105 / Sega 315-5476A) — 8-voice PCM (DESIGN.md §7.4)
+//  Ricoh RF5C68 (ASSP 5C105 / Sega 315-5476A) — 8-voice PCM (design note §7.4)
 //  64KB wave RAM, Fs = clk/384 (12.5MHz -> 32.552 kHz).
 //  Register map (per MAME rf5c68.cpp):
 //    0 ENV, 1 PAN {R[7:4],L[3:0]}, 2 FDL, 3 FDH, 4 LSL, 5 LSH, 6 ST,

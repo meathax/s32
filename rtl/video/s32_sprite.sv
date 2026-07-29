@@ -1,10 +1,10 @@
 //============================================================================
-//  System 32 sprite engine — 315-5386A (DESIGN.md §6.3/§6.4, Appendix C.6/C.7)
+//  System 32 sprite engine — 315-5386A (design note §6.3/§6.4, Appendix C.6/C.7)
 //  Walks the sprite command list in sprite RAM, renders scaled sprites into
 //  the off-chip framebuffer via s32_fb_if. Double-buffered; swap/erase per
 //  control regs, latched at swap exactly like m_sprite_control_latched.
 //
-//  Sprite list entry (8 words) — DESIGN.md §6.3.
+//  Sprite list entry (8 words) — design note §6.3.
 //  Framebuffer pixel = 0x8000 | color | pen ; shadow clears bit15.
 //============================================================================
 
@@ -89,6 +89,7 @@ reg       ready_valid;
 reg       publish_on_done;          // current command includes a render pass
 reg [15:0] post_vblank_count;
 reg        vblank_pending;          // audit R20 SP-3: vblank seen mid-render
+reg        overdraw_r;              // audit FB3: render overran this frame
 reg        vblank_d;                // edge-detect the end-of-vblank pulse
 reg        present_d;               // edge-detect start-of-vblank publication
 // The video pulses are one clk_sys wide; on the 2x clk_ram domain they are
@@ -118,17 +119,37 @@ function automatic [1:0] choose_work_buf(
     end
 endfunction
 
+// Audit SP3/FB3: report REAL controller state instead of constants.
+//
+// MacDonald documents these read-only status fields on the 315-5386A:
+//   $500000 D0 = selected frame buffer, D1 = '1' only during an erase
+//   $500002    = render status: 0 = approaching out-of-time,
+//                1 = Normal, 2 = Overdraw (rendering time is over but the
+//                end-of-list command has not been read yet), 3 = never occurs
+// and the render window as "224 lines of render time" in 60 Hz mode.
+//
+// MAME returns `0xfc | 1` from a literal and never sets the erase bit, because
+// its render is instantaneous and structurally cannot overrun.  FBNeo copies
+// the same constant.  Neither reference can ever signal overdraw -- so a game
+// polling this is being told a lie by both.
+//
+// This core's renderer takes real time and genuinely can overrun, so it has the
+// state to report.  Overdraw is latched per frame: if the FSM is still busy when
+// vblank starts, the frame's render time is over with the list unfinished, which
+// is exactly MacDonald's condition 2.  Condition 0 ("approaching out of time")
+// is NOT modelled -- his own text calls its meaning a guess, and no threshold is
+// documented.
+wire spr_erase_busy = (rs == R_ERASE) || (rs == R_ERASEW);
 always @(*) begin
     case (ctl_raddr)
-        // MAME exposes only selected-buffer bit 0. Erase-busy appears only
-        // in an old source-code comment, not in the implementation.
-        // MAME reg 0 bit0 = (SPRITES.num < SPRITES_2.num): reads 1 at power-up
-        // (6<8) and toggles to 0 after the first swap — the exact complement of
-        // the internal displaying-buffer selector, which resets to 0 and reads
-        // 1 after the first swap.  Invert only the CPU-visible bit; the internal
+        // MAME exposes only selected-buffer bit 0. MAME reg 0 bit0 =
+        // (SPRITES.num < SPRITES_2.num): reads 1 at power-up (6<8) and toggles
+        // to 0 after the first swap — the exact complement of the internal
+        // displaying-buffer selector, which resets to 0 and reads 1 after the
+        // first swap.  Invert only the CPU-visible bit; the internal
         // render/erase/display targeting is unchanged (audit R20 SP-1).
-        3'd0: ctl_rdata = {6'h3f, 1'b0, ~disp_buf[0]};
-        3'd1: ctl_rdata = {6'h3f, 2'd1};              // status: normal
+        3'd0: ctl_rdata = {6'h3f, spr_erase_busy, ~disp_buf[0]};
+        3'd1: ctl_rdata = {6'h3f, overdraw_r ? 2'd2 : 2'd1};
         3'd2: ctl_rdata = {6'h3f, ctl_latched[2][1:0]};
         3'd3: ctl_rdata = {6'h3f, ctl_latched[3][1:0]};
         3'd4: ctl_rdata = {6'h3f, ctl_latched[4][1:0]};
@@ -334,6 +355,7 @@ always @(posedge clk) begin
         ready_valid <= 1'b0;
         publish_on_done <= 1'b0;
         vblank_pending <= 1'b0;         // audit R20 SP-3
+        overdraw_r     <= 1'b0;         // audit FB3
         vblank_d <= 1'b0;
         present_d <= 1'b0;
         jump_xoff <= 0; jump_yoff <= 0;
@@ -375,6 +397,10 @@ always @(posedge clk) begin
         // rising edge so the same 2-clk_ram-wide pulse that already launched the
         // current sequence in R_IDLE is not re-latched as a second event.
         if (vblank_rise && rs != R_IDLE) vblank_pending <= 1'b1;
+        // Audit FB3: latch the per-frame overdraw condition at the render
+        // deadline. Busy at vblank == render time is over with the list
+        // unfinished; idle == the frame completed inside its window.
+        if (vblank_rise) overdraw_r <= (rs != R_IDLE);
 
         case (rs)
         R_IDLE: if (vblank_rise || vblank_pending) begin

@@ -3,7 +3,7 @@
 //  16-bit SDR SDRAM @ clk_ram (96.6 MHz), CL2, strictly serialized
 //  transactions. ROM-download writes keep a row open for same-row words and
 //  explicitly precharge before row changes, reads, or refreshes.
-//  Six request ports with bounded round-robin arbitration (DESIGN.md §4.2):
+//  Six request ports with bounded round-robin arbitration (design note §4.2):
 //    p0: V60 fetch/data (latency critical, 16-bit single)
 //    p1: tile fetch      (64-bit burst = 4 words)
 //    p2: sprite fetch    (128-bit burst = 8 words)

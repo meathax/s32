@@ -1,9 +1,9 @@
 //============================================================================
-//  Sega System 32 — sprite framebuffer interface (DESIGN.md §4.4)
+//  Sega System 32 — sprite framebuffer interface (design note §4.4)
 //  Backing store: MiSTer DDR3 (DDRAM 64-bit burst interface).
 //  Layout: 4 buffers (A/B x screen0/1), stride 512 pixels x 16 bit,
 //  256 lines. Base = FB_BASE + buf*512*256*2.
-//  Services (per DESIGN.md):
+//  Services (per the historical design notes):
 //    - erase_line(y):     fill line with 0xFFFF
 //    - write_run(...):    pixel run writes from the sprite renderer;
 //                         wr_shadow runs RMW dest &= 0x7fff instead

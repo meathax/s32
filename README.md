@@ -43,8 +43,8 @@ working on the target MiSTer setup; an X means it is not yet ready.
 - System 32 video: four scrolling/zooming tilemap layers, text and bitmap
   layers, a hardware-style sprite list with zoom, priority, blending, fades,
   and 320/416-pixel display modes.
-- Audio: Z80 sound CPU, two YM3438-compatible FM channels, RF5C68-family PCM,
-  and the Multi 32 MultiPCM path.
+- Audio: Z80 sound CPU, two YM3438-compatible FM chips (twelve FM channels),
+  RF5C68-family PCM, and the Multi 32 MultiPCM path.
 - Board devices: 315-5296 I/O, 93C46 EEPROM save/load, MSM6253 gun ADC,
   µPD4701 trackball counters, 8255 PPI, timers/interrupt controller, and the
   V25 protection path used by Golden Axe 2 and Arabian Fight.
@@ -63,10 +63,15 @@ The implementation is a sequential micro-sequencer with a bounded prefetch
 queue and a small instruction-stream cache. It models the programmer-visible
 registers, banked interrupt stacks, PSW/system registers, traps and interrupts,
 full integer/bit/string/decimal instruction groups, effective-address modes,
-unaligned accesses, and V60↔Z80 synchronization. MMU paging and floating-point
-groups are intentionally outside the System 32 arcade profile; unsupported FP
-opcodes take the reserved-instruction path. Directed tests and differential
-traces against MAME cover the implemented arcade instruction set.
+unaligned accesses, and V60↔Z80 synchronization. MMU paging is intentionally
+outside the System 32 arcade profile. Single-precision floating point *is*
+implemented in the universal build (with its own directed test suite) and is
+compiled out of the Golden Axe revision by `S32_V60_NO_FP`, since no System 32
+game uses it; un-dispatched FP sub-opcodes take the reserved-instruction path.
+Directed tests and differential traces against MAME cover the implemented
+arcade instruction set — but note that MAME is a behavioural reference only,
+never a timing one: its V60 charges a flat eight cycles per instruction and
+its own source calls that "just an average".
 
 ## Core architecture and the V60 data path
 
@@ -102,10 +107,12 @@ tools\build-goldenaxe.bat
 
 This builds the dedicated `s32GoldenAxe` revision and stages
 `releases/s32GoldenAxe.rbf`. Golden Axe's MRAs select that RBF. The common
-`Arcade-SegaSystem32.qsf` retains the complete hardware source list and each
-game revision adds a thin QSF containing only its compile-time profile, so
-future per-game cores can prune different hardware without deleting shared
-support.
+`Arcade-SegaSystem32.qsf` retains the complete hardware source list, and a game
+revision adds a thin QSF containing only its compile-time profile so a per-game
+core can prune hardware without deleting shared support. Golden Axe is
+currently the only such revision; every other title runs from the universal
+`Arcade-SegaSystem32` build, and the ticks in the table above mean "runs on the
+target MiSTer setup", not "has its own RBF".
 
 The Golden Axe profile is intentionally area-focused. It fixes the single-
 screen System 32 routing at compile time, removes release-only debug telemetry,
@@ -155,7 +162,22 @@ hash-verified deployment.
 
 ## Licence and credits
 
-The behavioral reference is MAME's `segas32` driver. The V25 execution core is
+MAME's `segas32` driver was the original behavioural reference, and much of the
+core is still shaped by it. It is *not* an accuracy reference: MAME declares the
+System 32 graphics imperfect, hardcodes the tilemap opaque feature off, carries
+an unverified zoom-centre hack, models no horizontal blanking, implements
+neither the memory wait-state registers nor the sprite render-status register,
+and gives the V60 a flat eight-cycle instruction timing its own source calls
+"just an average". Where this core knowingly departs from MAME to follow
+hardware evidence, the RTL says so at the site and cites the source; comments of
+the form `design note §N` refer to a historical design document that is no
+longer in the tree. Register-level hardware documentation comes from Charles
+MacDonald's *Sega System 32 Hardware Notes* (2005) and furrtek's decap of the
+315-5242. Verification models under `verif/reference/` are split into a
+hardware-truth gate and a legacy MAME-equivalence change-detector; only the
+former is an accuracy claim.
+
+The V25 execution core is
 vendored from the GPL s80x86 project; see that directory for its licence. Other
 RTL is original or carries its upstream licence header. Arcade ROMs remain the
 property of their respective owners.

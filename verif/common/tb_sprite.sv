@@ -175,14 +175,25 @@ task frame;
         errors = errors + 1;
         $display("  FAIL sprite command missing after post-VBLANK delay");
     end
+    // Audit SP3 (hardware truth, was a MAME-equivalence check).  MacDonald
+    // documents $500000 D1 as "'1' only during an erase in progress".  MAME
+    // never sets it because its erase is instantaneous; this core's erase takes
+    // real DDR time, so the bit must be live.  The erase request has just been
+    // issued here, so it must read 1.
     ctl_raddr = 3'd0; #1;
-    if (ctl_rdata[1] !== 1'b0) begin
+    if (ctl_rdata[1] !== 1'b1) begin
         errors = errors + 1;
-        $display("  FAIL ctl0 exposed non-MAME erase-busy bit: %02x", ctl_rdata);
+        $display("  FAIL ctl0 erase-busy not reported during erase: %02x", ctl_rdata);
     end
     wait (dut.rendering === 1'b1);
     wait (dut.rendering === 1'b0);
     repeat (8) @(posedge clk);
+    // ...and must clear once the controller is idle again.
+    ctl_raddr = 3'd0; #1;
+    if (ctl_rdata[1] !== 1'b0) begin
+        errors = errors + 1;
+        $display("  FAIL ctl0 erase-busy stuck after render: %02x", ctl_rdata);
+    end
 endtask
 
 task check(input [8:0] x, input [15:0] want);

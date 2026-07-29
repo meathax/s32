@@ -1,7 +1,7 @@
 //============================================================================
 //  System 32 VRAM: 128KB (64K x 16), true dual port.
 //  Port A: CPU (0x300000-0x31ffff window).  Port B: video fetch.
-//  Mirrors the real board's dual-port DRAM array (DESIGN.md §6.1).
+//  Mirrors the real board's dual-port DRAM array (design note §6.1).
 //  Also latches the video register file ($31FF00-$31FFFF) into discrete
 //  registers for the render pipeline (Appendix C).
 //============================================================================
