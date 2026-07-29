@@ -169,25 +169,25 @@ localparam CONF_STR = {
     "-;",
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O[5:3],Scandoubler Fx,None,CRT 25%,CRT 50%,CRT 75%;",
+    // Scaler mode, passed to sys/video_freak.sv.  "Normal" is the framework
+    // default (fit to the aspect); the integer modes lock the scale factor to
+    // whole multiples of the source so pixels stay uniform on HDMI.
+    "O[35:33],Scaling,Normal,V-Integer,Integer (-),Integer (+),Integer;",
     "-;",
 `ifndef S32_GOLDENAXE_ONLY
     "O[6],Screen (Multi32),A,B;",
 `endif
-    "O[7],Service Mode,Off,On;",
-    // Audit IO3: SW1 is a real 4-position DIP on the System 32 main board
-    // (837-7428) that was previously hardwired all-Off and unreachable.  Most
-    // System 32 settings live in the EEPROM-backed service menu, so the per-game
-    // meaning of these four switches is not documented here -- they are exposed
-    // as the physical switches so they can be used and probed.
-    "O[8],DIP SW1-1,Off,On;",
-    "O[9],DIP SW1-2,Off,On;",
-    "O[10],DIP SW1-3,Off,On;",
-    "O[11],DIP SW1-4,Off,On;",
+    // ---- CRT Adjust (rtl/video/crt_adjust.sv, rmonic79) --------------------
+    // Analog CRT geometry: resize and reposition the analog picture from the
+    // OSD without losing monitor sync.  All three amounts are signed 5-bit,
+    // two's complement, so the status field IS the signed value.  They are
+    // hidden until CRT Adjust is On (H1 <- status_menumask bit 1).
+    "O[17],CRT Adjust,Off,On;",
+    "H1O[22:18],CRT H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "H1O[27:23],CRT H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+    "H1O[32:28],CRT V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
 `ifndef S32_GOLDENAXE_ONLY
     "O[16:15],CPU Turbo,Normal,x2,x3,x4;",
-`endif
-    "O[12],Pause,Off,On;",
-`ifndef S32_GOLDENAXE_ONLY
     "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
 `endif
     "-;",
@@ -311,6 +311,8 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
 
     .buttons(buttons),
     .status(status),
+    // H1 hides the CRT Adjust amounts until the feature is switched On.
+    .status_menumask({14'd0, ~status[17], 1'b0}),
 
     .ioctl_download(ioctl_download),
     .ioctl_upload(ioctl_upload),
@@ -694,6 +696,7 @@ wire [7:0] ga2_ppi_pc = ~{4'b0, joystick_0[11], joystick_1[11],
 //////////////////////////////   CORE   ///////////////////////////////////////
 wire [23:0] rgb_a, rgb_b;
 wire ce_pix_core, core_hs, core_vs, core_hb, core_vb;
+wire core_mode_416;
 wire signed [15:0] aud_l, aud_r;
 `ifndef S32_RELEASE_MINIMAL
 wire [31:0] core_debug_pc;
@@ -759,6 +762,7 @@ s32_core core (
     .rgb_a(rgb_a), .rgb_b(rgb_b),
     .ce_pix(ce_pix_core),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
+    .mode_416_out(core_mode_416),
     .audio_l(aud_l), .audio_r(aud_r),
     .out_lamps(),
 `ifdef S32_RELEASE_MINIMAL
@@ -998,13 +1002,107 @@ wire [23:0] rgb_out = ioctl_download ? 24'h0000C0 :
                         ~rom_loaded   ? 24'hC00000 :
                         video_reset   ? 24'hC0C000 : game_rgb;
 
-assign CE_PIXEL = ce_pix_core;
-assign VGA_R  = rgb_out[23:16];
-assign VGA_G  = rgb_out[15:8];
-assign VGA_B  = rgb_out[7:0];
-assign VGA_HS = core_hs;
-assign VGA_VS = core_vs;
-assign VGA_DE = ~(core_hb | core_vb);
+///////////////////////////   CRT ADJUST   ////////////////////////////////////
+// rtl/video/crt_adjust.sv (rmonic79) -- core-side integration, no sys/ edits.
+// Resize and reposition the analog picture from the OSD without losing monitor
+// sync: everything is repositioned through a line buffer and every part of the
+// engine restarts on the same line reference (hs_ref_out).
+//
+// NOTE this is the core-side variant, so the adjusted stream also reaches the
+// HDMI scaler -- HDMI is NOT bit-identical while CRT Adjust is On. That is the
+// documented trade for not touching sys_top.v. Leave it Off for untouched HDMI.
+wire crt_on = status[17];
+wire signed [4:0] crt_hsize   = $signed(status[22:18]);
+wire signed [4:0] crt_hpos    = $signed(status[27:23]);
+wire signed [4:0] crt_vshift  = $signed(status[32:28]);
+
+// Read period in QUARTER cycles of clk_video (= clk_sys, 48.317307 MHz).
+// base = (clk_video / pixel) * 4, and that ratio depends on the active width:
+//   416 mode: 8.052885 MHz pixel = 6 clk_sys   -> 24 quarters (step ~4.2%)
+//   320 mode: 6.442308 MHz pixel = 7.5 clk_sys -> 30 quarters (step ~3.3%)
+// Do NOT hardcode the module example's 64: that is for a 16-clk pixel.
+wire [7:0] crt_base = core_mode_416 ? 8'd24 : 8'd30;
+
+wire       crt_hs_ref;
+reg        crt_hs_ref_d;
+always @(posedge clk_sys) crt_hs_ref_d <= crt_hs_ref;
+wire crt_hs_ref_rise = crt_hs_ref & ~crt_hs_ref_d;
+
+wire [7:0] crt_rd_period = crt_base + {{3{crt_hsize[4]}}, crt_hsize};
+reg  [7:0] crt_rd_acc;
+wire crt_rd_tick = (crt_rd_acc + 8'd4) >= {1'b0, crt_rd_period};
+always @(posedge clk_sys) begin
+    // Reset on the module's own reference edge, never the raw HSync: that is
+    // what keeps the write side, read counter and read rate in phase.
+    if      (crt_hs_ref_rise) crt_rd_acc <= 8'd0;
+    else if (crt_rd_tick)     crt_rd_acc <= crt_rd_acc + 8'd4 - {1'b0, crt_rd_period};
+    else                      crt_rd_acc <= crt_rd_acc + 8'd4;
+end
+wire crt_rd_ce = crt_on ? crt_rd_tick : ce_pix_core;
+
+wire [7:0] crt_r, crt_g, crt_b;
+wire       crt_hs, crt_vs, crt_hb, crt_vb;
+crt_adjust #(
+    // VTOTAL sizes the V-Shift line shreg; HTOTAL sizes the HSync shreg used by
+    // SYNCSHIFT. Size both for the widest mode so one build covers 320 and 416.
+    .VTOTAL   (262),
+    .HTOTAL   (512),
+    // ga2 is 320 active on a 410-pixel line (78%), i.e. wide and centred, so
+    // CONTENTSHIFT is the right H-Position mechanism -- it holds up while
+    // H-Size shrinks, where SYNCSHIFT would run content out of the buffer.
+    .HPOS_MODE(1)
+) u_crt_adjust (
+    .clk       (clk_sys),
+    .pxl_cen   (ce_pix_core),
+    .pxl2_cen  (crt_rd_ce),
+    .active    (crt_on),
+    .hsize     (crt_hsize),
+    // Sign-extend the 5-bit OSD fields to the module's wider signed ports.
+    .hoffset   ($signed({{4{crt_hpos[4]}},   crt_hpos})),
+    .voffset   ($signed({   crt_vshift[4],   crt_vshift})),
+    .r_in      (rgb_out[23:16]), .g_in (rgb_out[15:8]), .b_in (rgb_out[7:0]),
+    .hs_in     (core_hs),
+    .vs_in     (core_vs),
+    .hb_in     (core_hb | core_vb),
+    .vb_in     (core_vb),
+    .r_out     (crt_r), .g_out (crt_g), .b_out (crt_b),
+    .hs_out    (crt_hs), .vs_out (crt_vs),
+    .hb_out    (crt_hb), .vb_out (crt_vb),
+    .hs_ref_out(crt_hs_ref)
+);
+
+// Keep the OSD centred on the physical screen. The MiSTer OSD centres on the
+// RISING edge of VGA_DE; if that followed the module's shifted active window,
+// the OSD would slide with the image. Anchor the rise to the NATIVE active
+// region and close on the stretched active's end.
+reg core_vb_1l;
+reg core_hs_d;
+always @(posedge clk_sys) core_hs_d <= core_hs;
+wire line_tick = core_hs & ~core_hs_d;          // once per line
+always @(posedge clk_sys) if (line_tick) core_vb_1l <= core_vb;
+wire native_active = ~(core_hb | core_vb_1l);
+reg  native_active_d;
+always @(posedge clk_sys) if (ce_pix_core) native_active_d <= native_active;
+wire native_rise = native_active & ~native_active_d;
+
+wire str_active = ~crt_hb;
+reg  str_active_d;
+always @(posedge clk_sys) if (crt_rd_ce) str_active_d <= str_active;
+wire str_fall = str_active_d & ~str_active;
+
+reg de_osd;
+always @(posedge clk_sys) begin
+    if      (native_rise) de_osd <= 1'b1;
+    else if (str_fall)    de_osd <= 1'b0;
+end
+
+assign CE_PIXEL = crt_on ? crt_rd_ce : ce_pix_core;
+assign VGA_R  = crt_on ? crt_r  : rgb_out[23:16];
+assign VGA_G  = crt_on ? crt_g  : rgb_out[15:8];
+assign VGA_B  = crt_on ? crt_b  : rgb_out[7:0];
+assign VGA_HS = crt_on ? crt_hs : core_hs;
+assign VGA_VS = crt_on ? crt_vs : core_vs;
+wire vga_de_in = crt_on ? de_osd : ~(core_hb | core_vb);
 // Scandoubler Fx is a 3-bit field (None/CRT 25/50/75).  VGA_SL takes the two low
 // bits directly so None=0 and CRT 25/50/75 map to 1/2/3 (audit R20 PF-1 — the old
 // status[5:4] slice made CRT 75% unreachable; audit F2 — dropped the
@@ -1018,7 +1116,28 @@ assign VGA_SL = scanline_level[1:0];
 // Full Screen fills; [ARC1]/[ARC2] emit the framework custom-aspect encoding
 // (ARY=0, ARX = menu index) instead of acting as 16:9 (audit R20 PF-2).
 wire [1:0] aspect = status[2:1];
-assign VIDEO_ARX = (aspect == 0) ? 13'd4 : {11'd0, (aspect - 1'd1)};
-assign VIDEO_ARY = (aspect == 0) ? 13'd3 : 13'd0;
+wire [11:0] arx_sel = (aspect == 0) ? 12'd4 : {10'd0, (aspect - 1'd1)};
+wire [11:0] ary_sel = (aspect == 0) ? 12'd3 : 12'd0;
+
+// video_freak provides the Scaling option (SCALE: 0 normal, 1 V-integer,
+// 2 HV-integer-, 3 HV-integer+, 4 HV-integer) and takes over VGA_DE and the
+// aspect outputs.  No cropping is used, so CROP_SIZE stays 0.
+video_freak video_freak (
+    .CLK_VIDEO (CLK_VIDEO),
+    .CE_PIXEL  (CE_PIXEL),
+    .VGA_VS    (VGA_VS),
+    .HDMI_WIDTH(HDMI_WIDTH),
+    .HDMI_HEIGHT(HDMI_HEIGHT),
+    .VGA_DE    (VGA_DE),
+    .VIDEO_ARX (VIDEO_ARX),
+    .VIDEO_ARY (VIDEO_ARY),
+
+    .VGA_DE_IN (vga_de_in),
+    .ARX       (arx_sel),
+    .ARY       (ary_sel),
+    .CROP_SIZE (12'd0),
+    .CROP_OFF  (5'd0),
+    .SCALE     (status[35:33])
+);
 
 endmodule

@@ -113,6 +113,10 @@ module s32_core #(
     output     [23:0] rgb_b,
     output            ce_pix,
     output            hs, vs, hb, vb,
+    // Active display width, applied at frame boundaries ($1FF00 bit 15).
+    // The top level sizes the CRT Adjust read-rate generator from this: one
+    // pixel is 6 clk_sys in 416 mode and 7.5 in 320 mode.
+    output            mode_416_out,
 
     output signed [15:0] audio_l,
     output signed [15:0] audio_r,
@@ -421,6 +425,7 @@ assign debug_sprram_cpu = {debug_sprram_count,
 // CRT timing
 wire mode_416;
 wire mode_416_active;
+assign mode_416_out = mode_416_active;
 wire vbl_start, vbl_end;
 wire [8:0] hcnt, vcnt;
 assign debug_hcnt = hcnt;
