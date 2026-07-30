@@ -25,7 +25,6 @@ working on the target MiSTer setup; an X means it is not yet ready.
 | F1 Exhaust Note | ✗ |
 | F1 Super Lap | ✗ |
 | Jurassic Park | ✗ |
-| Soreike Kokology | ✗ |
 | Rad Mobile | ✗ |
 | Rad Rally | ✗ |
 | Slip Stream | ✗ |

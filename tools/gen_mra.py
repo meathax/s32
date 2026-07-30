@@ -66,7 +66,6 @@ GAMES = {
     "ga2":      desc(v25=1, v25table=0, ppi=1),
     "holo":     desc(flip_y=1),
     "jpark":    desc(adc=1, gun=1),
-    "kokoroj":  desc(cd=1),
     "radm":     desc(adc=1),
     "radr":     desc(adc=1),
     "slipstrm": desc(adc=1),
@@ -135,20 +134,26 @@ RBF_BY_PARENT = {"ga2": "s32GoldenAxe"}
 # MRAs for those sets here would only produce launchers that cannot work.
 #
 # AS-1 is the laserdisc controller and remains out of scope (DESIGN.md 1.3).
-# Out of scope for want of a usable ROM set.
-#   kokoroj2  no set here, and its CD hardware has no RTL (has_cd_stub is
-#             decoded by the loader but nothing consumes it).
-#   sonicp    the SegaSonic prototype; the available set is missing
-#             sonsnd3.bin (crc cf56b5a0). The parent `sonic` is unaffected.
-# GAMES["sonicp"] is kept: it documents the correct (unprotected) descriptor and
-# still exercises the clone-vs-parent lookup order in the tests.
-NO_ROMSET_SETS = {"kokoroj2", "sonicp"}
+# Out of scope.
+#
+# The Kokology titles are CD-based and there is no SCSI/CXD RTL at all: the
+# loader decodes the has_cd_stub descriptor bit but nothing consumes it, so
+# these could only ever boot without their CD content. Vol. 2 additionally has
+# no ROM set here.
+CD_SETS = {"kokoroj", "kokoroja", "kokoroj2"}
+#
+# The SegaSonic prototype set available here is missing sonsnd3.bin
+# (crc cf56b5a0), and the file is not in the parent sonic.zip either. The
+# parent set `sonic` is unaffected. GAMES["sonicp"] is deliberately kept: it
+# records the correct (unprotected) descriptor and still exercises the
+# clone-vs-parent lookup order in the tests, which is where the real bug was.
+NO_ROMSET_SETS = {"sonicp"}
 
 MULTI32_SETS = {"harddunk", "harddunkj",
                 "orunners", "orunnersj", "orunnersu",
                 "scross", "scrossa", "scrossu",
                 "titlef", "titlefj", "titlefu"}
-UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"} | MULTI32_SETS | NO_ROMSET_SETS
+UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"} | MULTI32_SETS | NO_ROMSET_SETS | CD_SETS
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
 # to every set of that parent. Offsets are local to the maincpu index-4 stream.
