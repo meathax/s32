@@ -1,5 +1,8 @@
 # Root-level local audit/build transcripts
 /*.log
+# Quartus/Verilator build transcripts. 18 of these (up to 6 MB each) reached
+# GitHub before this rule existed; there is no legitimate .out source here.
+*.out
 /*.err.log
 /*.pid
 
@@ -45,9 +48,7 @@ rtl/pll/*.xml
 
 # Local verification runs and generated reference helpers
 verif/modelsim_*/
-!verif/modelsim_romboot/
 verif/modelsim_romboot/*
-!verif/modelsim_romboot/dump80.png
 verif/**/msim/
 verif/**/output/
 verif/tools/*_tmp/
@@ -62,7 +63,9 @@ verif/tools/*_tmp/
 verif/modelsim-*.log
 /verif/t*-retry.log
 *.vstf
-# Generated probe captures (recreate with the verification scripts)
+# Generated probe captures and MAME-derived reference traces
+# (recreate with the verification scripts; do not commit)
+verif/mame/*_ref.txt
 sim_obj8_writes.txt
 sim_wram_*.hex
 
