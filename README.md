@@ -1,8 +1,8 @@
 # This core is 100% AI coded
-# Sega System 32 / Multi 32 for MiSTer
+# Sega System 32 for MiSTer
 
-An open FPGA recreation of Sega's System 32 and Multi 32 arcade hardware
-(1990–1994) for the MiSTer DE10-Nano. The project is source-first and does
+An open FPGA recreation of Sega's System 32 arcade hardware (1990–1994) for
+the MiSTer DE10-Nano. The project is source-first and does
 not distribute commercial arcade ROMs.
 
 This is an active work in progress. A tick means the game is currently
@@ -30,24 +30,12 @@ working on the target MiSTer setup; an X means it is not yet ready.
 | Rad Rally | ✗ |
 | Slip Stream | ✗ |
 | SegaSonic The Hedgehog | ✗ |
-| Hard Dunk | sim |
-| OutRunners | sim |
-| Stadium Cross | partial |
-| Title Fight | sim |
 | AS-1 Controller | ✗ |
 
-The four Multi 32 titles ship in a single RBF built from the `s32Multi32`
-Quartus revision. "sim" means the game boots and renders in the full-core
-Verilator harness with no CPU exceptions; it has **not** been run on hardware,
-and the cabinet input maps have not been checked against each game's own I/O
-test screen.
-
-"partial" for Stadium Cross is deliberate. Over 420 frames it runs clean —
-`exc=0`, no stuck-PC fault, no bus hang, and sprite output climbing steadily
-(66k → 798k pixels) — but the PC stays parked around `0x00000dab`–`0dc7` and
-VRAM/palette writes plateau while work-RAM writes keep climbing. That reads as
-a spin loop rather than attract mode, so it is not claimed as booting. The link
-board (`scrossa` is the linkable set) is the first thing to check.
+**This core is System 32 only.** Multi 32 (Hard Dunk, OutRunners, Stadium
+Cross, Title Fight) is developed separately. The bitstream here is built
+`S32_SYSTEM32_ONLY=1`, so it has no V70 profile, no second palette or mixer and
+no MultiPCM, and cannot drive a Multi 32 board. No Multi 32 MRAs are shipped.
 
 This revision targets the MiSTer **128 MB** SDRAM module specifically. That
 module carries two devices on one pin set, and the core refuses to leave reset
@@ -58,8 +46,9 @@ on a smaller one rather than aliasing the sprite region onto the first device.
 - System 32 video: four scrolling/zooming tilemap layers, text and bitmap
   layers, a hardware-style sprite list with zoom, priority, blending, fades,
   and 320/416-pixel display modes.
-- Audio: Z80 sound CPU, two YM3438-compatible FM channels, RF5C68-family PCM,
-  and the Multi 32 MultiPCM path.
+- Audio: Z80 sound CPU, two YM3438-compatible FM channels and RF5C68-family
+  PCM. (A MultiPCM path exists in the shared sources for the Multi 32 board but
+  is compiled out of this System 32 build.)
 - Board devices: 315-5296 I/O, 93C46 EEPROM save/load, MSM6253 gun ADC,
   µPD4701 trackball counters, 8255 PPI, timers/interrupt controller, and the
   V25 protection path used by Golden Axe 2 and Arabian Fight.
@@ -68,11 +57,10 @@ on a smaller one rather than aliasing the sprite region onto the first device.
 
 ## NEC V60/V70 CPU
 
-`rtl/cpu/v60/s32_v60.sv` is a from-scratch, synthesizable NEC V60 core with a
-parameterized V70 profile. System 32 uses the µPD70616 V60 at about 16.108 MHz
-with a 16-bit external bus; Multi 32 uses the µPD70632 V70 profile at 20 MHz
-with a 32-bit board bus (the current adapter keeps the proven 16-bit cycle
-interface where required). Both are little-endian 32-bit CISC processors.
+`rtl/cpu/v60/s32_v60.sv` is a from-scratch, synthesizable NEC V60 core. System
+32 uses the µPD70616 V60 at about 16.108 MHz with a 16-bit external bus. The
+core also carries a parameterized µPD70632 V70 profile for the Multi 32 board;
+this build ties it off, so it costs no logic here.
 
 The implementation is a sequential micro-sequencer with a bounded prefetch
 queue and a small instruction-stream cache. It models the programmer-visible
@@ -100,10 +88,21 @@ Current MRAs transfer only populated MAME regions on indexes 4–9, then send th
 64-byte board descriptor on index 0 as the final boot commit. This avoids up to
 16 MiB of padding per launch while keeping CPUs reset until loading is complete.
 
-The SDRAM byte map is: main CPU `0x000000`, sound CPU `0x200000`, tiles
-`0x600000`, PCM `0xA00000`, V25 program `0xE00000`, and sprites `0x1000000`.
-The loader preserves little-endian 16-bit HPS transfers and descrambles V25
-program addresses while writing them.
+The SDRAM byte map targets the 128 MB module's two devices, placing one hot
+reader per bank so an open-row controller is possible:
+
+| Base | Device / bank | Region |
+|---|---|---|
+| `0x0000000` | dev 0, bank 0 | main CPU (2 MB) |
+| `0x0800000` | dev 0, bank 1 | sound CPU (4 MB) |
+| `0x1000000` | dev 0, bank 2 | tiles (4 MB) |
+| `0x1800000` | dev 0, bank 3 | PCM (4 MB) |
+| `0x1C00000` | dev 0, bank 3 | V25 program (64 KiB) |
+| `0x4000000` | dev 1 | sprites (16 MB, its own device) |
+
+Address decode is `a[26]`=device, `a[25]`=col[9], `a[24:23]`=bank,
+`a[22:10]`=row, `a[9:1]`=col[8:0]. The loader preserves little-endian 16-bit
+HPS transfers and descrambles V25 program addresses while writing them.
 
 ## Building from source
 
@@ -156,8 +155,9 @@ python -m unittest discover -s verif -p "test_*.py"
 
 ## Requirements and installation
 
-- MiSTer DE10-Nano with an SDRAM expansion (32 MB is sufficient for the
-  supported System 32 profiles).
+- MiSTer DE10-Nano with the **128 MB** SDRAM module. That module carries two
+  devices on one pin set; the core refuses to leave reset on a smaller one
+  rather than aliasing the sprite region onto the first device.
 - A matching MAME ROM set. ROMs remain the user's responsibility and are not
   included here.
 

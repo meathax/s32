@@ -76,10 +76,6 @@ GAMES = {
     "spidman":  desc(ppi=1),
     "svf":      desc(),
     "jleague":  desc(prot=PROT["JLEAGUE"]),
-    "harddunk": desc(multi32=1, ppi=1),
-    "orunners": desc(multi32=1, adc=1, orunners=1),
-    "scross":   desc(multi32=1, adc=1),
-    "titlef":   desc(multi32=1),
 }
 
 # Per-game button labels/defaults are part of the MRA contract, not the board
@@ -102,38 +98,49 @@ BUTTONS = {
         "Attack,Jump,-,-,-,-,Start,Coin,Test,Service",
         "A,B,Start,Select,R,L",
     ),
-    "orunners": (
-        "Shift Up,Shift Down,DJ Music,Music Back,Music Forward,Brake,Start,Coin,Test,Service",
-        "A,B,X,Y,L,R,Start,Select,-,-",
-    ),
     # Hard Dunk is a six-player cabinet: four action buttons per station.
-    "harddunk": (
-        "Shoot,Pass,Dunk,Block,Start,Coin,Test,Service",
-        "A,B,X,Y,Start,Select,-,-",
-    ),
     # Stadium Cross: wheelie is ACTIVE HIGH on the real board (MAME scross
     # input ports), unlike its neighbours -- do not "fix" that inversion.
-    "scross": (
-        "Attack,Wheelie,Brake,Start,Coin,Test,Service",
-        "A,B,X,Start,Select,-,-",
-    ),
     # Title Fight is two dual-stick cockpits and has no action buttons; the
     # second stick is the punch direction.
-    "titlef": (
-        "Start,Coin,Test,Service",
-        "Start,Select,-,-",
-    ),
 }
 
-BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2,
-                 "orunners": 6, "harddunk": 4, "scross": 3, "titlef": 0}
-# The four Multi 32 titles ship in one RBF.  harddunk/scross/titlef pointed at
-# the System 32 release, which contains no Multi 32 support at all.
-RBF_BY_PARENT = {"ga2": "s32GoldenAxe",
-                 "orunners": "s32Multi32", "harddunk": "s32Multi32",
-                 "scross":   "s32Multi32", "titlef":   "s32Multi32"}
+BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2}
+# Per-SET descriptor overrides for clones whose protection differs from their
+# parent's. Verified against MAME segas32.cpp init_* functions:
+#
+#   f1lapt   "F1 Super Lap (World, Unprotected)" -> init_f1lapt() is
+#            segas32_common_init() + sw1_output + s32comm ONLY; unlike
+#            init_f1lap() it never sets
+#            m_system32_prot_vblank = f1lap_fd1149_vblank.
+#   jleagueo "The J.League 1994 (Japan)" -> parent is svf, but it uses
+#            init_jleague() (installs the 0x20f700 handler) rather than
+#            init_svf() (segas32_common_init() only).
+#
+# sonicp and jleague are NOT listed here: they already have their own GAMES
+# entries, which the lookup in gen() now honours.
+#
+# This set is complete against segas32.cpp: exactly four sets have an init_*
+# differing from their parent's -- f1lapt, jleague, jleagueo, sonicp.
+GAMES_BY_SET = {
+    "f1lapt":   desc(adc=1),                     # f1lap minus PROT_F1LAP
+    "jleagueo": desc(prot=PROT["JLEAGUE"]),      # svf plus PROT_JLEAGUE
+}
 
-UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
+RBF_BY_PARENT = {"ga2": "s32GoldenAxe"}
+
+# This core is System 32 ONLY. Multi 32 (Hard Dunk, OutRunners, Stadium Cross,
+# Title Fight) is developed in a separate repository -- the universal bitstream
+# is built S32_SYSTEM32_ONLY=1 and has no V70 profile, no second palette or
+# mixer and no MultiPCM, so it cannot drive a Multi 32 board at all. Emitting
+# MRAs for those sets here would only produce launchers that cannot work.
+#
+# AS-1 is the laserdisc controller and remains out of scope (DESIGN.md 1.3).
+MULTI32_SETS = {"harddunk", "harddunkj",
+                "orunners", "orunnersj", "orunnersu",
+                "scross", "scrossa", "scrossu",
+                "titlef", "titlefj", "titlefu"}
+UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"} | MULTI32_SETS
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
 # to every set of that parent. Offsets are local to the maincpu index-4 stream.
@@ -284,7 +291,17 @@ def interleave_parts(loads, region_size, ctx=""):
 
 def gen(setname, data, outdir):
     parent = data.get("parent") or setname
-    d_base = GAMES.get(parent) or GAMES.get(setname)
+    # Per-SET descriptors win over the parent's. A clone can differ from its
+    # parent in protection: MAME gives such sets their own init_* function, and
+    # inheriting the parent's descriptor either installs protection the board
+    # does not have or drops protection it needs.
+    #
+    # Order matters. This used to read GAMES[parent] first, which made an
+    # explicit GAMES entry for a CLONE unreachable -- GAMES["sonicp"] (prot=0,
+    # correct) was dead code and sonicp silently inherited sonic's PROT_SONIC.
+    d_base = (GAMES_BY_SET.get(setname)     # explicit per-set override
+              or GAMES.get(setname)          # a clone with its own entry
+              or GAMES.get(parent))          # otherwise inherit the parent
     if d_base is None or setname in UNSUPPORTED:
         return False
     regions = {r["region"]: r for r in data["regions"]}
@@ -356,7 +373,10 @@ def gen(setname, data, outdir):
     lines.append('  </rom>')
     lines.append('</misterromdescription>')
     title = data.get("title", setname).replace("/", "-").replace(":", "")
-    with open(os.path.join(outdir, f"{title}.mra"), "w") as f:
+    # Force LF newlines: the tracked MRAs are LF. Without this, regenerating on
+    # Windows rewrites every line as CRLF and buries real content changes in
+    # whole-file churn.
+    with open(os.path.join(outdir, f"{title}.mra"), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     return True
 

@@ -2,7 +2,8 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
-from tools.gen_mra import BUTTONS, GAMES, RBF_BY_PARENT
+from tools.gen_mra import (BUTTONS, GAMES, GAMES_BY_SET, MULTI32_SETS, PROT,
+                           RBF_BY_PARENT, UNSUPPORTED)
 
 
 class BoardDescriptorTests(unittest.TestCase):
@@ -26,48 +27,108 @@ class BoardDescriptorTests(unittest.TestCase):
         # a non-gun analog board (radm steering) must NOT default-invert
         self.assertEqual(bytearray(GAMES["radm"])[1] & 0x04, 0x00)
 
-    def test_outrunners_selects_two_station_wiring(self) -> None:
-        descriptor = bytearray(GAMES["orunners"])
-        self.assertEqual(descriptor[0] & 0x09, 0x09)  # Multi32 + ADC
-        self.assertEqual(descriptor[1] & 0x10, 0x10)  # OutRunners wiring
-        self.assertEqual(RBF_BY_PARENT["orunners"], "s32Multi32")
 
-    def test_all_four_multi32_titles_share_one_rbf(self) -> None:
-        # The whole point of the Multi 32 revision: one bitstream, four games.
-        # harddunk/scross/titlef previously pointed at the System 32 release,
-        # which contains no Multi 32 support at all.
+
+class CloneProtectionTests(unittest.TestCase):
+    """A clone whose MAME init_* differs from its parent's must not inherit the
+    parent's protection selector.
+
+    Verified against segas32.cpp: exactly four sets have a divergent init_* --
+    f1lapt, jleague, jleagueo and sonicp.  The descriptor lookup used to consult
+    GAMES[parent] first, which made an explicit GAMES entry for a clone
+    unreachable, so sonicp and jleague/jleagueo silently took the wrong setting.
+    """
+
+    def _descriptor(self, setname: str, parent: str) -> bytearray:
+        # Mirrors the lookup order in tools.gen_mra.gen().
+        base = (GAMES_BY_SET.get(setname)
+                or GAMES.get(setname)
+                or GAMES.get(parent))
+        self.assertIsNotNone(base, f"no descriptor resolvable for {setname}")
+        return bytearray(base)
+
+    def test_f1lapt_is_unprotected(self) -> None:
+        # init_f1lapt() omits m_system32_prot_vblank = f1lap_fd1149_vblank.
+        self.assertEqual(self._descriptor("f1lapt", "f1lap")[2], PROT["NONE"])
+        self.assertEqual(self._descriptor("f1lap", "f1lap")[2], PROT["F1LAP"])
+        self.assertEqual(self._descriptor("f1lapt", "f1lap")[0] & 0x08, 0x08)
+
+    def test_sonicp_prototype_is_unprotected(self) -> None:
+        # init_sonicp() is segas32_common_init() only; init_sonic() installs
+        # the 0x20e5c4 level-load handler.
+        self.assertEqual(self._descriptor("sonicp", "sonic")[2], PROT["NONE"])
+        self.assertEqual(self._descriptor("sonic", "sonic")[2], PROT["SONIC"])
+        for st, pa in (("sonicp", "sonic"), ("sonic", "sonic")):
+            self.assertEqual(self._descriptor(st, pa)[0] & 0x10, 0x10, st)
+
+    def test_jleague_sets_are_protected_though_parent_svf_is_not(self) -> None:
+        # init_jleague() installs the 0x20f700 handler; init_svf() does not.
+        for setname in ("jleague", "jleagueo"):
+            self.assertEqual(self._descriptor(setname, "svf")[2],
+                             PROT["JLEAGUE"], setname)
+        self.assertEqual(self._descriptor("svf", "svf")[2], PROT["NONE"])
+        self.assertEqual(self._descriptor("svs", "svf")[2], PROT["NONE"])
+
+
+class TrackedMraDescriptorTests(unittest.TestCase):
+    """Pin the descriptor actually shipped in the tracked .mra files."""
+
+    EXPECTED = {
+        "F1 Super Lap (World, Unprotected).mra": "08000083",
+        "F1 Super Lap (World).mra": "08000483",
+        "SegaSonic The Hedgehog (Japan, prototype).mra": "10000081",
+        "SegaSonic The Hedgehog (Japan, rev. C).mra": "10000183",
+        "The J.League 1994 (Japan).mra": "00000683",
+        "The J.League 1994 (Japan, Rev A).mra": "00000683",
+    }
+
+    def test_tracked_descriptors(self) -> None:
+        mra_dir = Path(__file__).parents[1] / "mra"
+        for name, want in self.EXPECTED.items():
+            path = mra_dir / name
+            self.assertTrue(path.exists(), f"missing tracked MRA: {name}")
+            root = ElementTree.fromstring(path.read_text(encoding="utf-8"))
+            rom0 = next(r for r in root.iter("rom") if r.get("index") == "0")
+            part = "".join(rom0.find("part").text.split())
+            self.assertEqual(part[:8].upper(), want.upper(), name)
+
+
+class System32OnlyScopeTests(unittest.TestCase):
+    """This core is System 32 only; Multi 32 lives in a separate repository.
+
+    The universal bitstream is built S32_SYSTEM32_ONLY=1, which leaves it with
+    no V70 profile, no second palette or mixer and no MultiPCM. Shipping a
+    Multi 32 launcher here could only produce a core that cannot drive the
+    board, so those sets must not be emitted at all.
+    """
+
+    def test_multi32_sets_are_unsupported(self) -> None:
+        self.assertTrue(MULTI32_SETS)
+        for setname in MULTI32_SETS:
+            self.assertIn(setname, UNSUPPORTED, setname)
+
+    def test_no_multi32_descriptor_or_rbf_remains(self) -> None:
         for parent in ("harddunk", "orunners", "scross", "titlef"):
-            self.assertEqual(RBF_BY_PARENT[parent], "s32Multi32", parent)
-            self.assertEqual(GAMES[parent][0] & 0x01, 0x01, f"{parent} multi32 bit")
-            self.assertEqual(GAMES[parent][0] & 0x02, 0x00, f"{parent} must be unprotected")
-            # byte 3 (sprite bank valid/mask) is computed at generation time
-            # from the real ROM region size, not carried in GAMES.
-        # The per-game selectors the RTL keeps descriptor-driven must actually
-        # differ, or a single build could not tell the four apart.
-        self.assertEqual(GAMES["harddunk"][0] & 0x20, 0x20)   # has_ppi
-        self.assertEqual(GAMES["harddunk"][0] & 0x08, 0x00)   # no adc
-        self.assertEqual(GAMES["scross"][0]   & 0x08, 0x08)   # has_adc
-        self.assertEqual(GAMES["scross"][0]   & 0x20, 0x00)   # no ppi
-        self.assertEqual(GAMES["scross"][1]   & 0x10, 0x00)   # not orunners wiring
-        self.assertEqual(GAMES["titlef"][0]   & 0x28, 0x00)   # neither
+            self.assertNotIn(parent, GAMES, f"{parent} descriptor should be gone")
+            self.assertNotIn(parent, RBF_BY_PARENT, f"{parent} RBF target should be gone")
+            self.assertNotIn(parent, BUTTONS, f"{parent} button metadata should be gone")
 
-    def test_multi32_revision_qsf(self) -> None:
-        qsf = (Path(__file__).parents[1] / "s32Multi32.qsf").read_text(encoding="utf-8")
-        self.assertIn('VERILOG_MACRO "S32_MULTI32_ONLY=1"', qsf)
-        self.assertIn('VERILOG_MACRO "S32_RELEASE_MINIMAL=1"', qsf)
-        self.assertIn('VERILOG_MACRO "S32_JT12_MLAB_SHIFTS=1"', qsf)
-        # Both screens are retained on this revision by decision.
-        self.assertNotIn("S32_SINGLE_SCREEN_MIX", qsf)
+    def test_no_emitted_mra_is_a_multi32_board(self) -> None:
+        mra_dir = Path(__file__).parents[1] / "mra"
+        for path in sorted(mra_dir.glob("*.mra")):
+            root = ElementTree.fromstring(path.read_text(encoding="utf-8"))
+            rom0 = next(r for r in root.iter("rom") if r.get("index") == "0")
+            descriptor = bytes.fromhex("".join(rom0.find("part").text.split()))
+            self.assertEqual(descriptor[0] & 0x01, 0x00,
+                             f"{path.name} has the multi32 descriptor bit set")
+
+    def test_only_system32_revisions_exist(self) -> None:
+        root = Path(__file__).parents[1]
+        for gone in ("s32Multi32.qsf", "s32OutRunners.qsf", "s32OutRunnersDbg.qsf"):
+            self.assertFalse((root / gone).exists(), f"{gone} is a Multi 32 revision")
 
 
 class ButtonMetadataTests(unittest.TestCase):
-    def test_outrunners_exposes_cabinet_controls(self) -> None:
-        names, defaults = BUTTONS["orunners"]
-        self.assertEqual(names.split(",")[:6],
-                         ["Shift Up", "Shift Down", "DJ Music",
-                          "Music Back", "Music Forward", "Brake"])
-        self.assertEqual(len(defaults.split(",")), 10)
-
     def test_spiderman_has_two_action_buttons_and_system_controls(self) -> None:
         names, defaults = BUTTONS["spidman"]
         self.assertEqual(names.split(","),
@@ -90,7 +151,7 @@ class OptimizedLayoutTests(unittest.TestCase):
     def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
         paths = sorted(mra_dir.glob("*.mra"))
-        self.assertEqual(len(paths), 59)
+        self.assertEqual(len(paths), 48)
         for path in paths:
             root = ElementTree.parse(path).getroot()
             roms = root.findall("rom")
