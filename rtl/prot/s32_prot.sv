@@ -364,28 +364,59 @@ module s32_dualpcb (
     input             we,
     input      [11:1] addr,
     input      [15:0] wdata,
-    output reg [15:0] rdata
+    output     [15:0] rdata
 );
 
-reg [15:0] comm [0:2047];
+// The 4 KiB comms array is an explicit block RAM, not an inferred one.
+//
+// It used to be `reg [15:0] comm [0:2047]` with an `initial` loop preloading
+// every word to 0xFFFF.  Quartus 17 cannot map a non-zero power-up onto an
+// M10K, so it built the array out of 32,784 registers and their read
+// multiplexers instead: 45,746 combinational ALUTs with ZERO block-memory
+// bits.  That was 44% of the whole universal System 32 design -- more than the
+// V60 -- and single-handedly pushed it past the device's 83,820 combinational
+// nodes.  GAME_ONLY profiles compiled the module out, which is why the
+// dedicated revisions fitted and the universal one did not.
+//
+// audit R20 IO-10(b) still holds: the array must power up 0xFFFF (the f1en
+// install path memsets it).  Storage is therefore INVERTED, so a block RAM's
+// natural zero power-up reads back as 0xFFFF.  The 93C46 EEPROM shadow already
+// uses this same trick for the same reason.
+wire [15:0] q_inv;
 
-// audit R20 IO-10(b): dual-PCB comms RAM powers up 0xFF (f1en install path memsets it)
-integer __comm_init;
-initial begin
-    for (__comm_init = 0; __comm_init < 2048; __comm_init = __comm_init + 1)
-        comm[__comm_init] = 16'hFFFF;
-end
+s32_big_dpram #(
+    .ADDR_WIDTH(11),
+    .NUM_WORDS(2048),
+    // Single clock, single port in practice; port B is tied off.
+    .MIXED_RDW_MODE("DONT_CARE")
+) comm_ram (
+    .clock_a(clk),
+    .address_a(addr),
+    .data_a(~wdata),
+    .byteena_a(2'b11),
+    .wren_a(cs_ram & we),
+    .q_a(q_inv),
 
-always @(posedge clk) begin
-    if (cs_ram) begin
-        if (we) comm[addr] <= wdata;
-        rdata <= comm[addr];
-    end
-    else if (cs_id) begin
-        // main-board identity (dual_pcb_mainsub): partner-present code.
-        rdata <= 16'h0000;
-    end
-end
+    .clock_b(clk),
+    .address_b(11'd0),
+    .data_b(16'h0000),
+    .byteena_b(2'b00),
+    .wren_b(1'b0),
+    .q_b()
+);
+
+// q_inv is registered inside the RAM, so it is valid on exactly the same edge
+// the previous `rdata <= comm[addr]` was -- no added latency.
+//
+// The old output also HELD its last value while neither select was asserted.
+// That is not observable: s32_core only muxes this port into the CPU read data
+// while sel_dual is active (see the read mux), so a value that keeps tracking
+// addr while deselected cannot reach the bus.
+reg cs_id_q;
+always @(posedge clk) cs_id_q <= cs_id & ~cs_ram;
+
+// main-board identity (dual_pcb_mainsub): partner-present code.
+assign rdata = cs_id_q ? 16'h0000 : ~q_inv;
 
 endmodule
 
