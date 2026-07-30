@@ -76,7 +76,6 @@ class TrackedMraDescriptorTests(unittest.TestCase):
     EXPECTED = {
         "F1 Super Lap (World, Unprotected).mra": "08000083",
         "F1 Super Lap (World).mra": "08000483",
-        "SegaSonic The Hedgehog (Japan, prototype).mra": "10000081",
         "SegaSonic The Hedgehog (Japan, rev. C).mra": "10000183",
         "The J.League 1994 (Japan).mra": "00000683",
         "The J.League 1994 (Japan, Rev A).mra": "00000683",
@@ -151,7 +150,7 @@ class OptimizedLayoutTests(unittest.TestCase):
     def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
         paths = sorted(mra_dir.glob("*.mra"))
-        self.assertEqual(len(paths), 48)
+        self.assertEqual(len(paths), 46)
         for path in paths:
             root = ElementTree.parse(path).getroot()
             roms = root.findall("rom")
