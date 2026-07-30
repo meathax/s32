@@ -138,16 +138,23 @@ reg [3:0]  rd_total;        // words to read (1/4/8)
 reg [3:0]  rd_issued;
 reg [3:0]  rd_captured;
 reg [26:1] xfer_addr;
+// {device, bank} -> open-row slot
+wire [2:0] xfer_idx = {xfer_addr[26], xfer_addr[24:23]};
 reg        is_write;
 reg [15:0] din_r;
 reg [1:0]  be_r;
 reg [2:0]  wrrc_cnt;
 reg [2:0]  refw_cnt;
 reg [1:0]  pre_cnt;
-reg        row_open;
-reg        open_chip;          // which device the open row belongs to
-reg  [1:0] open_bank;
-reg [12:0] open_row;
+// Open-row tracking, indexed by {device, bank} -- eight independent rows.
+// The region map (s32_pkg) deliberately gives each hot reader its own bank of
+// its own device precisely so these rows never evict one another; that comment
+// notes an open-row controller is "the only thing that addresses the real
+// SDRAM bottleneck", and this is it.  Reads no longer auto-precharge: a bank
+// is closed only on a genuine same-bank row miss, or all-banks before refresh.
+reg  [7:0] row_open;
+reg [12:0] open_row [0:7];
+integer    ri;
 reg [1:0]  ack_stretch;     // acks held 2 clk_ram cycles (clk_sys is /2 sync)
 
 reg [15:0] din_pipe_d1, din_pipe_d2;   // unused placeholder (kept for clarity)
@@ -338,10 +345,8 @@ always @(posedge clk) begin
         state    <= ST_IDLE;
         ref_pend <= 1'b0;
         ref_cnt  <= 10'd0;
-        row_open <= 1'b0;
-        open_chip <= 1'b0;
-        open_bank <= 2'b00;
-        open_row <= 13'd0;
+        row_open <= 8'h00;
+        for (ri = 0; ri < 8; ri = ri + 1) open_row[ri] <= 13'd0;
         pre_cnt <= 2'd0;
         chip_sel <= 1'b0;
         cl_pipe  <= 4'b0000;
@@ -405,7 +410,7 @@ always @(posedge clk) begin
                 // REF dev0, REF dev1.  ~3 extra cycles in 700 (<0.5%).
                 chip_sel <= 1'b0;
                 cmd <= CMD_PRE; SDRAM_A <= 13'h0400;   // A10=1: all banks
-                row_open <= 1'b0;
+                row_open <= 8'h00;                     // both devices, all banks
                 state <= ST_PRE_REF_B;
             end
             else if (wr_pend | read_valid) begin
@@ -439,21 +444,27 @@ always @(posedge clk) begin
         end
 
         ST_DISPATCH: begin
-            // A same-row download write can reuse the active row. Every other
-            // transfer first closes the row explicitly so reads retain their
-            // original ACT/auto-precharge behavior.
-            // The row-reuse compare must include the DEVICE and must exclude
+            // The row compare must include the DEVICE and must exclude
             // a[25], which is a COLUMN bit (col[9]), not a row bit.  Getting
-            // either wrong writes download data into the wrong row silently.
-            if (row_open && is_write &&
-                xfer_addr[26]    == open_chip &&
-                xfer_addr[24:23] == open_bank &&
-                xfer_addr[22:10] == open_row) begin
-                state <= ST_WR;
+            // either wrong reads or writes the wrong row silently.
+            //
+            // chip_sel is set on every path: a CAS or PRE must be aimed at the
+            // device that owns the row.  Deselecting a device does not close
+            // its rows, which is what makes per-device tracking valid.
+            chip_sel <= xfer_addr[26];
+            if (row_open[xfer_idx] && open_row[xfer_idx] == xfer_addr[22:10]) begin
+                // Row hit: skip ACT and both tRCD cycles. Reads and writes
+                // alike, now that reads leave the row open.
+                state <= is_write ? ST_WR : ST_RD;
             end
-            else if (row_open) begin
-                cmd <= CMD_PRE; SDRAM_A[10] <= 1'b1;
-                row_open <= 1'b0;
+            else if (row_open[xfer_idx]) begin
+                // Same-bank row miss: close only THAT bank on THAT device.
+                // A10=0 selects a single bank; A[12:11] are the shorted DQM
+                // pins and are don't-care for PRE.
+                cmd      <= CMD_PRE;
+                SDRAM_BA <= xfer_addr[24:23];
+                SDRAM_A  <= 13'd0;
+                row_open[xfer_idx] <= 1'b0;
                 pre_cnt <= 2'd1;          // tRP >= 2 cycles before ACT
                 state <= ST_PRE_XFER;
             end
@@ -472,10 +483,8 @@ always @(posedge clk) begin
             chip_sel <= xfer_addr[26];          // device select
             SDRAM_BA <= xfer_addr[24:23];
             SDRAM_A  <= xfer_addr[22:10];       // 13 row bits
-            open_chip <= xfer_addr[26];
-            open_bank <= xfer_addr[24:23];
-            open_row  <= xfer_addr[22:10];
-            row_open  <= 1'b1;
+            open_row[xfer_idx] <= xfer_addr[22:10];
+            row_open[xfer_idx] <= 1'b1;
             state    <= ST_RCD1;
         end
 
@@ -512,8 +521,9 @@ always @(posedge clk) begin
             // A[12:11] MUST be 00: they are the shorted DQM pins and DQM has
             // 2-cycle read latency, so anything else here masks returning data.
             // A[10] = auto-precharge on the final CAS.  A[9] = col[9] = a[25].
-            SDRAM_A  <= {2'b00, (rd_issued + 1'd1 == rd_total) ? 1'b1 : 1'b0,
-                         xfer_addr[25], xfer_addr[9:1]};
+            // A[10] = 0: no auto-precharge.  The row stays open for the next
+            // transaction that lands on this device+bank.
+            SDRAM_A  <= {2'b00, 1'b0, xfer_addr[25], xfer_addr[9:1]};
             cl_pipe[0] <= 1'b1;
             // Advance within the 9 low column bits only.  Bursts are 4 words
             // aligned to 8 bytes and 8 words aligned to 16 bytes, so the carry
@@ -521,8 +531,7 @@ always @(posedge clk) begin
             xfer_addr[9:1] <= xfer_addr[9:1] + 1'd1;
             rd_issued <= rd_issued + 1'd1;
             if (rd_issued + 1'd1 == rd_total) begin
-                row_open <= 1'b0; // final CAS requests auto-precharge
-                state <= ST_RDW;
+                state <= ST_RDW;   // row left open
             end
         end
         ST_RDW: begin
@@ -541,7 +550,7 @@ always @(posedge clk) begin
             if (refw_cnt == 0) begin
                 chip_sel <= 1'b0;
                 cmd      <= CMD_REF;
-                row_open <= 1'b0;
+                row_open <= 8'h00;
                 ref_pend <= 1'b0;
                 state    <= ST_REF_B;
             end

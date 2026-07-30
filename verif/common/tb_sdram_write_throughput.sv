@@ -4,6 +4,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 module tb_sdram_write_throughput;
+import s32_pkg::*;
 reg clk = 1'b0;
 always #5 clk = ~clk;
 reg init = 1'b1;
@@ -31,7 +32,7 @@ reg [26:4] p2_addr=0;
 wire [3:0] cmd = {ncs,nras,ncas,nwe};
 localparam [3:0] C_ACT=4'b0011, C_PRE=4'b0010, C_WRITE=4'b0100;
 integer acts=0, pres=0, writes=0, errors=0;
-integer i, start_cycle, end_cycle, cyc=0, base_pre=0;
+integer i, start_cycle, end_cycle, cyc=0, base_pre=0, base_act=0, conc_done=0;
 always @(posedge clk) begin
     cyc = cyc + 1;
     if (cmd == C_ACT) acts = acts + 1;
@@ -75,6 +76,17 @@ task automatic write_word(input [26:1] addr, input [15:0] data);
         while (wr_ack && guard < 110) begin @(posedge clk); guard = guard + 1; end
     end
 endtask
+task automatic read_word(input [26:1] addr);
+    integer guard;
+    begin
+        @(negedge clk); p0_addr = addr; p0_req = 1'b1;
+        @(negedge clk); p0_req = 1'b0;
+        guard = 0;
+        while (!p0_ack && guard < 100) begin @(posedge clk); guard = guard + 1; end
+        if (!p0_ack) begin $display("FAIL read timeout addr=%h", addr); errors = errors + 1; end
+        while (p0_ack && guard < 110) begin @(posedge clk); guard = guard + 1; end
+    end
+endtask
 initial begin
     repeat (8) @(posedge clk);
     init = 1'b0;
@@ -94,6 +106,41 @@ initial begin
         $display("FAIL row-change ACT/PRE counts ACT=%0d PREdelta=%0d", acts, pres-base_pre);
         errors = errors + 1;
     end
+
+    // ------------------------------------------------------------------
+    // READ-PATH transaction cost.  The region map places one hot reader per
+    // bank per device explicitly so an open-row controller is possible; these
+    // numbers are what that buys.  Row stride in p0 word-address units is
+    // 2^9 (byte a[10] is the row LSB, and this port is [26:1]).
+    // ------------------------------------------------------------------
+    base_pre = pres; base_act = acts;
+    start_cycle = cyc;
+    for (i = 0; i < 16; i = i + 1) read_word(SDR_MAINCPU_BASE[26:1] + i);
+    end_cycle = cyc;
+    $display("READCOST same-row cycles=%0d per-txn=%0d ACT=%0d PREdelta=%0d",
+             end_cycle-start_cycle, (end_cycle-start_cycle)/16,
+             acts-base_act, pres-base_pre);
+    // 16 reads inside one row must ACTIVATE about once, not once each.
+    if ((acts-base_act) > 4) begin
+        $display("FAIL same-row read ACT count %0d (expected ~1)", acts-base_act);
+        errors = errors + 1;
+    end
+
+    // Alternate between two DIFFERENT devices (maincpu dev0 / sprites dev1).
+    // Their rows must not evict each other.
+    base_pre = pres; base_act = acts;
+    start_cycle = cyc;
+    for (i = 0; i < 16; i = i + 1)
+        read_word((i[0] ? SDR_SPRITES_BASE[26:1] : SDR_MAINCPU_BASE[26:1]) + i);
+    end_cycle = cyc;
+    $display("READCOST alt-device cycles=%0d per-txn=%0d ACT=%0d PREdelta=%0d",
+             end_cycle-start_cycle, (end_cycle-start_cycle)/16,
+             acts-base_act, pres-base_pre);
+    if ((acts-base_act) > 6) begin
+        $display("FAIL alt-device read ACT count %0d (expected ~2)", acts-base_act);
+        errors = errors + 1;
+    end
+
     if (errors == 0) $display("SDRAM WRITE THROUGHPUT PASS");
     else $display("SDRAM WRITE THROUGHPUT FAIL (%0d errors)", errors);
     $finish;
