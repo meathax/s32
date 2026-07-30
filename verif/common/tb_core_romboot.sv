@@ -139,6 +139,22 @@ function automatic [15:0] mcu_descramble(input [15:0] i);
                       i[5], i[10], i[2], i[8], i[9], i[6], i[1], i[0]};
 endfunction
 
+// -------------------------------------------------------------------------
+// Factory 93C46 image (optional).  radm, radr and alien3 ship one as MRA
+// ioctl index 2; on hardware s32_rom_loader writes it into the EEPROM shadow
+// before reset is released.  Without it those boards run -- work RAM, VRAM and
+// palette writes all advance -- but never enable display, so they render a
+// black frame and look dead.
+//
+// Absent eeprom.bin this stays completely inert, so every set that does not
+// ship one is bit-identical to before.
+reg        eep_ld_wr   = 1'b0;
+reg  [5:0] eep_ld_addr = 6'd0;
+reg [15:0] eep_ld_data = 16'h0000;
+reg  [7:0] eep_raw [0:127];
+reg        eep_present = 1'b0;
+integer    eep_fd, eep_got, eep_i;
+
 string imgdir;
 initial begin
     if (!$value$plusargs("IMG=%s", imgdir)) imgdir = ".";
@@ -159,6 +175,19 @@ initial begin
         end
         for (mcu_i = 0; mcu_i < 65536; mcu_i = mcu_i + 1)
             mcu_ext[mcu_i] = mcu_raw[mcu_descramble(mcu_i[15:0])];
+    end
+    // Optional: absence is normal and must not fail the run.
+    eep_fd = $fopen({imgdir, "/eeprom.bin"}, "rb");
+    if (eep_fd != 0) begin
+        eep_got = $fread(eep_raw, eep_fd);
+        $fclose(eep_fd);
+        if (eep_got != 128)
+            $display("ROMBOOT WARN: eeprom.bin is %0d bytes, expected 128 - ignored",
+                     eep_got);
+        else begin
+            eep_present = 1'b1;
+            $display("[eep] factory 93C46 image loaded (128 bytes)");
+        end
     end
 end
 
@@ -446,7 +475,7 @@ s32_core core (
     .fb_rd_req(fbr_req), .fb_rd_buf(fbr_buf_core), .fb_rd_y(fbr_y), .fb_rd_ack(fbr_ack),
     .fb_rd_x(fbr_x), .fb_rd_pix(fbr_pix),
     .v25_prg_wr(1'b0), .v25_prg_waddr(16'h0), .v25_prg_wdata(8'h0),
-    .eep_ld_wr(1'b0), .eep_ld_addr(6'h0), .eep_ld_data(16'h0), .eep_rd_addr(6'h0),
+    .eep_ld_wr(eep_ld_wr), .eep_ld_addr(eep_ld_addr), .eep_ld_data(eep_ld_data), .eep_rd_addr(6'h0),
     .eep_rd_data(), .eep_upload(1'b0), .eep_modified(),
     .in_p1a(in_p1a_r), .in_p2a(8'hff), .in_portc(in_portc_r),
     .in_svc12(in_svc12_r), .in_svc34(8'hff),
@@ -1230,6 +1259,21 @@ initial begin
     // Model the long board ROM-load reset: this fully flushes the production
     // jt12's 24-stage rings at its internally divided operator cadence.
     repeat (2048) @(posedge clk_sys);
+    // Preload the EEPROM shadow while still in reset, mirroring the hardware
+    // order (loader writes index 2, then reset releases).  ld_data is raw: the
+    // shadow inverts internally so a zero power-up reads back as erased FFFF.
+    // Byte pairing matches s32_rom_loader: {odd byte, even byte}.
+    if (eep_present) begin
+        for (eep_i = 0; eep_i < 64; eep_i = eep_i + 1) begin
+            @(posedge clk_sys);
+            eep_ld_addr <= eep_i[5:0];
+            eep_ld_data <= {eep_raw[eep_i*2 + 1], eep_raw[eep_i*2]};
+            eep_ld_wr   <= 1'b1;
+        end
+        @(posedge clk_sys);
+        eep_ld_wr <= 1'b0;
+        repeat (4) @(posedge clk_sys);
+    end
     rst = 0;
     for (f = 0; f < frames; f = f + 1) begin
         in_p1a_r = 8'hff;

@@ -144,6 +144,22 @@ def build_stream(mra_path, romdir):
     assert rom0 is not None
     return build_rom(rom0, romdir)
 
+def build_eeprom(mra_path, romdir):
+    """Return the 128-byte 93C46 factory image (ioctl index 2), or None.
+
+    radm, radr and alien3 ship a factory EEPROM (eeprom-radm.ic76 and friends)
+    that the board needs to pass its startup check. On hardware the MRA
+    delivers it on index 2 and s32_rom_loader writes it into the EEPROM shadow;
+    without it those games run but never enable display.
+    """
+    root = ET.parse(mra_path).getroot()
+    for r in root.findall("rom"):
+        if r.get("index") == "2":
+            data = build_rom(r, romdir)
+            assert len(data) == 0x80, f"eeprom {len(data):#x} != 0x80"
+            return data
+    return None
+
 def build_regions(mra_path, romdir):
     """Return descriptor and fixed-size simulation regions for either format."""
     root = ET.parse(mra_path).getroot()
@@ -190,7 +206,13 @@ def main():
             emit_hex(os.path.join(outdir, "sprites.hex"), blob, 16)
         else:
             emit_hex(os.path.join(outdir, f"{name}.hex"), blob, 2)
-    print(f"OK: {outdir} (desc flags b0={desc[0]:02x} b1={desc[1]:02x} b2={desc[2]:02x})")
+    eep = build_eeprom(mra_path, romdir)
+    eep_note = ""
+    if eep is not None:
+        open(os.path.join(outdir, "eeprom.bin"), "wb").write(eep)
+        eep_note = " +eeprom"
+    print(f"OK: {outdir} (desc flags b0={desc[0]:02x} b1={desc[1]:02x} "
+          f"b2={desc[2]:02x}){eep_note}")
 
 if __name__ == "__main__":
     main()
