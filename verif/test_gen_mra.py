@@ -2,8 +2,7 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
-from tools.gen_mra import (BUTTONS, GAMES, GAMES_BY_SET, MULTI32_SETS, PROT,
-                           RBF_BY_PARENT, UNSUPPORTED)
+from tools.gen_mra import (BUTTONS, GAMES, GAMES_BY_SET, PROT, RBF_BY_PARENT)
 
 
 class BoardDescriptorTests(unittest.TestCase):
@@ -27,6 +26,54 @@ class BoardDescriptorTests(unittest.TestCase):
         # a non-gun analog board (radm steering) must NOT default-invert
         self.assertEqual(bytearray(GAMES["radm"])[1] & 0x04, 0x00)
 
+    def test_outrunners_selects_two_station_wiring(self) -> None:
+        descriptor = bytearray(GAMES["orunners"])
+        self.assertEqual(descriptor[0] & 0x09, 0x09)  # Multi32 + ADC
+        self.assertEqual(descriptor[1] & 0x10, 0x10)  # OutRunners wiring
+        # OutRunners has its own dedicated revision; it is the only Multi 32
+        # bitstream that has been fitted and qualified.
+        self.assertEqual(RBF_BY_PARENT["orunners"], "s32OutRunners")
+
+    def test_no_multi32_title_targets_the_system32_bitstream(self) -> None:
+        # SegaS32 is built S32_SYSTEM32_ONLY=1, so is_multi32 folds to a
+        # constant zero: no second palette or mixer, no MultiPCM, half the work
+        # RAM.  A Multi 32 set pointed at it could not drive the board at all.
+        for parent in ("harddunk", "orunners", "scross", "titlef"):
+            self.assertIn(parent, RBF_BY_PARENT, parent)
+            self.assertNotEqual(RBF_BY_PARENT[parent], "SegaS32", parent)
+            self.assertEqual(GAMES[parent][0] & 0x01, 0x01, f"{parent} multi32 bit")
+            self.assertEqual(GAMES[parent][0] & 0x02, 0x00,
+                             f"{parent} must be unprotected")
+            # byte 3 (sprite bank valid/mask) is computed at generation time
+            # from the real ROM region size, not carried in GAMES.
+
+    def test_three_multi32_titles_share_one_rbf(self) -> None:
+        for parent in ("harddunk", "scross", "titlef"):
+            self.assertEqual(RBF_BY_PARENT[parent], "s32Multi32", parent)
+        # The per-game selectors the RTL keeps descriptor-driven must actually
+        # differ, or a single build could not tell the four apart.
+        self.assertEqual(GAMES["harddunk"][0] & 0x20, 0x20)   # has_ppi
+        self.assertEqual(GAMES["harddunk"][0] & 0x08, 0x00)   # no adc
+        self.assertEqual(GAMES["scross"][0]   & 0x08, 0x08)   # has_adc
+        self.assertEqual(GAMES["scross"][0]   & 0x20, 0x00)   # no ppi
+        self.assertEqual(GAMES["scross"][1]   & 0x10, 0x00)   # not orunners wiring
+        self.assertEqual(GAMES["titlef"][0]   & 0x28, 0x00)   # neither
+
+    def test_multi32_revision_qsf(self) -> None:
+        qsf = (Path(__file__).parents[1] / "s32Multi32.qsf").read_text(encoding="utf-8")
+        self.assertIn('VERILOG_MACRO "S32_MULTI32_ONLY=1"', qsf)
+        self.assertIn('VERILOG_MACRO "S32_RELEASE_MINIMAL=1"', qsf)
+        self.assertIn('VERILOG_MACRO "S32_JT12_MLAB_SHIFTS=1"', qsf)
+        # Both screens are retained on this revision by decision.
+        self.assertNotIn("S32_SINGLE_SCREEN_MIX", qsf)
+
+    def test_outrunners_revision_qsf(self) -> None:
+        qsf = (Path(__file__).parents[1] / "s32OutRunners.qsf").read_text(encoding="utf-8")
+        self.assertIn('VERILOG_MACRO "S32_OUTRUNNERS_ONLY=1"', qsf)
+        self.assertIn('VERILOG_MACRO "S32_RELEASE_MINIMAL=1"', qsf)
+        # Restoring the generic asynchronous V60 ROM cache moves ~2,850 ALMs
+        # back into logic and crashed every fitter seed on routing congestion.
+        self.assertNotIn('VERILOG_MACRO "S32_NO_MLAB_ROM_CACHE', qsf)
 
 
 class CloneProtectionTests(unittest.TestCase):
@@ -92,42 +139,56 @@ class TrackedMraDescriptorTests(unittest.TestCase):
             self.assertEqual(part[:8].upper(), want.upper(), name)
 
 
-class System32OnlyScopeTests(unittest.TestCase):
-    """This core is System 32 only; Multi 32 lives in a separate repository.
+class Multi32EmissionTests(unittest.TestCase):
+    """Every emitted Multi 32 MRA must carry the board bit and a Multi 32 RBF.
 
-    The universal bitstream is built S32_SYSTEM32_ONLY=1, which leaves it with
-    no V70 profile, no second palette or mixer and no MultiPCM. Shipping a
-    Multi 32 launcher here could only produce a core that cannot drive the
-    board, so those sets must not be emitted at all.
+    The inverse of the failure this file used to guard: a Multi 32 launcher
+    pointed at SegaS32 produces a core that cannot drive the board, and a
+    Multi 32 MRA without the descriptor bit leaves is_multi32 low so the second
+    palette, second mixer and MultiPCM never come up.
     """
 
-    def test_multi32_sets_are_unsupported(self) -> None:
-        self.assertTrue(MULTI32_SETS)
-        for setname in MULTI32_SETS:
-            self.assertIn(setname, UNSUPPORTED, setname)
+    MULTI32_RBFS = {"s32Multi32", "s32OutRunners"}
 
-    def test_no_multi32_descriptor_or_rbf_remains(self) -> None:
-        for parent in ("harddunk", "orunners", "scross", "titlef"):
-            self.assertNotIn(parent, GAMES, f"{parent} descriptor should be gone")
-            self.assertNotIn(parent, RBF_BY_PARENT, f"{parent} RBF target should be gone")
-            self.assertNotIn(parent, BUTTONS, f"{parent} button metadata should be gone")
-
-    def test_no_emitted_mra_is_a_multi32_board(self) -> None:
+    def _multi32_mras(self):
         mra_dir = Path(__file__).parents[1] / "mra"
         for path in sorted(mra_dir.glob("*.mra")):
             root = ElementTree.fromstring(path.read_text(encoding="utf-8"))
             rom0 = next(r for r in root.iter("rom") if r.get("index") == "0")
             descriptor = bytes.fromhex("".join(rom0.find("part").text.split()))
-            self.assertEqual(descriptor[0] & 0x01, 0x00,
-                             f"{path.name} has the multi32 descriptor bit set")
+            yield path, root, descriptor
 
-    def test_only_system32_revisions_exist(self) -> None:
+    def test_multi32_bit_and_rbf_agree_on_every_mra(self) -> None:
+        seen = 0
+        for path, root, descriptor in self._multi32_mras():
+            rbf = root.findtext("rbf", "")
+            is_multi32 = bool(descriptor[0] & 0x01)
+            if is_multi32:
+                seen += 1
+                self.assertIn(rbf, self.MULTI32_RBFS,
+                              f"{path.name} is a Multi 32 board on rbf {rbf!r}")
+            else:
+                self.assertNotIn(rbf, self.MULTI32_RBFS,
+                                 f"{path.name} is not Multi 32 but targets {rbf!r}")
+        # harddunk x2, orunners x3, scross x3, titlef x3
+        self.assertEqual(seen, 11)
+
+    def test_multi32_revisions_exist(self) -> None:
         root = Path(__file__).parents[1]
-        for gone in ("s32Multi32.qsf", "s32OutRunners.qsf", "s32OutRunnersDbg.qsf"):
-            self.assertFalse((root / gone).exists(), f"{gone} is a Multi 32 revision")
+        for needed in ("s32Multi32.qsf", "s32OutRunners.qsf",
+                       "s32Multi32.qpf", "s32OutRunners.qpf"):
+            self.assertTrue((root / needed).exists(),
+                            f"{needed} is required to build the Multi 32 sets")
 
 
 class ButtonMetadataTests(unittest.TestCase):
+    def test_outrunners_exposes_cabinet_controls(self) -> None:
+        names, defaults = BUTTONS["orunners"]
+        self.assertEqual(names.split(",")[:6],
+                         ["Shift Up", "Shift Down", "DJ Music",
+                          "Music Back", "Music Forward", "Brake"])
+        self.assertEqual(len(defaults.split(",")), 10)
+
     def test_spiderman_has_two_action_buttons_and_system_controls(self) -> None:
         names, defaults = BUTTONS["spidman"]
         self.assertEqual(names.split(","),
@@ -150,7 +211,9 @@ class OptimizedLayoutTests(unittest.TestCase):
     def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
         paths = sorted(mra_dir.glob("*.mra"))
-        self.assertEqual(len(paths), 44)
+        # 44 System 32 + 11 Multi 32 (harddunk x2, orunners x3, scross x3,
+        # titlef x3).  sonicp and the three Kokology sets stay dropped.
+        self.assertEqual(len(paths), 55)
         for path in paths:
             root = ElementTree.parse(path).getroot()
             roms = root.findall("rom")

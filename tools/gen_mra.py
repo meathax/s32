@@ -74,6 +74,10 @@ GAMES = {
     "spidman":  desc(ppi=1),
     "svf":      desc(),
     "jleague":  desc(prot=PROT["JLEAGUE"]),
+    "harddunk": desc(multi32=1, ppi=1),
+    "orunners": desc(multi32=1, adc=1, orunners=1),
+    "scross":   desc(multi32=1, adc=1),
+    "titlef":   desc(multi32=1),
 }
 
 # Per-game button labels/defaults are part of the MRA contract, not the board
@@ -96,14 +100,31 @@ BUTTONS = {
         "Attack,Jump,-,-,-,-,Start,Coin,Test,Service",
         "A,B,Start,Select,R,L",
     ),
+    "orunners": (
+        "Shift Up,Shift Down,DJ Music,Music Back,Music Forward,Brake,Start,Coin,Test,Service",
+        "A,B,X,Y,L,R,Start,Select,-,-",
+    ),
     # Hard Dunk is a six-player cabinet: four action buttons per station.
+    "harddunk": (
+        "Shoot,Pass,Dunk,Block,Start,Coin,Test,Service",
+        "A,B,X,Y,Start,Select,-,-",
+    ),
     # Stadium Cross: wheelie is ACTIVE HIGH on the real board (MAME scross
     # input ports), unlike its neighbours -- do not "fix" that inversion.
+    "scross": (
+        "Attack,Wheelie,Brake,Start,Coin,Test,Service",
+        "A,B,X,Start,Select,-,-",
+    ),
     # Title Fight is two dual-stick cockpits and has no action buttons; the
     # second stick is the punch direction.
+    "titlef": (
+        "Start,Coin,Test,Service",
+        "Start,Select,-,-",
+    ),
 }
 
-BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2}
+BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2,
+                 "orunners": 6, "harddunk": 4, "scross": 3, "titlef": 0}
 # Per-SET descriptor overrides for clones whose protection differs from their
 # parent's. Verified against MAME segas32.cpp init_* functions:
 #
@@ -125,16 +146,23 @@ GAMES_BY_SET = {
     "jleagueo": desc(prot=PROT["JLEAGUE"]),      # svf plus PROT_JLEAGUE
 }
 
-RBF_BY_PARENT = {"ga2": "s32GoldenAxe"}
-
-# This core is System 32 ONLY. Multi 32 (Hard Dunk, OutRunners, Stadium Cross,
-# Title Fight) is developed in a separate repository -- the universal bitstream
-# is built S32_SYSTEM32_ONLY=1 and has no V70 profile, no second palette or
-# mixer and no MultiPCM, so it cannot drive a Multi 32 board at all. Emitting
-# MRAs for those sets here would only produce launchers that cannot work.
+# No Multi 32 set may target the universal SegaS32 bitstream: it is built
+# S32_SYSTEM32_ONLY=1, so is_multi32 folds to a constant zero and the second
+# palette, second mixer, MultiPCM and the 128 KiB work RAM are all absent. It
+# cannot drive a Multi 32 board at all.
 #
+# OutRunners has its own dedicated revision -- the densest of the four, and the
+# only Multi 32 bitstream that has been fitted and qualified. It pins has_adc,
+# has_ppi and the two-station wiring at elaboration, which the four-game
+# revision must keep descriptor-driven (rtl/s32_core.sv:258-283). The other
+# three share s32Multi32.
+RBF_BY_PARENT = {"ga2": "s32GoldenAxe",
+                 "orunners": "s32OutRunners",
+                 "harddunk": "s32Multi32",
+                 "scross":   "s32Multi32",
+                 "titlef":   "s32Multi32"}
+
 # AS-1 is the laserdisc controller and remains out of scope (DESIGN.md 1.3).
-# Out of scope.
 #
 # The Kokology titles are CD-based and there is no SCSI/CXD RTL at all: the
 # loader decodes the has_cd_stub descriptor bit but nothing consumes it, so
@@ -149,11 +177,7 @@ CD_SETS = {"kokoroj", "kokoroja", "kokoroj2"}
 # clone-vs-parent lookup order in the tests, which is where the real bug was.
 NO_ROMSET_SETS = {"sonicp"}
 
-MULTI32_SETS = {"harddunk", "harddunkj",
-                "orunners", "orunnersj", "orunnersu",
-                "scross", "scrossa", "scrossu",
-                "titlef", "titlefj", "titlefu"}
-UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"} | MULTI32_SETS | NO_ROMSET_SETS | CD_SETS
+UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"} | NO_ROMSET_SETS | CD_SETS
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
 # to every set of that parent. Offsets are local to the maincpu index-4 stream.
