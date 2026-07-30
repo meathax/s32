@@ -562,11 +562,20 @@ end
 // which trips a Verilator EnumItemRef elaboration fault (works in ModelSim too).
 localparam [6:0] S_EXC_PUSH1_V = 7'd75;   // == s32_v60 st_t S_EXC_PUSH1
 reg exc_d, irq_d;
+integer n_sc = 0;   // CHLVL supervisor calls (vectors 24-27), not faults
 always @(posedge clk_sys) begin
     exc_d <= (core.v60.st == S_EXC_PUSH1_V);
     if ((core.v60.st == S_EXC_PUSH1_V) && !exc_d) begin
-        if (core.v60.exc_vector >= 8'h40) n_irq = n_irq + 1;
-        else n_exc = n_exc + 1;
+        // Vectors 24-27 are CHLVL, the V60's supervisor-call primitive
+        // (MAME v60 op12.hxx opCHLVL: PC = GETINTVECT(24 + op1)).  Those are
+        // deliberate system calls, not faults, and counting them as `exc`
+        // is actively misleading: slipstrm makes ~180 of them per frame from
+        // its runtime layer and looked like a CPU fault storm until the
+        // opcode was traced.  Count them separately.
+        if (core.v60.exc_vector >= 8'h40)                        n_irq = n_irq + 1;
+        else if (core.v60.exc_vector >= 8'd24 &&
+                 core.v60.exc_vector <= 8'd27)                   n_sc  = n_sc + 1;
+        else                                                     n_exc = n_exc + 1;
     end
 end
 
@@ -1335,10 +1344,10 @@ initial begin
             if (f >= 700 && (f % 25) < 5) in_p1a_r[0] = 1'b0;           // Button1 attack
         end
         repeat (804000) @(posedge clk_sys);
-        $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
+        $display("frame %0d: pc=%08x halted=%0d | wram=%0d vram=%0d pal=%0d spr=%0d io=%0d intc=%0d | irq=%0d exc=%0d sc=%0d vs=%0d sprpx=%0d stuck=%0d protrd=%0d shrd=%0d den=%b nb=%0d v02=%04x v8e=%04x v00=%04x loff=%b",
             f, core.v60.dbg_pc, core.v60.dbg_halted,
             n_wram_wr, n_vram_wr, n_pal_wr, n_spr_wr, n_io_wr, n_intc_wr,
-            n_irq, n_exc, vs_count, spr_px, same_pc, n_prot_rd, n_sh_rd,
+            n_irq, n_exc, n_sc, vs_count, spr_px, same_pc, n_prot_rd, n_sh_rd,
             core.io0_cnt1, nb_pix,
             core.r1ff02, core.tilemap.r1ff8e, core.r1ff00, core.tilemap.layer_off);
         $display("   mix: txt=%04x n0=%04x bg=%04x spr0=%04x pxt=%04x den=%b | wbuf=%0d rbuf=%0d disp=%0d wr_pix=%04x rd_pix=%04x",
