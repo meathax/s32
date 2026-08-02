@@ -7,7 +7,7 @@
 //  4. line read-back through the rd port matches DDR contents
 //  5. display read wins over a simultaneous deferred sprite flush, and the
 //     sprite write remains queued and completes afterward
-//  6. Alien 3 dual-field scanout falls back to the preceding field only where
+//  6. Dual-field scanout falls back to the preceding field only where
 //     the newest field is erased, retaining shadow pixels as authoritative
 //  7. a completed line is published only on the following raster boundary,
 //     so early next-line fetches cannot tear the line currently being scanned
@@ -346,7 +346,7 @@ initial begin
     end
     check(ddr_pix(6, 30), 16'hABCD, 30);
 
-    // 6: composite two completed Alien 3 fields. The newest field wins where
+    // 6: composite two completed fields. The newest field wins where
     // populated; erased pixels fall back to the preceding P1/P2 field. A
     // transparent 0x7fff shadow pixel retains the prior pixel with bit 15
     // cleared, matching the mixer shadow-RMW convention.

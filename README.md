@@ -19,15 +19,12 @@ working on the target MiSTer setup; an X means it is not yet ready.
 | Golden Axe: The Revenge of Death Adder | ✓ |
 | Super Visual Football / J.League | ✗ |
 | Arabian Fight | ✗ |
-| Air Rescue | ✗ |
-| Alien3: The Gun | ✗ |
 | Burning Rival | ✗ |
 | Dark Edge | ✗ |
 | Dragon Ball Z V.R.V.S. | ✗ |
 | F1 Exhaust Note | ✗ |
 | F1 Super Lap | ✗ |
 | Jurassic Park | ✗ |
-| Soreike Kokology 1/2 | ✗ |
 | Rad Mobile | ✗ |
 | Rad Rally | ✗ |
 | Slip Stream | ✗ |
@@ -97,26 +94,25 @@ Quartus Prime Lite 17.0.2 Build 602 is the pinned toolchain. On Windows, point
 
 ```bat
 set QUARTUS_ROOT=D:\Q17
-tools\build-goldenaxe.bat
-tools\build-arabianfight.bat
+tools\build-s32.bat
+tools\build-s32v25.bat
 ```
 
-These build the dedicated `s32GoldenAxe` and `s32ArabianFight` revisions and
-stage their matching RBFs under `releases/`. Each game's MRAs select its
-dedicated RBF. The common
-`Arcade-SegaSystem32.qsf` retains the complete hardware source list and each
-game revision adds a thin QSF containing only its compile-time profile, so
-future per-game cores can prune different hardware without deleting shared
-support.
+The repository ships exactly two System 32 profiles:
 
-The Golden Axe profile is intentionally area-focused. It fixes the single-
-screen System 32 routing at compile time, removes release-only debug telemetry,
-CPU turbo selection and unused V60 floating-point hardware, and uses a
-synchronous MLAB-backed V60 ROM cache instead of the generic asynchronous
-register/mux cache. Small JT12 histories, V25 FIFOs and the V25 internal data
-store are also directed to MLABs to preserve scarce M10K blocks. These changes
-are conditional; the generic source paths remain available for future
-per-game revisions.
+- `s32.rbf` supports every generated System 32 MRA except Golden Axe and
+  Arabian Fight. It compiles out the real V25 CPU, its ROM cache and dedicated
+  memories while retaining the descriptor-driven ADC, trackball, PPI,
+  protection-HLE, dual-PCB, gun, sprite, video and audio paths.
+- `s32v25.rbf` supports Golden Axe and Arabian Fight. It includes the real V25
+  execution core and selects the correct protection table and V60 cadence from
+  each MRA descriptor. Unrelated peripherals and all Multi 32 logic are
+  compiled out.
+
+Both wrappers preserve Quartus compilation databases for Smart Recompile,
+serialize builds through the repository lock, enforce the account-wide
+six-worker Fast Fit policy, run multicorner timing, and stage hash-verified
+RBFs under `releases/`.
 
 The audited driver takes an exclusive repository build lock, rejects other
 Quartus/Qsys compiler processes, validates the exact toolchain and host
@@ -148,13 +144,8 @@ python -m unittest discover -s verif -p "test_*.py"
 - A matching MAME ROM set. ROMs remain the user's responsibility and are not
   included here.
 
-Copy `s32GoldenAxe.rbf` to `_Arcade/cores/` and the Golden Axe `.mra` files to
-`_Arcade/`, then launch a title from the MiSTer arcade menu. The deployment
-helper accepts the MiSTer host at runtime; no host, password, token, or SSH key
-is stored in the repository. After a qualified build,
-`tools\deploy-goldenaxe.ps1 -MisterHost root@192.168.0.69` and
-`tools\deploy-arabianfight.ps1 -MisterHost root@192.168.0.69` perform
-hash-verified deployments.
+Copy `s32.rbf` and `s32v25.rbf` to `_Arcade/cores/` and the generated MRAs to
+`_Arcade/`, then launch a title from the MiSTer arcade menu.
 
 ## Licence and credits
 

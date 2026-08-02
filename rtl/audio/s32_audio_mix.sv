@@ -36,8 +36,6 @@ wire signed [19:0] mp_r_w  = {{4{mp_r[15]}},  mp_r};
 // routed straight, mirroring the MultiPCM stereo image on Multi 32.
 `ifdef S32_V25_GAME_ONLY
 `define S32_FIXED_SYSTEM32_AUDIO
-`elsif S32_ALIEN3_ONLY
-`define S32_FIXED_SYSTEM32_AUDIO
 `endif
 `ifdef S32_FIXED_SYSTEM32_AUDIO
 // Dedicated revisions are fixed to single-screen System 32 boards.

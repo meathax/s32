@@ -8,9 +8,7 @@ import s32_pkg::*;
 
 // Fixed-clock dedicated revisions can use the single-port synchronous V60
 // cache. Keep this preprocessing choice local to this compilation unit.
-`ifdef S32_V25_GAME_ONLY
-`define S32_AREA_ROM_CACHE
-`elsif S32_ALIEN3_ONLY
+`ifdef S32_PROFILE_V25
 `define S32_AREA_ROM_CACHE
 `endif
 
@@ -153,20 +151,8 @@ module s32_core #(
     output     [89:0] debug_v25_img     // {sweep_done, first_valid, hash[23:0], first_line[63:0]}
 );
 
-`ifdef S32_V25_GAME_ONLY
+`ifdef S32_PROFILE_V25
 localparam V25_GAME_ONLY = 1'b1;
-localparam GAME_ONLY     = 1'b1;
-`elsif S32_GA2_ONLY
-localparam V25_GAME_ONLY = 1'b0;
-localparam GAME_ONLY     = 1'b1;
-`elsif S32_HOLO_ONLY
-localparam V25_GAME_ONLY = 1'b0;
-localparam GAME_ONLY     = 1'b1;
-`elsif S32_ALIEN3_ONLY
-localparam V25_GAME_ONLY = 1'b0;
-localparam GAME_ONLY     = 1'b1;
-`elsif S32_JPARK_ONLY
-localparam V25_GAME_ONLY = 1'b0;
 localparam GAME_ONLY     = 1'b1;
 `else
 localparam V25_GAME_ONLY = 1'b0;
@@ -177,40 +163,34 @@ localparam GAME_ONLY     = 1'b0;
 // loaded and validated, but fixing these board straps at elaboration lets
 // Quartus remove unrelated runtime-select muxes. Other profiles remain
 // descriptor-led.
-`ifdef S32_V25_GAME_ONLY
+`ifdef S32_PROFILE_V25
 wire       cfg_multi32           = 1'b0;
 wire       cfg_has_v25           = 1'b1;
-`ifdef S32_ARABFIGHT_ONLY
-wire       cfg_v25_table         = 1'b1;
-`else
-wire       cfg_v25_table         = 1'b0;
-`endif
+wire       cfg_v25_table         = board.v25_table;
 wire       cfg_has_adc           = 1'b0;
 wire       cfg_has_track         = 1'b0;
 wire       cfg_has_ppi           = 1'b1;
-wire       cfg_has_dsp_hle       = 1'b0;
 wire       cfg_dual_pcb          = 1'b0;
+wire       cfg_dual_comm_ff      = 1'b0;
+wire       cfg_comm_link_hle     = 1'b0;
 wire [6:0] cfg_prot_sel          = PROT_NONE;
 wire       cfg_sprite_bank_valid = 1'b1;
 wire [1:0] cfg_sprite_bank_mask  = 2'b11;
 wire       cfg_flip_y            = 1'b0;
-`elsif S32_ALIEN3_ONLY
-// Alien 3's three regional MRAs share the same physical board descriptor:
-// System 32, four-channel ADC, no V25/PPI/trackball/protection, 16 MiB sprite
-// address space, normal orientation. Fixing these straps removes the generic
-// descriptor muxes without changing the streamed descriptor contract.
+`elsif S32_PROFILE_STANDARD
 wire       cfg_multi32           = 1'b0;
 wire       cfg_has_v25           = 1'b0;
 wire       cfg_v25_table         = 1'b0;
-wire       cfg_has_adc           = 1'b1;
-wire       cfg_has_track         = 1'b0;
-wire       cfg_has_ppi           = 1'b0;
-wire       cfg_has_dsp_hle       = 1'b0;
-wire       cfg_dual_pcb          = 1'b0;
-wire [6:0] cfg_prot_sel          = PROT_NONE;
-wire       cfg_sprite_bank_valid = 1'b1;
-wire [1:0] cfg_sprite_bank_mask  = 2'b11;
-wire       cfg_flip_y            = 1'b0;
+wire       cfg_has_adc           = board.has_adc;
+wire       cfg_has_track         = board.has_track;
+wire       cfg_has_ppi           = board.has_ppi;
+wire       cfg_dual_pcb          = board.dual_pcb;
+wire       cfg_dual_comm_ff      = board.dual_comm_ff;
+wire       cfg_comm_link_hle     = board.comm_link_hle;
+wire [6:0] cfg_prot_sel          = board.prot_sel;
+wire       cfg_sprite_bank_valid = board.sprite_bank_valid;
+wire [1:0] cfg_sprite_bank_mask  = board.sprite_bank_mask;
+wire       cfg_flip_y            = board.flip_y;
 `else
 wire       cfg_multi32           = board.multi32;
 wire       cfg_has_v25           = board.has_v25;
@@ -218,8 +198,9 @@ wire       cfg_v25_table         = board.v25_table;
 wire       cfg_has_adc           = board.has_adc;
 wire       cfg_has_track         = board.has_track;
 wire       cfg_has_ppi           = board.has_ppi;
-wire       cfg_has_dsp_hle       = board.has_dsp_hle;
 wire       cfg_dual_pcb          = board.dual_pcb;
+wire       cfg_dual_comm_ff      = board.dual_comm_ff;
+wire       cfg_comm_link_hle     = board.comm_link_hle;
 wire [6:0] cfg_prot_sel          = board.prot_sel;
 wire       cfg_sprite_bank_valid = board.sprite_bank_valid;
 wire [1:0] cfg_sprite_bank_mask  = board.sprite_bank_mask;
@@ -305,6 +286,12 @@ wire sel_sprram = (A[23:20] == 4'h4);
 wire sel_sprctl = (A[23:20] == 4'h5);
 wire sel_shared = (A[23:20] == 4'h7);
 wire sel_comm   = (A[23:16] == 8'h80);
+// MAME's regular System 32 map exposes the communication-board CN and FG
+// flip-flop registers at 0x801000/0x801002.  They are byte registers, not
+// open-bus locations: reset reads 0xFE from both, CN stores bit 0, and FG
+// stores bit 0 only while CN is enabled (s32comm.cpp).
+wire sel_comm_cn  = sel_comm && (A[15:1] == 15'h0800);
+wire sel_comm_fg  = sel_comm && (A[15:1] == 15'h0801);
 wire sel_dual   = (A[23:16] == 8'h81);
 wire sel_prot_a = (A[23:20] == 4'hA);
 wire sel_v25    = sel_prot_a && (A[19:12] == 8'h00); // 0xA00000-A00FFF
@@ -347,7 +334,22 @@ wire [15:0] pr_wdata;
 wire [1:0]  pr_be;
 wire [15:0] pr_q;
 reg         pr_ack;
+wire        br_pram_we;
+wire [7:0]  br_pram_addr;
+wire [7:0]  br_pram_wdata;
 wire [WRAM_ADDR_WIDTH-1:0] pr_wram_a = pr_addr[WRAM_ADDR_WIDTH-1:0];
+wire        work_pr_we = (pr_req && pr_we) || br_pram_we;
+wire [WRAM_ADDR_WIDTH-1:0] work_pr_addr = br_pram_we
+                                          ? {{(WRAM_ADDR_WIDTH-7){1'b0}},
+                                             br_pram_addr[7:1]}
+                                          : pr_wram_a;
+wire [15:0] work_pr_wdata = br_pram_we
+                             ? (br_pram_addr[0] ? {br_pram_wdata, 8'h00}
+                                                : {8'h00, br_pram_wdata})
+                             : pr_wdata;
+wire [1:0] work_pr_be = br_pram_we
+                        ? (br_pram_addr[0] ? 2'b10 : 2'b01)
+                        : pr_be;
 
 s32_big_dpram #(
     .ADDR_WIDTH(WRAM_ADDR_WIDTH), .NUM_WORDS(WRAM_WORDS)
@@ -355,9 +357,9 @@ s32_big_dpram #(
     .clock_a(clk_sys), .address_a(wram_a),
     .data_a(m_wdata), .byteena_a(m_be),
     .wren_a(m_req && m_we && sel_wram), .q_a(wram_q),
-    .clock_b(clk_sys), .address_b(pr_wram_a),
-    .data_b(pr_wdata), .byteena_b(pr_be),
-    .wren_b(pr_req && pr_we), .q_b(pr_q)
+    .clock_b(clk_sys), .address_b(work_pr_addr),
+    .data_b(work_pr_wdata), .byteena_b(work_pr_be),
+    .wren_b(work_pr_we), .q_b(pr_q)
 );
 
 always @(posedge clk_sys)
@@ -628,20 +630,15 @@ wire [1:0] spr_scan_buf;
 wire [1:0] spr_scan_buf_prev;
 wire       spr_scan_dual;
 s32_sprite #(
-`ifdef S32_GOLDENAXE_ONLY
+`ifdef S32_PROFILE_V25
     .VERIFY_SROM(1'b1)
 `else
     .VERIFY_SROM(1'b0)
 `endif
 ) sprite (
     .clk(clk_ram), .rst(rst), .is_multi32(is_multi32),
-    // Alien 3 alternates the P1 and P2 HUD/sight content between complete
-    // sprite fields. Preserve the preceding field so scanout can display both.
-`ifdef S32_ALIEN3_ONLY
-    .retain_previous(1'b1),
-`else
     .retain_previous(1'b0),
-`endif
+    .verify_srom(!cfg_v25_table),
     // Old MRAs predate bank metadata and therefore retain the original
     // four-bank address space. New descriptors mirror 4/8 MiB ROMs exactly.
     .srom_bank_mask(cfg_sprite_bank_valid ? cfg_sprite_bank_mask : 2'b11),
@@ -685,7 +682,7 @@ assign mode_416 = r1ff00[15];
 // DDR service acknowledges it; a one-cycle pulse was lost whenever an erase
 // or sprite write occupied the framebuffer engine. The framebuffer interface
 // now fills an inactive ping-pong line bank, so launch near the start of the
-// preceding line and give dual-field Alien 3 fetches almost a whole scanline.
+// preceding line and give the line-buffer fetch almost a whole scanline.
 reg       fb_rd_req_r;
 reg [1:0] fb_rd_buf_r;
 reg [1:0] fb_rd_buf_alt_r;
@@ -764,7 +761,7 @@ assign fb_rd_x   = hcnt;
 // item; v1 shares screen A's fetched line so B's tilemaps/palette/mixer are
 // nonetheless fully independent (the valuable part of B7).
 wire [15:0] fb_rd_pix_b = fb_rd_pix;
-`ifdef S32_ARABFIGHT_ONLY
+`ifdef S32_PROFILE_V25
 // The fetched sprite line lives in the top-level framebuffer M10K while the
 // mixer is placed with the palette/video logic.  Stage both the sprite pixel
 // and its display-X marker once in the Arabian-only profile.  The mixer still
@@ -911,22 +908,70 @@ assign sdr_p4_addr = SDR_MULTIPCM_BASE[24:1] + {3'b000, mpcm_ba[21:1]};
 // this window behaves as byte-wide RAM even with no link partner: a game that
 // writes then reads the share area must read its own data back, not open bus.
 // Only D[7:0] is mapped (MAME maps 0x800000-0x800fff share_r/w with
-// umask16 0x00ff); the cn/fg link registers at 0x801000/2 and the rest of the
-// 0x80xxxx page read link-not-connected (0xFFFF, handled in the read mux).
+// umask16 0x00ff); the cn/fg link registers at 0x801000/2 use the small HLE
+// below, and the rest of the 0x80xxxx page reads link-not-connected (0xFFFF).
 // ---------------------------------------------------------------------------
 wire       sel_comm_ram = sel_comm && (A[15:12] == 4'h0);
 reg [7:0]  comm_ram [0:2047];
 reg [7:0]  comm_q;
+reg        comm_cn;
+reg        comm_fg;
+reg [15:0] comm_link_timer;
+reg        comm_link_status;
 integer    comm_init_i;
 initial begin
     for (comm_init_i = 0; comm_init_i < 2048; comm_init_i = comm_init_i + 1)
         comm_ram[comm_init_i] = 8'h00;
     comm_q = 8'h00;
+    comm_cn = 1'b0;
+    comm_fg = 1'b0;
+    comm_link_timer = 16'h0000;
+    comm_link_status = 1'b0;
 end
 always @(posedge clk_sys) begin
     comm_q <= comm_ram[A[11:1]];
     if (m_req && m_we && sel_comm_ram && m_be[0])
         comm_ram[A[11:1]] <= m_wdata[7:0];
+    if (rst) begin
+        comm_cn <= 1'b0;
+        comm_fg <= 1'b0;
+        comm_link_timer <= 16'h0000;
+        comm_link_status <= 1'b0;
+    end
+    else begin
+        if (m_req && m_we && sel_comm_cn && m_be[0]) begin
+            comm_cn <= m_wdata[0];
+            // MAME's s32comm cn_w(0) invokes device_reset(), clearing FG too.
+            if (!m_wdata[0]) begin
+                comm_fg <= 1'b0;
+                comm_link_timer <= 16'h0000;
+                comm_link_status <= 1'b0;
+                if (cfg_comm_link_hle)
+                    comm_ram[11'd4] <= 8'h00;
+            end
+            else if (cfg_comm_link_hle) begin
+                // MAME's EPR-14084 simulation starts with an offline link and
+                // performs the master handshake over 0xe8 VBLANK ticks.
+                comm_link_timer <= 16'h00e8;
+                comm_link_status <= 1'b0;
+                comm_ram[11'd4] <= 8'h00;
+            end
+        end
+        if (m_req && m_we && sel_comm_fg && m_be[0] && comm_cn)
+            comm_fg <= m_wdata[0];
+        if (cfg_comm_link_hle && comm_cn && !comm_link_status && vbl_start) begin
+            if (comm_link_timer > 16'd1)
+                comm_link_timer <= comm_link_timer - 16'd1;
+            else begin
+                comm_link_status <= 1'b1;
+                // s32comm comm_tick_14084() publishes one master node and
+                // marks shared byte 4 online; 0x800008 is this status byte.
+                comm_ram[11'd0] <= 8'h01;
+                comm_ram[11'd1] <= 8'h01;
+                comm_ram[11'd4] <= 8'h01;
+            end
+        end
+    end
 end
 `ifdef SIMULATION
 function automatic [7:0] comm_peek(input [10:0] addr);
@@ -997,14 +1042,14 @@ generate
     end
     else if (GAME_ONLY) begin : g_game_no_analog
         // The trackball counters (sonic) stay compiled out of the dedicated
-        // release, but the MSM6253 ADC is tiny and the gun/positional games on
-        // this profile (alien3, jpark: descriptor has_adc=1) read their aim
+        // release, but the MSM6253 ADC is tiny and the positional game on this
+        // profile (jpark: descriptor has_adc=1) reads its aim
         // through it at 0xC00050-57, so it is retained.  Non-ADC descriptors
         // gate sel_adc off and Quartus sweeps it as before.  System 32 games
         // never bank the analog mux (0xC00060 is Multi 32-only), so the four
         // fixed channels P1X/P1Y/P2X/P2Y match MAME's ANALOG1-4.
         s32_msm6253 adc (
-            .clk(clk_sys),
+            .clk(clk_sys), .rst(rst),
             .cs(m_req && sel_adc && m_be[0]), // 0xC00050-57
             .we(m_we), .addr(A[2:1]),
             .dout_bit(adc_bit),
@@ -1021,7 +1066,7 @@ generate
         // stay X in simulation and undefined at cold boot (audit R20 IO-15).
         reg [2:0] analog_bank = 3'd0;
         s32_msm6253 adc (
-            .clk(clk_sys),
+            .clk(clk_sys), .rst(rst),
             .cs(m_req && sel_adc && m_be[0]), // 0xC00050-57
             .we(m_we), .addr(A[2:1]),
             .dout_bit(adc_bit),
@@ -1073,17 +1118,18 @@ s32_intc intc (
 // ---------------------------------------------------------------------------
 wire        br_trap;
 wire [15:0] br_trap_q;
-wire [15:0] dsp_q, dual_q;
+wire [15:0] dual_q;
 wire        prot_rom_req;
 wire [23:0] prot_rom_addr;
 wire        prot_rom_ack;
 wire [15:0] prot_rom_data = sdr_p0_dout;
 wire [7:0]  v25_q;
-
+wire        br_rom_req;
+wire [23:0] br_rom_addr;
 generate
     if (GAME_ONLY) begin : g_game_no_other_protection
         // Dedicated game profiles use only their selected board path.  Generic
-        // HLE, Burning Rival and Air Rescue DSP protection are unreachable.
+        // Generic protection HLE and the Burning Rival path are unreachable.
         assign pr_req = 1'b0;
         assign pr_we = 1'b0;
         assign pr_addr = 16'h0000;
@@ -1093,7 +1139,11 @@ generate
         assign br_trap_q = 16'hffff;
         assign prot_rom_req = 1'b0;
         assign prot_rom_addr = 24'h000000;
-        assign dsp_q = 16'hffff;
+        assign br_rom_req = 1'b0;
+        assign br_rom_addr = 24'h000000;
+        assign br_pram_we = 1'b0;
+        assign br_pram_addr = 8'h00;
+        assign br_pram_wdata = 8'h00;
     end
     else begin : g_other_protection
         s32_prot_hle prot (
@@ -1114,15 +1164,12 @@ generate
             .cpu_addr(A), .cpu_wdata(m_wdata),
             .cpu_rd(m_req && !m_we && sel_wram), .cpu_be(m_be),
             .trap_active(br_trap), .trap_data(br_trap_q),
-            .pram_we(), .pram_addr(), .pram_wdata(),
-            .rom_req(), .rom_addr(), .rom_data(sdr_p0_dout), .rom_ack(1'b0)
+            .pram_we(br_pram_we), .pram_addr(br_pram_addr),
+            .pram_wdata(br_pram_wdata),
+            .rom_req(br_rom_req), .rom_addr(br_rom_addr),
+            .rom_data(prot_rom_data), .rom_ack(prot_rom_ack)
         );
 
-        s32_arescue_dsp dsp (
-            .clk(clk_sys), .rst(rst), .enable(cfg_has_dsp_hle),
-            .cs(m_req && sel_prot_a && A[15:4] == 0), .we(m_we),
-            .addr(A[2:1]), .wdata(m_wdata), .rdata(dsp_q)
-        );
     end
 endgenerate
 
@@ -1136,13 +1183,14 @@ generate
     end
     else begin : g_dualpcb
         s32_dualpcb dual (
-            .clk(clk_sys), .enable(cfg_dual_pcb),
+            .clk(clk_sys), .rst(rst), .enable(cfg_dual_pcb),
+            .init_ff(cfg_dual_comm_ff),
             .cs_ram(m_req && sel_dual && !A[15]),
             // MAME serves the dual-PCB identity only at 0x818000-0x818003; the
             // rest of the 0x818000-0x81FFFF window reads open-bus (audit R20
             // IO-10a).  A[14:2]==0 selects the low id words.
             .cs_id(m_req && sel_dual && A[15] && A[14:2] == 13'd0),
-            .we(m_we), .addr(A[11:1]), .wdata(m_wdata), .rdata(dual_q)
+            .we(m_we), .be(m_be), .addr(A[11:1]), .wdata(m_wdata), .rdata(dual_q)
         );
     end
 endgenerate
@@ -1298,10 +1346,16 @@ wire       prot_rom_grant = 1'b0;
 `else
 reg        prot_rom_grant;
 `endif
-wire [23:1] prot_p0_addr = {3'b000, prot_rom_addr[20:3], 2'b00};
+// The protection clients issue an exact byte address for a 16-bit ROM read.
+// Preserve every word-address bit: Sonic's level-order table begins at 0x263a,
+// which is not 8-byte aligned.  Aligning this path like an instruction-cache
+// line fetch silently returned the word at 0x2638 instead.
+wire [23:1] prot_p0_addr = {2'b00, prot_rom_addr[21:1]};
+wire        prot_any_rom_req = prot_rom_req | br_rom_req;
+wire [23:0] prot_any_rom_addr = br_rom_req ? br_rom_addr : prot_rom_addr;
 assign prot_rom_ack = prot_rom_grant && sdr_p0_ack;
-assign sdr_p0_req  = prot_rom_grant ? prot_rom_req : rom_req_r;
-assign sdr_p0_addr = prot_rom_grant ? {2'b00, prot_p0_addr[21:1]} :
+assign sdr_p0_req  = prot_rom_grant ? prot_any_rom_req : rom_req_r;
+assign sdr_p0_addr = prot_rom_grant ? {2'b00, prot_any_rom_addr[21:1]} :
                                        {2'b00, rom_addr_r[21:1]};
 
 `ifdef S32_AREA_ROM_CACHE
@@ -1383,7 +1437,7 @@ always @(posedge clk_sys) begin
     else if (prot_rom_grant) begin
         if (sdr_p0_ack) prot_rom_grant <= 1'b0;
     end
-    else if (prot_rom_req && !rom_filling && !rom_req_r && !if_req &&
+    else if (prot_any_rom_req && !rom_filling && !rom_req_r && !if_req &&
              !sdr_p0_ack)
         prot_rom_grant <= 1'b1;
 end
@@ -1516,9 +1570,21 @@ always @(posedge clk_sys) begin
                 is_pal1:     rmux <= pal1_cpu_q;   // B7: Multi 32 screen B
                 is_mix1:     rmux <= mix1_q;
                 sel_shared:  rmux <= sh_rdata;
-                // IO-7: share RAM reads its own byte back (D[15:8] open bus);
-                // cn/fg link registers + rest of the page read not-connected.
-                sel_comm:    rmux <= sel_comm_ram ? {8'hff, comm_q} : 16'hffff;
+                // IO-7: share RAM reads its own byte back (D[15:8] open bus).
+                // MAME s32comm returns 0xFE | CN for CN and 0xFE | FG for FG
+                // with the unconnected ZFG held low; only the rest of 0x80xxxx
+                // remains open bus.  The descriptor-selected EPR-14084 HLE
+                // publishes shared byte 4 after the MAME link timer expires.
+                sel_comm:    begin
+                                if (sel_comm_ram)
+                                    rmux <= {8'hff, comm_q};
+                                else if (sel_comm_cn)
+                                    rmux <= {8'hff, 8'hfe | {7'b0, comm_cn}};
+                                else if (sel_comm_fg)
+                                    rmux <= {8'hff, 8'hfe | {7'b0, comm_fg}};
+                                else
+                                    rmux <= 16'hffff;
+                             end
                 // Open-bus outside the comm RAM (A[15]=0) and the 4-byte id
                 // window (A[15] && A[14:2]==0); the module holds stale rdata
                 // when neither chip-select fires (audit R20 IO-10a).
@@ -1532,8 +1598,8 @@ always @(posedge clk_sys) begin
                                  rmux <= cfg_has_v25 ? {8'hff, v25_q} : 16'hffff;
                              else
                                  rmux <= cfg_has_v25 ? {8'hff, v25_q} :
-                                         cfg_has_dsp_hle ? dsp_q : 16'hffff;
-                sel_prot_a:  rmux <= cfg_has_dsp_hle ? dsp_q : 16'hffff;
+                                         16'hffff;
+                sel_prot_a:  rmux <= 16'hffff;
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
                 sel_ioex:    if (GAME_ONLY)

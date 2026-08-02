@@ -78,15 +78,16 @@ initial begin
     @(negedge clk); rst = 1'b0; mem_ready = 1'b1;
     repeat (2) @(posedge clk);
 
-    // Descriptor: b0=has_v25|has_adc, b1=gun_aim|coin_swap,
+    // Descriptor: b0=has_v25|has_adc, b1=gun_aim|dual_comm_ff,
     // b2=GA2 protection, b3=sprite-bank metadata.
     for (i = 0; i < 32; i = i + 1) begin
-        if (i == 0) send_word(8'd0, i*2, 16'h0C0A);
+        if (i == 0) send_word(8'd0, i*2, 16'h4C0A);
         else if (i == 1) send_word(8'd0, i*2, 16'h8102);
         else send_word(8'd0, i*2, 16'h0000);
     end
     check(board_desc.has_v25 && board_desc.has_adc, "wide descriptor flags");
-    check(board_desc.gun_aim && board_desc.coin_swap, "wide descriptor gun flags");
+    check(board_desc.gun_aim, "wide descriptor gun flags");
+    check(board_desc.dual_comm_ff, "wide dual-PCB reset profile");
     check(board_desc.prot_sel === 7'd2 && board_desc.sprite_bank_valid,
           "wide descriptor profile");
 

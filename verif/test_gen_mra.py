@@ -17,12 +17,11 @@ class BoardDescriptorTests(unittest.TestCase):
         self.assertEqual(descriptor[3], 0x81)         # 8 MiB sprites
 
     def test_gun_games_default_invert_aim(self) -> None:
-        # alien3/jpark carry gun_aim (b1 bit2) so their positional-gun analog
-        # aim defaults to inverted; the ADC (b0 bit3) stays set.
-        for game in ("alien3", "jpark"):
-            descriptor = bytearray(GAMES[game])
-            self.assertEqual(descriptor[0] & 0x08, 0x08, game)  # ADC present
-            self.assertEqual(descriptor[1] & 0x04, 0x04, game)  # gun_aim invert
+        # JPark carries gun_aim (b1 bit2), so its positional-gun analog aim
+        # defaults to inverted; the ADC (b0 bit3) stays set.
+        descriptor = bytearray(GAMES["jpark"])
+        self.assertEqual(descriptor[0] & 0x08, 0x08)  # ADC present
+        self.assertEqual(descriptor[1] & 0x04, 0x04)  # gun_aim invert
         # a non-gun analog board (radm steering) must NOT default-invert
         self.assertEqual(bytearray(GAMES["radm"])[1] & 0x04, 0x00)
 
@@ -50,7 +49,7 @@ class OptimizedLayoutTests(unittest.TestCase):
     def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
         mra_dir = Path(__file__).parents[1] / "mra"
         paths = sorted(mra_dir.glob("*.mra"))
-        self.assertEqual(len(paths), 59)
+        self.assertEqual(len(paths), 49)
         for path in paths:
             root = ElementTree.parse(path).getroot()
             roms = root.findall("rom")

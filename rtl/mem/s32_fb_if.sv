@@ -90,7 +90,7 @@ reg        line_ready;
 wire       rd_line_publish = (rd_x == 9'd0) && line_ready;
 wire       scan_bank = rd_line_publish ? fill_bank : display_bank;
 
-// Resolve Alien 3's alternating player fields while the preceding field is
+// Resolve optional alternating player fields while the preceding field is
 // fetched from DDR, before acknowledging the completed line to scanout.
 // System 32 regards both 0xffff and 0x7fff as transparent; the latter is what
 // remains when a shadow RMW crosses an erased pixel.  For 0x7fff, retain the
@@ -145,7 +145,7 @@ reg [63:0] compose_prior;
 reg  [6:0] compose_addr;
 reg        compose_valid;
 
-// Each bank is a true 128x64 simple-dual-port RAM. During the second Alien 3
+// Each bank is a true 128x64 simple-dual-port RAM. During a second field
 // field fetch, the inactive bank's read port feeds a one-beat RMW pipeline;
 // the active bank remains dedicated to scanout. Keeping the bank select
 // outside the memory array prevents Quartus from flattening the two lines into

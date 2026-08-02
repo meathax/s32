@@ -60,8 +60,7 @@ if {[llength [info commands get_current_revision]] > 0} {
     set s32_revision [get_current_revision]
 }
 set s32_game_fixed_ce [expr {[string equal $s32_revision "s32GoldenAxe"] ||
-                             [string equal $s32_revision "s32ArabianFight"] ||
-                             [string equal $s32_revision "s32Alien3"]}]
+                             [string equal $s32_revision "s32ArabianFight"]}]
 
 if {$s32_game_fixed_ce} {
     set v60_regs [get_registers -nowarn {*|s32_v60:v60|*}]

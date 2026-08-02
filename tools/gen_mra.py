@@ -37,23 +37,21 @@ STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
 REGION_INDEX = dict(zip(STREAM_ORDER, range(4, 10)))
 
 # board descriptor per parent (DESIGN.md §3.4):
-#   b0: flags {multi32,v25,v25table,adc,track,ppi,dsp_hle,cd_stub}
+#   b0: flags {multi32,v25,v25table,adc,track,ppi}
 #   b1: bit0=dual_pcb, bit1=vertical orientation flip, bit2=positional-gun
-#       analog default-invert (alien3/jpark)
+#       analog default-invert (jpark)
 #   b2: prot_sel
 #   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
 PROT = dict(NONE=0, SONIC=1, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
-def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0, dsp=0, cd=0,
-         dual=0, flip_y=0, prot=0, gun=0, coin_swap=0):
+def desc(multi32=0, v25=0, v25table=0, adc=0, track=0, ppi=0,
+         dual=0, flip_y=0, prot=0, gun=0):
     b0 = (multi32 | v25 << 1 | v25table << 2 | adc << 3 | track << 4 |
-          ppi << 5 | dsp << 6 | cd << 7)
-    d = bytes([b0, dual | (flip_y << 1) | (gun << 2) | (coin_swap << 3), prot]) + bytes(61)
+          ppi << 5)
+    d = bytes([b0, dual | (flip_y << 1) | (gun << 2), prot]) + bytes(61)
     return d
 
 GAMES = {
     # parent: (descriptor, per-set list built from clones automatically)
-    "arescue":  desc(adc=1, dsp=1, dual=1),
-    "alien3":   desc(adc=1, gun=1, coin_swap=1),
     "arabfgt":  desc(v25=1, v25table=1, ppi=1),
     "brival":   desc(ppi=1, prot=PROT["BRIVAL"]),
     "darkedge": desc(ppi=1, prot=PROT["DARKEDGE"]),
@@ -63,13 +61,10 @@ GAMES = {
     "ga2":      desc(v25=1, v25table=0, ppi=1),
     "holo":     desc(flip_y=1),
     "jpark":    desc(adc=1, gun=1),
-    "kokoroj":  desc(cd=1),
-    "kokoroj2": desc(cd=1),
     "radm":     desc(adc=1),
     "radr":     desc(adc=1),
     "slipstrm": desc(adc=1),
     "sonic":    desc(track=1, prot=PROT["SONIC"]),
-    "sonicp":   desc(track=1),
     "spidman":  desc(ppi=1),
     "svf":      desc(),
     "jleague":  desc(prot=PROT["JLEAGUE"]),
@@ -91,24 +86,25 @@ BUTTONS = {
         "Shoot,-,-,-,-,-,Start,Coin,Test,Service",
         "A,Start,Select,R,L",
     ),
-    "alien3": (
-        "Trigger,Button,-,-,-,-,Start,Coin,Test,Service",
-        "A,B,Start,Select,R,L",
-    ),
     "spidman": (
         "Attack,Jump,-,-,-,-,Start,Coin,Test,Service",
         "A,B,Start,Select,R,L",
     ),
 }
 
-BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "alien3": 2, "spidman": 2}
+BUTTON_COUNTS = {"ga2": 3, "jpark": 1, "spidman": 2}
 RBF_BY_PARENT = {
     "ga2": "s32GoldenAxe",
     "arabfgt": "s32ArabianFight",
-    "alien3": "s32Alien3",
 }
 
-UNSUPPORTED = {"as1", "as1a", "as1b", "as1c"}
+UNSUPPORTED = {
+    "as1", "as1a", "as1b", "as1c",
+    "arescue", "arescuej", "arescueu",
+    "alien3", "alien3j", "alien3u",
+    "kokoroj", "kokoroj2", "kokoroja",
+    "sonicp",
+}
 
 # MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
 # to every set of that parent. Offsets are local to the maincpu index-4 stream.
@@ -319,12 +315,7 @@ def gen(setname, data, outdir):
 
     # Defaults precede index 0 so the descriptor is the final boot commit.
     ee = regions.get("eeprom")
-    # Alien 3's tiny factory EEPROM dump is absent from many otherwise valid
-    # MAME ROM sets. Requiring it makes MiSTer abort with a misleading missing
-    # "93c45_eeprom.ic76" error. The core's erased 93C46 image and index-3
-    # persistent NVRAM provide the same writable hardware contract, so let the
-    # game initialise it instead of requiring a separate copyrighted dump.
-    if ee and ee["loads"] and parent != "alien3":
+    if ee and ee["loads"]:
         lines.append('  <rom index="2">')
         lines.append(f'    <part name="{escape(ee["loads"][0]["file"])}" crc="{ee["loads"][0]["crc"]}"/>')
         lines.append('  </rom>')

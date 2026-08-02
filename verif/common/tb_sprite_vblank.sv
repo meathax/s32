@@ -61,6 +61,7 @@ reg       retain_previous = 0;
 // Small post-vblank delay keeps the sim short; behaviour is delay-independent.
 s32_sprite #(.POST_VBLANK_CYCLES(8)) sprite (
     .clk(clk), .rst(rst), .is_multi32(1'b0), .retain_previous(retain_previous),
+    .verify_srom(1'b0),
     .srom_bank_mask(2'b11),
     .present(present), .vblank(vblank), .rendering(rendering),
     .debug_first_rom_desc(), .debug_first_rom_valid(),
@@ -288,8 +289,8 @@ initial begin
         $display("  FAIL overrun path did not rotate through buffer 2");
     end
 
-    // ---- Alien 3 persistence: render every field and retain the prior one. ----
-    // Alien 3 alternates P1 and P2 HUD/sight content. After two completed
+    // ---- Dual-field persistence: render every field and retain the prior one. ----
+    // Alternating field content. After two completed
     // publications scanout must expose both newest and preceding fields while
     // the renderer rotates through a different physical work buffer.
     rst <= 1'b1;

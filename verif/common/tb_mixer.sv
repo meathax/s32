@@ -362,7 +362,7 @@ initial begin
     wreg(6'h19, 16'h4000);
     px(9'd22); check(rgb, 24'h889098, 9'd22);
 
-    // --- 10: alien3's exact production config (MAME segas32_v.cpp mixer dump:
+    // --- 10: positional-gun board mixer config (MAME segas32_v.cpp mixer dump:
     // 0x40=0x42=0x44=0xFFEB, 0x4E=0x0C00).  util::sext(0xFFEB,6) = -21 must
     // darken every channel with the upper write bits ignored, clamping at 0;
     // with blend factor 4 the offsets apply per-operand before the weighted
@@ -377,7 +377,7 @@ initial begin
     check(rgb, 24'h505050, 9'd10);
     px(9'd22);                          // grey (16,16,16) - 21 clamps to 0
     check(rgb, 24'h000000, 9'd22);
-    // alien3 blend: 0x4E=0x0C00 (enable, factor 4). Winner NBG0 darkened by
+    // Positional-gun board blend: 0x4E=0x0C00 (enable, factor 4). Winner NBG0 darkened by
     // bank 0; partner NBG1 (flag 0 -> bank 1 = zero offsets) stays white:
     // each channel = (10*3 + 31*5) >> 3 = 23 -> 0xB8.
     wpal(15'h0002, 16'h7FFF);

@@ -21,7 +21,8 @@ module s32_sprite #(
     input       [1:0] srom_bank_mask,
 
     // frame control
-    input             retain_previous, // Alien 3: scan current + prior completed field
+    input             retain_previous, // scan current + prior completed field
+    input             verify_srom,     // GA2: confirm repeated SDRAM bursts agree
     input             present,      // start-of-vblank pulse: publish completed frame
     input             vblank,       // end-of-vblank pulse (1 clk_sys wide =
                                     // 2 clk_ram samples; edge-detected below)
@@ -74,7 +75,7 @@ module s32_sprite #(
 
     output reg  [1:0] disp_buf,     // game-visible logical A/B selector
     output reg  [1:0] scan_buf,     // newest physical buffer the mixer reads
-    output reg  [1:0] scan_buf_prev,// preceding completed field (Alien 3)
+    output reg  [1:0] scan_buf_prev,// preceding completed field
     output reg        scan_dual     // both scan buffers contain valid fields
 );
 
@@ -160,8 +161,8 @@ typedef enum logic [4:0] {
     R_PIXEL_DATA, R_DONE, R_DELAY,
     R_ROM_GAP, R_ROM_VERIFY, R_ROM_VERIFYW, R_ROM_RETRY
 } rst_t;
-`ifdef S32_ALIEN3_ONLY
-// Alien 3's dedicated build has enough ALM headroom to trade a few state
+`ifdef S32_PROFILE_STANDARD
+// Dedicated builds have enough ALM headroom to trade a few state
 // flops for much shallower renderer enables.  Binary rs[0] decoding was the
 // remaining 96 MHz critical cone after the dedicated profile was pruned.
 (* syn_encoding = "onehot" *) rst_t rs;
@@ -385,7 +386,7 @@ always @(posedge clk) begin
         // line-0 DDR prefetch on raster line 261. Every visible scanline then
         // comes from one stable buffer. Multi 32 retains its two-buffer map.
         if (present_rise && !is_multi32 && ready_valid) begin
-            // Alien 3 deliberately alternates its P1 and P2 HUD/sight content.
+            // Some dual-field boards deliberately alternate field content.
             // Keep the preceding completed field alive so scanout can combine
             // the two fields, like the persistence visible on the original CRT.
             // Other System 32 profiles retain the ordinary single-frame path.
@@ -778,7 +779,7 @@ always @(posedge clk) begin
         R_ROWDATAW: if (srom_ack) begin
             debug_activity[14] <= 1'b1;
             srom_req <= 0;
-            if (VERIFY_SROM) begin
+            if (VERIFY_SROM && verify_srom) begin
                 srom_verify_data <= srom_data;
                 // The SDRAM acknowledge is stretched for the clk_sys crossing.
                 // Wait for it to fall before creating the second request edge.

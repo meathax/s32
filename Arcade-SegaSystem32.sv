@@ -119,47 +119,32 @@ wire [31:0] joystick_0, joystick_1, joystick_2, joystick_3, joystick_4, joystick
 wire [15:0] joystick_l_analog_0, joystick_l_analog_1;
 wire  [7:0] paddle_0, paddle_1;
 wire [24:0] ps2_mouse;
-// Dedicated real-V25 game RBFs have fixed physical board straps. Keep
-// board_desc as the loader output so MRA compatibility checks remain
-// meaningful, but feed pruning decisions from constants in these revisions.
+// The two universal RBFs have fixed profile boundaries. The standard image
+// rejects V25/Multi 32 hardware; the V25 image accepts only the two protected
+// System 32 boards and keeps their table selector descriptor-driven.
 always @(*) begin
     active_board = board_desc;
-`ifdef S32_V25_GAME_ONLY
+`ifdef S32_PROFILE_V25
     active_board.multi32          = 1'b0;
     active_board.has_v25          = 1'b1;
-`ifdef S32_ARABFIGHT_ONLY
-    active_board.v25_table        = 1'b1;
-`else
-    active_board.v25_table        = 1'b0;
-`endif
+    active_board.v25_table        = board_desc.v25_table;
     active_board.has_adc          = 1'b0;
     active_board.has_track        = 1'b0;
     active_board.has_ppi          = 1'b1;
-    active_board.has_dsp_hle      = 1'b0;
-    active_board.has_cd_stub      = 1'b0;
     active_board.dual_pcb         = 1'b0;
     active_board.prot_sel         = PROT_NONE;
     active_board.sprite_bank_valid = 1'b1;
     active_board.sprite_bank_mask = 2'b11;
     active_board.flip_y           = 1'b0;
     active_board.gun_aim          = 1'b0;
-    active_board.coin_swap        = 1'b0;
-`elsif S32_ALIEN3_ONLY
+    active_board.analog_profile   = ANALOG_CENTERED;
+    active_board.gear_toggle      = 1'b0;
+    active_board.comm_link_hle    = 1'b0;
+    active_board.digital_profile  = DIGITAL_GENERIC;
+`elsif S32_PROFILE_STANDARD
     active_board.multi32          = 1'b0;
     active_board.has_v25          = 1'b0;
     active_board.v25_table        = 1'b0;
-    active_board.has_adc          = 1'b1;
-    active_board.has_track        = 1'b0;
-    active_board.has_ppi          = 1'b0;
-    active_board.has_dsp_hle      = 1'b0;
-    active_board.has_cd_stub      = 1'b0;
-    active_board.dual_pcb         = 1'b0;
-    active_board.prot_sel         = PROT_NONE;
-    active_board.sprite_bank_valid = 1'b1;
-    active_board.sprite_bank_mask = 2'b11;
-    active_board.flip_y           = 1'b0;
-    active_board.gun_aim          = 1'b1;
-    active_board.coin_swap        = 1'b1;
 `endif
 end
 
@@ -190,25 +175,16 @@ localparam CONF_STR = {
     "O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O[5:3],Scandoubler Fx,None,CRT 25%,CRT 50%,CRT 75%;",
     "-;",
-`ifndef S32_V25_GAME_ONLY
-`ifndef S32_ALIEN3_ONLY
+`ifndef S32_SYSTEM32_ONLY
     "O[6],Screen (Multi32),A,B;",
 `endif
-`endif
     "O[7],Service Mode,Off,On;",
-`ifndef S32_V25_GAME_ONLY
-`ifndef S32_ALIEN3_ONLY
+`ifndef S32_PROFILE_V25
     "O[16:15],CPU Turbo,Normal,x2,x3,x4;",
 `endif
-`endif
     "O[12],Pause,Off,On;",
-`ifndef S32_V25_GAME_ONLY
-`ifdef S32_ALIEN3_ONLY
-    // Status 00 is the dedicated cabinet default: both axes inverted.
-    "O[14:13],Analog Aim,Invert XY,Invert Y,Invert X,Normal;",
-`else
+`ifndef S32_PROFILE_V25
     "O[14:13],Analog Aim Invert,Off,X,Y,XY;",
-`endif
 `endif
     "-;",
     "R[0],Reset;",
@@ -258,22 +234,11 @@ reg ce_cpu, ce_z80, ce_fm, ce_pcm;
 reg [15:0] acc_cpu, acc_z80, acc_fm, acc_pcm;
 wire is_multi32 = active_board.multi32;
 wire pause = status[12];
-`ifdef S32_ALIEN3_ONLY
-// Alien 3 uses the authentic System 32 V60 cadence. The fixed enable spacing
-// permits the area-efficient synchronous ROM cache and its real two-cycle SDC.
-wire [15:0] cpu_ce_inc = 16'd21848;
-`elsif S32_V25_GAME_ONLY
-// Dedicated releases compile out the runtime multiplier/saturation cone and
-// guarantee that CPU register updates are never on consecutive clk_sys edges,
-// matching their two-cycle timing exception in Arcade-SegaSystem32.sdc.
-`ifdef S32_ARABFIGHT_ONLY
-// Arabian Fight's proven full-core fix is an exact clk_sys/2 V60 cadence. It
-// finishes the attract-mode sprite workload within every physical field.
-wire [15:0] cpu_ce_inc = 16'd32768;
-`else
-// Golden Axe runs at the board-authentic 16.10795 MHz cadence.
-wire [15:0] cpu_ce_inc = 16'd21848;
-`endif
+`ifdef S32_PROFILE_V25
+// Both protected games have fixed CE spacing, so the V60 timing exception is
+// valid for the whole image. Arabian Fight selects its measured clk_sys/2
+// cadence through the descriptor; Golden Axe retains the authentic cadence.
+wire [15:0] cpu_ce_inc = active_board.v25_table ? 16'd32768 : 16'd21848;
 `else
 // Universal profiles retain the optional V60/V70 multiplier. They receive no
 // blanket CPU multicycle timing exception because Turbo can assert CE on
@@ -565,27 +530,50 @@ function automatic [7:0] p_dig(input [31:0] j);
     p_dig = ~{j[1], j[0], j[3], j[2], 1'b0, j[6], j[5], j[4]};
 endfunction
 wire [7:0] p1a_dig = p_dig(joystick_0);
+wire [7:0] radm_p1a = {p1a_dig[7:3], ~joystick_0[5],
+                        ~joystick_0[4], 1'b1};
 wire [7:0] sonic_p1a = {p1a_dig[7:3], ~joystick_2[4], p1a_dig[1:0]};
-// coin_swap denotes Alien 3's game-specific SERVICE12 wiring in legacy and
-// current descriptors.  Keep that identification separate from the mapping
-// itself: the analog conditioner must not depend on an individual coin bit.
-wire alien3_gun_aim = active_board.gun_aim && active_board.coin_swap;
-// The Alien 3 cabinet has no dedicated Start switch. Pulling MiSTer's Start
-// input into the corresponding gun trigger starts a credited player without
-// driving SERVICE2 (which the game interprets as the other coin/service path).
-wire [7:0] alien3_p1a = p1a_dig & {7'h7f, ~joystick_0[10]};
+// Rad Rally and Slip Stream expose a single cabinet Gear Change toggle, not a
+// momentary switch or four-position encoding.  Keep this semantic independent
+// from Rad Rally's separate EPR-14084 communication-board selector.
+reg radr_gear = 1'b0;
+reg radr_gear_btn_d = 1'b0;
+always @(posedge clk_sys) begin
+    if (reset || !active_board.gear_toggle) begin
+        radr_gear <= 1'b0;
+        radr_gear_btn_d <= joystick_0[4];
+    end
+    else begin
+        radr_gear_btn_d <= joystick_0[4];
+        if (joystick_0[4] && !radr_gear_btn_d)
+            radr_gear <= ~radr_gear;
+    end
+end
+wire [7:0] gear_toggle_p1a = {p1a_dig[7:1], ~radr_gear};
+// Dark Edge leaves raw player-port bit 0 unused and places its first two
+// buttons on bits 1/2.  Adapt MiSTer's logical B1/B2 here; the remaining
+// three buttons are on the PPI below.  Select from the existing descriptor so
+// this remains a shared Standard-profile implementation, not a game build.
+wire [7:0] darkedge_p1a = {p1a_dig[7:4], 1'b1,
+                           ~joystick_0[5], ~joystick_0[4], 1'b1};
 wire [7:0] p2a_dig = p_dig(joystick_1);
-wire [7:0] alien3_p2a = p2a_dig & {7'h7f, ~joystick_1[10]};
-wire [7:0] core_p1a = alien3_gun_aim ? alien3_p1a :
-                       (active_board.prot_sel == PROT_SONIC) ? sonic_p1a : p1a_dig;
-wire [7:0] core_p2a = alien3_gun_aim ? alien3_p2a : p2a_dig;
+wire gun_aim_active = active_board.gun_aim;
+wire [7:0] core_p1a = (active_board.prot_sel == PROT_SONIC) ? sonic_p1a :
+                       (active_board.prot_sel == PROT_DARKEDGE) ? darkedge_p1a :
+                       active_board.gear_toggle ? gear_toggle_p1a :
+                       (active_board.digital_profile == DIGITAL_RADM) ? radm_p1a :
+                       p1a_dig;
+wire [7:0] darkedge_p2a = {p2a_dig[7:4], 1'b1,
+                           ~joystick_1[5], ~joystick_1[4], 1'b1};
+wire [7:0] core_p2a = (active_board.prot_sel == PROT_DARKEDGE) ? darkedge_p2a :
+                       p2a_dig;
 
-// --- Analog-stick gun aiming (Alien 3: The Gun) ----------------------------
+// --- Analog-stick positional-gun aiming ------------------------------------
 // The gun channels are MAME IPT_AD_STICK_X/Y: absolute, offset-binary, resting
 // at 0x80 (full left/up=0x00, full right/down=0xff).  MiSTer's left analog
-// stick feeds them directly (P1 = stick 0, P2 = stick 1). Alien 3 uses a
-// radial inner deadzone, 95%-throw outer saturation, progressive response, and
-// error-sensitive smoothing in s32_gun_aim. Other analog titles retain the
+// stick feeds them directly (P1 = stick 0, P2 = stick 1). Positional-gun
+// inputs use a radial inner deadzone, 95%-throw outer saturation, progressive
+// response, and error-sensitive smoothing in s32_gun_aim. Other analog titles retain the
 // proven per-axis conditioning below. The gun games keep their default
 // inversion through active_board.gun_aim; the OSD toggle permits an override.
 wire aim_inv_x = status[13] ^ active_board.gun_aim;
@@ -617,7 +605,7 @@ assign aim_in[3] = aim_axis(joystick_l_analog_1[15:8], aim_inv_y); // P2 gun Y
 wire [7:0] gun_aim_x [0:1];
 wire [7:0] gun_aim_y [0:1];
 s32_gun_aim gun_aim_conditioner (
-    .clk(clk_sys), .rst(reset), .enable(alien3_gun_aim),
+    .clk(clk_sys), .rst(reset), .enable(gun_aim_active),
     .p1_raw_x(joystick_l_analog_0[7:0]),
     .p1_raw_y(joystick_l_analog_0[15:8]),
     .p2_raw_x(joystick_l_analog_1[7:0]),
@@ -651,14 +639,26 @@ always @(posedge clk_sys) begin
 end
 
 wire [7:0] adc_ch [0:7];
-assign adc_ch[0] = alien3_gun_aim ? gun_aim_x[0] : aim_sm[0]; // ANALOG1
-assign adc_ch[1] = alien3_gun_aim ? gun_aim_y[0] : aim_sm[1]; // ANALOG2
-assign adc_ch[2] = alien3_gun_aim ? gun_aim_x[1] : aim_sm[2]; // ANALOG3
-assign adc_ch[3] = alien3_gun_aim ? gun_aim_y[1] : aim_sm[3]; // ANALOG4
-assign adc_ch[4] = {paddle_0};
-assign adc_ch[5] = {paddle_1};
-assign adc_ch[6] = 8'h80;
-assign adc_ch[7] = 8'h80;
+wire driving_analog = (active_board.analog_profile == ANALOG_DRIVING);
+wire pulled_up_adc  = (active_board.analog_profile == ANALOG_ALL_FF);
+// Driving cabinets wire the wheel, accelerator, and brake to the first three
+// MSM6253 channels. MiSTer's left-stick X is the wheel; the two paddle values
+// are its analog triggers and naturally rest at zero like the real pedals.
+assign adc_ch[0] = pulled_up_adc ? 8'hff :
+                   gun_aim_active ? gun_aim_x[0] : aim_sm[0]; // ANALOG1
+assign adc_ch[1] = pulled_up_adc ? 8'hff :
+                   driving_analog ? paddle_0 :
+                   gun_aim_active ? gun_aim_y[0] : aim_sm[1]; // ANALOG2
+assign adc_ch[2] = pulled_up_adc ? 8'hff :
+                   driving_analog ? paddle_1 :
+                   gun_aim_active ? gun_aim_x[1] : aim_sm[2]; // ANALOG3
+assign adc_ch[3] = pulled_up_adc ? 8'hff :
+                   driving_analog ? 8'hff :
+                   gun_aim_active ? gun_aim_y[1] : aim_sm[3]; // ANALOG4
+assign adc_ch[4] = pulled_up_adc ? 8'hff : driving_analog ? 8'h80 : paddle_0;
+assign adc_ch[5] = pulled_up_adc ? 8'hff : driving_analog ? 8'h80 : paddle_1;
+assign adc_ch[6] = pulled_up_adc ? 8'hff : 8'h80;
+assign adc_ch[7] = pulled_up_adc ? 8'hff : 8'h80;
 
 // trackballs from mouse
 reg        m_dv [0:2];
@@ -669,7 +669,10 @@ always @(posedge clk_sys) begin
     if (ps2_mouse[24] != mouse_toggle) begin
         mouse_toggle <= ps2_mouse[24];
         m_dv[0] <= 1'b1;
-        m_dx[0] <= {ps2_mouse[4], ps2_mouse[15:8]};
+        // MAME marks all three SegaSonic TRACKBALL_X inputs PORT_REVERSE.
+        // Convert the host's right-positive mouse delta at the adapter edge;
+        // the uPD4701 counters themselves remain direction-agnostic.
+        m_dx[0] <= -$signed({ps2_mouse[4], ps2_mouse[15:8]});
         m_dy[0] <= {ps2_mouse[5], ps2_mouse[23:16]};
     end
 end
@@ -699,12 +702,12 @@ assign trk_dv_a[1] = trk_tick & p1_dpad;
 assign trk_dv_a[2] = trk_tick & p2_dpad;
 wire signed [8:0] trk_dx_a [0:2];
 wire signed [8:0] trk_dy_a [0:2];
-// j[0]=right(+x) j[1]=left(-x) j[2]=down(+y) j[3]=up(-y)
-assign trk_dx_a[0] = m_dv[0] ? m_dx[0] : joystick_0[0] ? TRK_STEP : joystick_0[1] ? -TRK_STEP : 9'sd0;
+// SegaSonic reverses X only: right decrements, left increments. Y is normal.
+assign trk_dx_a[0] = m_dv[0] ? m_dx[0] : joystick_0[0] ? -TRK_STEP : joystick_0[1] ? TRK_STEP : 9'sd0;
 assign trk_dy_a[0] = m_dv[0] ? m_dy[0] : joystick_0[2] ? TRK_STEP : joystick_0[3] ? -TRK_STEP : 9'sd0;
-assign trk_dx_a[1] = joystick_1[0] ? TRK_STEP : joystick_1[1] ? -TRK_STEP : 9'sd0;
+assign trk_dx_a[1] = joystick_1[0] ? -TRK_STEP : joystick_1[1] ? TRK_STEP : 9'sd0;
 assign trk_dy_a[1] = joystick_1[2] ? TRK_STEP : joystick_1[3] ? -TRK_STEP : 9'sd0;
-assign trk_dx_a[2] = joystick_2[0] ? TRK_STEP : joystick_2[1] ? -TRK_STEP : 9'sd0;
+assign trk_dx_a[2] = joystick_2[0] ? -TRK_STEP : joystick_2[1] ? TRK_STEP : 9'sd0;
 assign trk_dy_a[2] = joystick_2[2] ? TRK_STEP : joystick_2[3] ? -TRK_STEP : 9'sd0;
 
 // MAME system32_generic: port C is unused; port E/SERVICE12 is
@@ -714,20 +717,15 @@ assign trk_dy_a[2] = joystick_2[2] ? TRK_STEP : joystick_2[3] ? -TRK_STEP : 9'sd
 wire [7:0] portc = 8'hff;
 wire test_btn = status[7] | joystick_0[12] | joystick_1[12];
 wire svc_btn  = joystick_0[13] | joystick_1[13];
-// SegaSonic maps Coin 3 and 3 Players Start to the upper service bits;
-// mirror the primary player controls there when the Sonic protection profile
-// is selected so a normal cabinet coin/start press can join the game.
+// SegaSonic maps Coin 3 and Start 3 to the upper service bits.  Keep them on
+// the third MiSTer player: mirroring P1 here would assert Start1+Start3 and
+// Coin1+Coin3 together.
 wire [7:0] svc12_generic = ~{
-                     (active_board.prot_sel == PROT_SONIC) ? joystick_0[10] : 1'b0,
-                     (active_board.prot_sel == PROT_SONIC) ? joystick_0[11] : 1'b0,
+                     (active_board.prot_sel == PROT_SONIC) ? joystick_2[10] : 1'b0,
+                     (active_board.prot_sel == PROT_SONIC) ? joystick_2[11] : 1'b0,
                      joystick_1[10], joystick_0[10],
                      joystick_1[11], joystick_0[11], test_btn, svc_btn};
-// Alien 3 SERVICE12_A is not the generic layout: bit 3 is Coin 1, bit 2 is
-// Coin 2, bit 4 is SERVICE2 and bit 5 is unused. Leave those upper two inputs
-// inactive; MiSTer Start is mirrored to each gun trigger above.
-wire [7:0] svc12_alien3 = ~{2'b00, 2'b00, joystick_0[11], joystick_1[11],
-                            test_btn, svc_btn};
-wire [7:0] svc12 = alien3_gun_aim ? svc12_alien3 : svc12_generic;
+wire [7:0] svc12 = svc12_generic;
 // Port F/SERVICE34: bits 3:0 = DIP SW1:1-4 (Off), bit4 = PCB Push SW1
 // (Service), bit5 = PCB Push SW2 (Test), bit6 unknown; bit7 is replaced by the
 // EEPROM DO line inside s32_core.  Some games poll the PCB push switches
@@ -746,6 +744,23 @@ wire [7:0] svc34 = ~{2'b00, test_btn, svc_btn, 4'b0000};
 // eliminating that needs a board-descriptor US flag, deferred by choice.
 wire [7:0] ga2_ppi_pc = ~{4'b0, joystick_0[11], joystick_1[11],
                           joystick_3[10], joystick_2[10]};
+// Burning Rival and Dark Edge use the same physical i8255 differently from
+// GA2: A/C are pulled high and B carries the upper action buttons.  This costs
+// only descriptor-selected wiring and preserves the single Standard image.
+wire [7:0] brival_ppi_pb = {~joystick_0[9], 1'b1,
+                            ~joystick_0[7], ~joystick_0[8], 1'b1,
+                            ~joystick_1[9], ~joystick_1[8], ~joystick_1[7]};
+wire [7:0] darkedge_ppi_pb = {~joystick_0[8], 1'b1,
+                              ~joystick_0[6], ~joystick_0[7], 1'b1,
+                              ~joystick_1[8], ~joystick_1[7], ~joystick_1[6]};
+wire brival_inputs = active_board.prot_sel == PROT_BRIVAL;
+wire darkedge_inputs = active_board.prot_sel == PROT_DARKEDGE;
+wire [7:0] core_ppi_pa = (brival_inputs || darkedge_inputs) ? 8'hff :
+                          p_dig(joystick_2);
+wire [7:0] core_ppi_pb = brival_inputs ? brival_ppi_pb :
+                          darkedge_inputs ? darkedge_ppi_pb : p_dig(joystick_3);
+wire [7:0] core_ppi_pc = (brival_inputs || darkedge_inputs) ? 8'hff :
+                          ga2_ppi_pc;
 
 //////////////////////////////   CORE   ///////////////////////////////////////
 wire [23:0] rgb_a, rgb_b;
@@ -812,7 +827,7 @@ s32_core core (
     .in_portc_b(8'hff), .in_svc12_b(8'hff), .in_svc34_b(8'hff),
     .adc_ch(adc_ch),
     .trk_dv(trk_dv_a), .trk_dx(trk_dx_a), .trk_dy(trk_dy_a), .trk_btn(trk_btn),
-    .ppi_pa(p_dig(joystick_2)), .ppi_pb(p_dig(joystick_3)), .ppi_pc(ga2_ppi_pc),
+    .ppi_pa(core_ppi_pa), .ppi_pb(core_ppi_pb), .ppi_pc(core_ppi_pc),
     .rgb_a(rgb_a), .rgb_b(rgb_b),
     .ce_pix(ce_pix_core),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
@@ -853,9 +868,7 @@ assign AUDIO_L = pause ? 16'sd0 : aud_l;
 assign AUDIO_R = pause ? 16'sd0 : aud_r;
 
 //////////////////////////////   VIDEO   //////////////////////////////////////
-`ifdef S32_ALIEN3_ONLY
-wire [23:0] game_rgb = rgb_a;
-`elsif S32_V25_GAME_ONLY
+`ifdef S32_SYSTEM32_ONLY
 wire [23:0] game_rgb = rgb_a;
 `else
 wire [23:0] game_rgb = status[6] ? rgb_b : rgb_a;

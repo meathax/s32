@@ -166,15 +166,17 @@ always @(posedge clk) begin
                             desc_r.has_adc     <= desc_bytes[0][3];
                             desc_r.has_track   <= desc_bytes[0][4];
                             desc_r.has_ppi     <= desc_bytes[0][5];
-                            desc_r.has_dsp_hle <= desc_bytes[0][6];
-                            desc_r.has_cd_stub <= desc_bytes[0][7];
                             desc_r.dual_pcb    <= desc_bytes[1][0];
                             desc_r.prot_sel    <= desc_bytes[2][6:0];
                             desc_r.sprite_bank_valid <= desc_bytes[3][7];
                             desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
                             desc_r.flip_y            <= desc_bytes[1][1];
                             desc_r.gun_aim           <= desc_bytes[1][2];
-                            desc_r.coin_swap         <= desc_bytes[1][3];
+                            desc_r.analog_profile    <= desc_bytes[1][5:4];
+                            desc_r.dual_comm_ff      <= desc_bytes[1][6];
+                            desc_r.gear_toggle       <= desc_bytes[1][7];
+                            desc_r.digital_profile   <= desc_bytes[4][1:0];
+                            desc_r.comm_link_hle     <= desc_bytes[2][7];
                         end
                     end
                     else if (a >= OFF_MCU && a < OFF_SPRITES) begin
@@ -215,15 +217,17 @@ always @(posedge clk) begin
                             desc_r.has_adc     <= desc_bytes[0][3];
                             desc_r.has_track   <= desc_bytes[0][4];
                             desc_r.has_ppi     <= desc_bytes[0][5];
-                            desc_r.has_dsp_hle <= desc_bytes[0][6];
-                            desc_r.has_cd_stub <= desc_bytes[0][7];
                             desc_r.dual_pcb    <= desc_bytes[1][0];
                             desc_r.prot_sel    <= desc_bytes[2][6:0];
                             desc_r.sprite_bank_valid <= desc_bytes[3][7];
                             desc_r.sprite_bank_mask  <= desc_bytes[3][1:0];
                             desc_r.flip_y            <= desc_bytes[1][1];
                             desc_r.gun_aim           <= desc_bytes[1][2];
-                            desc_r.coin_swap         <= desc_bytes[1][3];
+                            desc_r.analog_profile    <= desc_bytes[1][5:4];
+                            desc_r.dual_comm_ff      <= desc_bytes[1][6];
+                            desc_r.gear_toggle       <= desc_bytes[1][7];
+                            desc_r.digital_profile   <= desc_bytes[4][1:0];
+                            desc_r.comm_link_hle     <= desc_bytes[2][7];
                         end
                     end
                     else if (a >= OFF_MCU && a < OFF_SPRITES) begin

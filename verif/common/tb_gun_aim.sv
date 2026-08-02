@@ -1,5 +1,5 @@
 //============================================================================
-// Directed test: Alien 3 modern analog-stick aim conditioning
+// Directed test: positional-gun analog-stick aim conditioning
 //   * radial inner deadzone and diagonal direction preservation
 //   * precision-biased monotonic response curve
 //   * 95%-throw outer saturation across the complete 8-bit cabinet ADC range

@@ -27,19 +27,27 @@ package s32_pkg;
         logic       has_adc;       // MSM6253 analog board
         logic       has_track;     // uPD4701 trackball board
         logic       has_ppi;       // i8255 4/6-player board
-        logic       has_dsp_hle;   // arescue math DSP HLE
-        logic       has_cd_stub;   // kokoroj SCSI/CXD stubs
-        logic       dual_pcb;      // arescue/f1en bridge responder
+        logic       dual_pcb;      // F1 Exhaust Note bridge responder
         logic [6:0] prot_sel;      // HLE protection select (PROT_*)
+        logic       comm_link_hle; // descriptor-selected EPR-14084 link HLE
         // Sprite ROMs contain one, two, or four 4 MiB banks.  MAME mirrors
         // the controller's 2-bit bank selection modulo that physical count.
         // Old all-zero descriptors have no valid field and retain four banks.
         logic       sprite_bank_valid;
         logic [1:0] sprite_bank_mask; // 0/1/3 for 4/8/16 MiB respectively
         logic       flip_y;         // cabinet/game orientation (holo)
-        logic       gun_aim;        // positional-gun analog default-invert (alien3/jpark)
-        logic       coin_swap;      // Alien3 swaps Coin1/Coin2 service bits
+        logic       gun_aim;        // positional-gun analog default-invert (jpark)
+        logic [1:0] analog_profile; // ADC source/default layout (ANALOG_*)
+        logic       dual_comm_ff;   // dual-PCB comm RAM reset state (F1 Exhaust Note)
+        logic       gear_toggle;    // edge-latched two-state cabinet gear input
+        logic [1:0] digital_profile; // player-port layout (DIGITAL_*)
     } board_desc_t;
+
+    localparam [1:0] ANALOG_CENTERED = 2'd0; // sticks/guns: all channels rest at 80
+    localparam [1:0] ANALOG_DRIVING  = 2'd1; // wheel=80, gas/brake=00
+    localparam [1:0] ANALOG_ALL_FF   = 2'd2; // unknown pull-ups (dbzvrvs)
+    localparam [1:0] DIGITAL_GENERIC = 2'd0;
+    localparam [1:0] DIGITAL_RADM    = 2'd1; // bit0 unused, Light/Wiper on 1/2
 
     // HLE protection selects (prot_sel)
     localparam [6:0] PROT_NONE     = 7'd0;

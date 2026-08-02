@@ -402,7 +402,8 @@ try {
 
     Write-Tier 1 "full-core lint compile (universal + System32-only profile)"
     Run-HdlTest "t01_lint_universal" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE UNIVERSAL LINT PASS" @("SIMULATION")
-    Run-HdlTest "t01_lint_holo" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE HOLO PROFILE LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_HOLO_ONLY")
+    Run-HdlTest "t01_lint_standard" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE STANDARD PROFILE LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_PROFILE_STANDARD")
+    Run-HdlTest "t01_lint_v25" "tb_core_lint" ($FullCoreSources + "verif/common/tb_core_lint.sv") "CORE V25 PROFILE LINT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_PROFILE_V25")
     Write-RunLine "CORE BUILD PROFILES: PASS"
 
     Write-Tier 2 "V60 smoke test"
@@ -411,9 +412,15 @@ try {
     Write-Tier 3 "V60 directed suite"
     Run-HdlTest "t03_v60_directed" "tb_v60_directed" ($V60Sources + "verif/v60/tb_v60_directed.sv") "DIRECTED PASS"
 
+    Write-Tier 3 "Sonic name-table decompressor primitive"
+    Run-HdlTest "t03b_v60_sonic_decompress" "tb_v60_sonic_decompress" ($V60Sources + "verif/v60/tb_v60_sonic_decompress.sv") "SONIC DECOMPRESS PASS"
+
+    Write-Tier 3 "Sonic MOVCFU/RSR/dispatcher continuation"
+    Run-HdlTest "t03c_v60_sonic_dispatch" "tb_v60_sonic_dispatch" ($V60Sources + "verif/v60/tb_v60_sonic_dispatch.sv") "SONIC DISPATCH PASS"
+
     Write-Tier 4 "full-core integration boot (universal + System32-only profile)"
     Run-HdlTest "t04_boot_universal" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION") @("-novopt")
-    Run-HdlTest "t04_boot_holo" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_HOLO_ONLY") @("-novopt")
+    Run-HdlTest "t04_boot_standard" "tb_core_boot" ($FullCoreSources + "verif/common/tb_core_boot.sv") "CORE BOOT PASS" @("SIMULATION", "S32_SYSTEM32_ONLY", "S32_PROFILE_STANDARD") @("-novopt")
     Write-RunLine "CORE BUILD-PROFILE BOOTS: PASS"
 
     Write-Tier 5 "V60 differential co-sim vs independent reference ($Seeds seeds)"
@@ -447,13 +454,13 @@ try {
     $arabMraOutput = @(Invoke-NativeCapture $PythonExe @("verif/check_arabianfight_release.py") "Arabian Fight release MRA check")
     Assert-Marker $arabMraOutput "ARABIAN FIGHT RELEASE PASS" "Arabian Fight release MRA check"
     Run-HdlTest "t08_ga2_path" "tb_core_ga2path" ($FullCoreSources + "verif/common/tb_core_ga2path.sv") "GA2 PATH PASS" @(
-        "SIMULATION", "S32_GOLDENAXE_ONLY", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY",
+        "SIMULATION", "S32_SYSTEM32_ONLY", "S32_PROFILE_V25",
         "S32_V60_NO_FP", "S32_RELEASE_MINIMAL"
     ) @("-novopt")
     Run-HdlTest "t08_ga_rom_cache" "tb_ga_rom_cache" @(
         "rtl/s32_pkg.sv", "rtl/s32_core.sv", "verif/common/tb_ga_rom_cache.sv"
     ) "PASS: Golden Axe ROM cache directed/reference tests passed" @(
-        "SIMULATION", "S32_GOLDENAXE_ONLY", "S32_SYSTEM32_ONLY", "S32_GA2_ONLY",
+        "SIMULATION", "S32_SYSTEM32_ONLY", "S32_PROFILE_V25",
         "S32_V60_NO_FP", "S32_RELEASE_MINIMAL"
     )
 
@@ -492,9 +499,10 @@ try {
     Run-HdlTest "t17_rom_loader" "tb_rom_loader" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader.sv") "ROM LOADER PASS"
     Run-HdlTest "t17_rom_loader_wide" "tb_rom_loader_wide" @("rtl/s32_pkg.sv", "rtl/mem/s32_rom_loader.sv", "verif/common/tb_rom_loader_wide.sv") "WIDE ROM LOADER PASS"
 
-    Write-Tier 18 "EEPROM persistence + radial analog-gun response"
+    Write-Tier 18 "EEPROM persistence + radial analog-gun response + MAME 8255 direction/latch contract"
     Run-HdlTest "t18_eeprom" "tb_eeprom_nvram" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_eeprom_nvram.sv") "EEPROM NVRAM PASS"
     Run-HdlTest "t18_gun_aim" "tb_gun_aim" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_gun_aim.sv") "GUN AIM PASS"
+    Run-HdlTest "t18_i8255" "tb_i8255" @("rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_i8255.sv") "I8255 MAME PASS"
 
     Write-Tier 19 "V60 20-byte F1 / high fetch-buffer offset regression"
     Run-HdlTest "t19_v60_long_ea" "tb_v60_long_ea" ($V60Sources + "verif/v60/tb_v60_long_ea.sv") "LONG EA PASS"
@@ -548,7 +556,7 @@ try {
     ) "PASS: audio mixer differential checks=20012"
     Run-HdlTest "t29_audio_mix_diff_ga" "tb_audio_mix_diff" @(
         "rtl/audio/s32_audio_mix.sv", "verif/common/tb_audio_mix_diff.sv"
-    ) "PASS: audio mixer differential checks=20012" @("S32_GOLDENAXE_ONLY")
+    ) "PASS: audio mixer differential checks=20012" @("S32_SYSTEM32_ONLY")
 
     Write-Tier 30 "sound map/T80 boot + production JT12 MLAB-shift reset"
     Run-HdlTest "t30_soundsys_bus" "tb_soundsys_bus" @(
@@ -577,18 +585,33 @@ try {
     Write-Tier 34 "System32 palette/mixer/I-O/V25 mirrored address decode"
     Run-HdlTest "t34_core_map" "tb_core_map_decode" ($FullCoreSources + "verif/common/tb_core_map_decode.sv") "CORE MAP DECODE PASS" @("SIMULATION")
 
-    Write-Tier 35 "real encrypted GA2 V25 firmware and exact 10 MHz CE cadence"
+    Write-Tier 35 "MAME-backed uPD4701 trackball origin and per-byte latch semantics"
+    Run-HdlTest "t35_upd4701_mame" "tb_upd4701_mame" @(
+        "rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_upd4701_mame.sv"
+    ) "UPD4701 MAME PASS"
+
+    Write-Tier 36 "MAME-backed Burning Rival protection contract"
+    Run-HdlTest "t36_brival_protection" "tb_brival_protection" @(
+        "rtl/s32_pkg.sv", "rtl/prot/s32_prot.sv", "verif/common/tb_brival_protection.sv"
+    ) "BRIVAL PROTECTION PASS"
+
+    Write-Tier 37 "MAME-backed Rad Mobile MSM6253 channel and MSB-first read semantics"
+    Run-HdlTest "t37_radm_msm6253" "tb_radm_msm6253" @(
+        "rtl/s32_pkg.sv", "rtl/io/s32_io.sv", "verif/common/tb_radm_msm6253.sv"
+    ) "RAD MOBILE MSM6253 PASS"
+
+    Write-Tier 38 "real encrypted GA2 V25 firmware and exact 10 MHz CE cadence"
     $v25Output = @(& (Join-Path $Root "verif/v25/run_v25_firmware.ps1") 2>&1)
     foreach ($line in $v25Output) { Write-RunLine $line }
     Assert-Marker $v25Output "V25_FIRMWARE RUNNER: PASS" "real V25 firmware"
     Assert-Marker $v25Output "V25_FIRMWARE CE: PASS" "V25 clock enable cadence"
 
-    Write-Tier 36 "real V25 INTEGRATION in s32_core (p5 program fetch + mailbox round-trip)"
+    Write-Tier 39 "real V25 INTEGRATION in s32_core (p5 program fetch + mailbox round-trip)"
     $v25iOutput = @(& (Join-Path $Root "verif/v25/run_v25_integration.ps1") 2>&1)
     foreach ($line in $v25iOutput) { Write-RunLine $line }
     Assert-Marker $v25iOutput "V25_INTEGRATION RUNNER: PASS" "real V25 integration"
 
-    Write-Tier 37 "MCU download integrity: DQM byte-lane writes + HPS ioctl pacing end-to-end"
+    Write-Tier 40 "MCU download integrity: DQM byte-lane writes + HPS ioctl pacing end-to-end"
     Run-HdlTest "t37_sdram_v25load" "tb_sdram_v25load" @(
         "rtl/mem/sdram.sv", "verif/common/tb_sdram_v25load.sv"
     ) "SDRAM V25LOAD PASS"
@@ -597,12 +620,12 @@ try {
         "verif/common/tb_loader_hpspace.sv"
     ) "LOADER HPSPACE PASS"
 
-    Write-Tier 38 "full-core real V25 + PRODUCTION sdram.sv (request-drop protocol regression)"
+    Write-Tier 41 "full-core real V25 + PRODUCTION sdram.sv (request-drop protocol regression)"
     $v25sOutput = @(& (Join-Path $Root "verif/v25/run_v25_sdram.ps1") 2>&1)
     foreach ($line in $v25sOutput) { Write-RunLine $line }
     Assert-Marker $v25sOutput "V25_SDRAM RUNNER: PASS" "real V25 + production SDRAM integration"
 
-    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (38/38 tiers)"
+    Write-RunLine "`nSYSTEM 32 REGRESSION: PASS (41/41 tiers)"
     Write-RunLine "Detailed log: $LogPath"
     $Completed = $true
 }

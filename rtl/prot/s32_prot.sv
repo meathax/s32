@@ -75,7 +75,8 @@ always @(posedge clk) begin
                         ps <= SON_WR0;
                     end
                     else begin
-                        // level = ROM[0x263A + cleared*2 - 2] | ROM[.. -1]<<8
+                        // level = ROM[base + cleared*2 - 2] << 8 |
+                        //         ROM[base + cleared*2 - 1]
                         rom_req  <= 1'b1;
                         rom_addr <= 24'h00263A + {cpu_wdata[14:0], 1'b0} - 24'd2;
                         ps <= SON_RD0;
@@ -123,7 +124,10 @@ always @(posedge clk) begin
         // ---- sonic ----
         SON_RD0: if (rom_ack) begin
             rom_req <= 0;
-            level <= rom_data;             // little-endian word = {hi,lo} layout per MAME byte reads
+            // SDRAM packs the lower-address ROM byte in rom_data[7:0].
+            // MAME's protection builds the game value as ROM[a] << 8 |
+            // ROM[a+1], so swap the little-endian storage word here.
+            level <= {rom_data[7:0], rom_data[15:8]};
             ps <= SON_WR0;
         end
         SON_WR0: begin
@@ -266,7 +270,7 @@ endfunction
 
 reg [2:0] slot;
 reg [3:0] cnt;
-typedef enum logic [1:0] { B_IDLE, B_RD, B_WR } bst_t;
+typedef enum logic [2:0] { B_IDLE, B_RD, B_GAP, B_WR } bst_t;
 bst_t bs;
 
 always @(posedge clk) begin
@@ -277,7 +281,7 @@ always @(posedge clk) begin
         // byte reads fall through to work RAM, so only trap full-word accesses
         // (audit R20 IO-9).
         trap_active <= enable && cpu_rd && (cpu_be == 2'b11) &&
-                       (cpu_addr[23:4] == (24'h20BA00 >> 4)) &&
+                       (cpu_addr[23:4] == 20'h20BA0) &&
                        (cpu_addr[3:1] == 3'd0 || cpu_addr[3:1] == 3'd2 || cpu_addr[3:1] == 3'd3);
         trap_data <= 16'h0000;
 
@@ -294,58 +298,29 @@ always @(posedge clk) begin
             rom_req <= 0;
             pram_we <= 1'b1;
             pram_addr <= {slot, 4'b0} + {3'b0, cnt};
-            pram_wdata <= rom_data[7:0];
+            // The SDRAM protection port is word addressed, with the lower
+            // ROM byte in D[7:0] and the following byte in D[15:8]. MAME's
+            // memcpy() copies consecutive bytes, so odd source addresses
+            // must select the upper lane of the fetched word.
+            pram_wdata <= rom_addr[0] ? rom_data[15:8] : rom_data[7:0];
             // bytes fetched one at a time (low byte of word reads)
             if (cnt == 4'd15) bs <= B_IDLE;
             else begin
                 cnt <= cnt + 1'd1;
-                rom_req <= 1'b1;
-                rom_addr <= slot_rom(slot) + {19'b0, cnt} + 24'd1;
-                bs <= B_RD;
+                // SDRAM accepts a new transaction only on a request rising
+                // edge. Drop the request for a complete clock before issuing
+                // the next byte; assigning 0 and 1 in the same clock leaves
+                // a held level and stalls after the first response.
+                bs <= B_GAP;
             end
+        end
+        B_GAP: begin
+            rom_req <= 1'b1;
+            rom_addr <= slot_rom(slot) + {19'b0, cnt};
+            bs <= B_RD;
         end
         default: bs <= B_IDLE;
         endcase
-    end
-end
-
-endmodule
-
-// ---------------------------------------------------------------------------
-//  s32_arescue_dsp: HLE of the uPD77P25 command interface (§8.6)
-//  Registers at 0xA00000-0xA00007 (words 0-3); read of word 2 (offset 4)
-//  triggers command evaluation per MAME arescue_dsp_r.
-// ---------------------------------------------------------------------------
-module s32_arescue_dsp (
-    input             clk,
-    input             rst,
-    input             enable,
-
-    input             cs,           // 0xA00000-0xA00007
-    input             we,
-    input       [1:0] addr,         // word offset
-    input      [15:0] wdata,
-    output reg [15:0] rdata
-);
-
-reg [15:0] io [0:3];
-
-always @(posedge clk) begin
-    if (rst) begin
-        io[0] <= 0; io[1] <= 0; io[2] <= 0; io[3] <= 0;
-    end
-    else if (enable && cs) begin
-        if (we) io[addr] <= wdata;
-        else begin
-            if (addr == 2'd2) begin
-                case (io[0])
-                    16'h0003: begin io[0] <= 16'h8000; io[1] <= 16'h0001; end
-                    16'h0006: io[0] <= {io[1][13:0], 2'b00};   // 4 * operand
-                    default: ;
-                endcase
-            end
-            rdata <= io[addr];
-        end
     end
 end
 
@@ -357,32 +332,65 @@ endmodule
 // ---------------------------------------------------------------------------
 module s32_dualpcb (
     input             clk,
+    input             rst,
     input             enable,
+    input             init_ff,
 
     input             cs_ram,       // 0x810000-0x810FFF
     input             cs_id,        // 0x818000-0x818003
     input             we,
+    input      [1:0]  be,
     input      [11:1] addr,
     input      [15:0] wdata,
     output reg [15:0] rdata
 );
 
+// Keep the communication store reset-free so Quartus can infer M10K RAM.
+// The old implementation reset every 2,048 x 16-bit word on every reset
+// clock, which forced the array toward registers and cost roughly 32K bits of
+// fabric.  A written bitmap lazily overlays the board-specific reset value;
+// the externally visible contents and synchronous read/write timing are the
+// same, while untouched words do not need to be physically cleared.
 reg [15:0] comm [0:2047];
-
-// audit R20 IO-10(b): dual-PCB comms RAM powers up 0xFF (f1en install path memsets it)
-integer __comm_init;
-initial begin
-    for (__comm_init = 0; __comm_init < 2048; __comm_init = __comm_init + 1)
-        comm[__comm_init] = 16'hFFFF;
-end
-
+reg [2047:0] comm_written;
+reg [15:0] comm_default;
 always @(posedge clk) begin
-    if (cs_ram) begin
-        if (we) comm[addr] <= wdata;
-        rdata <= comm[addr];
+    if (rst) begin
+        // F1 Exhaust Note explicitly memsets the bridge RAM to 0xffff.
+        // The descriptor selects that board-specific power-up contract while
+        // reset is still held during the final loader commit.
+        comm_default <= init_ff ? 16'hffff : 16'h0000;
+        comm_written <= 2048'b0;
+        rdata <= init_ff ? 16'hffff : 16'h0000;
     end
-    else if (cs_id) begin
-        // main-board identity (dual_pcb_mainsub): partner-present code.
+    else if (cs_ram && enable) begin
+        if (we) begin
+            // MAME's dual_pcb_comms_w uses COMBINE_DATA: a byte write
+            // updates only the selected lane and preserves the other lane.
+            // Partial writes preserve the unselected lane from the board's
+            // reset value.
+            if (be != 2'b00) begin
+                if (!comm_written[addr]) begin
+                    // A lazily reset word has no physical array contents
+                    // yet. Seed the unselected lane from the board default
+                    // before applying this first partial write.
+                    case (be)
+                        2'b01: comm[addr] <= {comm_default[15:8], wdata[7:0]};
+                        2'b10: comm[addr] <= {wdata[15:8], comm_default[7:0]};
+                        default: comm[addr] <= wdata;
+                    endcase
+                end
+                else begin
+                    if (be[0]) comm[addr][7:0]  <= wdata[7:0];
+                    if (be[1]) comm[addr][15:8] <= wdata[15:8];
+                end
+                comm_written[addr] <= 1'b1;
+            end
+        end
+        rdata <= comm_written[addr] ? comm[addr] : comm_default;
+    end
+    else if (cs_id && enable) begin
+        // Main-board identity (dual_pcb_mainsub).
         rdata <= 16'h0000;
     end
 end

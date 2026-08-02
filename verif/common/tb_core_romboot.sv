@@ -18,8 +18,6 @@
 //    +P1LEN<n>=<n>   event length in frames, default 1
 //    +P1MASK<n>=<h>  P1A bits to pull low: L/R/U/D=80/40/20/10,
 //                    B3/B2/B1 (Magic/Jump/Attack)=04/02/01
-//    +ALIEN3UIAT=<f>  first Alien 3 gameplay HUD/sight regression field
-//    +ALIEN3UIN=<n>   consecutive UI fields (default 8; must all be solid)
 //    +ARABPERFAT=<f>  first Arabian Fight frame-boundary performance sample
 //    +ARABPERFN=<n>   consecutive samples; each must be at FE4244/FE4248
 //    +ARABHEAVYAT=<f> first field in the heavy-sprite recurrence window
@@ -107,11 +105,9 @@ initial begin
     board.has_adc     = b0[3];
     board.has_track   = b0[4];
     board.has_ppi     = b0[5];
-    board.has_dsp_hle = b0[6];
     board.dual_pcb    = b1[0];
     board.flip_y      = b1[1];
     board.gun_aim     = b1[2];
-    board.coin_swap   = b1[3];
     board.prot_sel    = b2[6:0];
     board.sprite_bank_valid = 1'b1;
     board.sprite_bank_mask  = sbm[1:0];
@@ -338,11 +334,10 @@ end
 
 // Confirm that the CPU-side I/O transaction returned each active-low pulse.
 // P1A is C00000; MAME system32_generic puts start on port E bit 4 and P1 coin
-// on bit 2. Alien 3's cabinet wiring swaps Coin1/Coin2, putting P1 coin on bit 3.
+// on bit 2.
 integer p1a_rd_cnt = 0, coin_rd_cnt = 0, start_rd_cnt = 0;
 integer p1a_active_samples = 0;
 integer coin_active_samples = 0, start_active_samples = 0;
-wire [2:0] p1_coin_bit = board.coin_swap ? 3'd3 : 3'd2;
 always @(posedge clk_sys) begin
     if (core.m_req && core.m_ack && !core.m_we && !core.ack_d) begin
         if ({core.A[23:1], 1'b0} == 24'hc00000) begin
@@ -356,7 +351,7 @@ always @(posedge clk_sys) begin
         if ({core.A[23:1], 1'b0} == 24'hc00008) begin
             coin_rd_cnt = coin_rd_cnt + 1;
             start_rd_cnt = start_rd_cnt + 1;
-            if (!core.m_rdata[p1_coin_bit]) begin
+            if (!core.m_rdata[2]) begin
                 coin_active_samples = coin_active_samples + 1;
                 $display("[input-sampled] frame %0d: P1 coin read=%04x pc=%08x",
                     cur_frame, core.m_rdata, core.v60.dbg_pc);
@@ -556,23 +551,11 @@ end
 // active-video pixels of those frames as PPM files (dump<frame>.ppm in cwd)
 integer dump_at, dump_n, dump_fd = 0, dump_x, dump_y, dump_every;
 reg dumping = 0;
-// Alien 3 gameplay probe. Count live sprite pixels in the two static UI areas
-// implicated by the hardware report: P1 LIFE/POWER and the centred gun sight.
-// This is deliberately based on the sprite scanout, not PPM output; PPM capture
-// crosses the pixel/mixer pipeline and is unsuitable as a field-parity oracle.
-integer alien3_ui_at, alien3_ui_n;
-integer alien3_hud_opq = 0, alien3_sight_opq = 0;
-integer alien3_sight_green = 0;
-integer alien3_ui_samples = 0, alien3_hud_lows = 0, alien3_sight_lows = 0;
-integer alien3_hud_lows_next, alien3_sight_lows_next;
-reg alien3_ui_done = 0;
 initial begin
     if (!$value$plusargs("DUMPAT=%d", dump_at)) dump_at = -1;
     if (!$value$plusargs("DUMPN=%d", dump_n)) dump_n = 1;
     // +DUMPEVERY=<n>: dump every n-th frame (stride) — maps the attract cycle
     if (!$value$plusargs("DUMPEVERY=%d", dump_every)) dump_every = 1;
-    if (!$value$plusargs("ALIEN3UIAT=%d", alien3_ui_at)) alien3_ui_at = -1;
-    if (!$value$plusargs("ALIEN3UIN=%d", alien3_ui_n)) alien3_ui_n = 8;
 end
 
 // +DUMPSPRAT=<frame>: dump the V60-written sprite command RAM (0x400000, the
@@ -736,31 +719,6 @@ always @(posedge clk_sys) begin
     vb_d <= vb;
     if (vb & ~vb_d) begin              // end of visible field
         cur_frame = cur_frame + 1;
-        if (alien3_ui_at >= 0 && cur_frame - 1 >= alien3_ui_at &&
-            cur_frame - 1 < alien3_ui_at + alien3_ui_n) begin
-            alien3_hud_lows_next = alien3_hud_lows + (alien3_hud_opq < 1000);
-            alien3_sight_lows_next = alien3_sight_lows + (alien3_sight_green < 150);
-            alien3_ui_samples = alien3_ui_samples + 1;
-            alien3_hud_lows = alien3_hud_lows_next;
-            alien3_sight_lows = alien3_sight_lows_next;
-            $display("[alien3-ui] f=%0d hud_opq=%0d sight_green=%0d sight_opq=%0d scan=%0d disp=%0d ctl3=%02x count=%0d rs=%0d work=%0d ready=%0d/%0d",
-                cur_frame - 1, alien3_hud_opq, alien3_sight_green, alien3_sight_opq,
-                core.sprite.scan_buf, core.sprite.disp_buf, core.sprite.ctl[3],
-                core.sprite.render_count, core.sprite.rs, core.sprite.work_buf,
-                core.sprite.ready_valid, core.sprite.ready_buf);
-            if (cur_frame - 1 == alien3_ui_at + alien3_ui_n - 1) begin
-                alien3_ui_done = 1'b1;
-                if (alien3_hud_lows_next != 0 || alien3_sight_lows_next != 0)
-                    $fatal(1, "ALIEN3 UI FLICKER FAIL: hud_low=%0d sight_low=%0d over %0d fields",
-                        alien3_hud_lows_next, alien3_sight_lows_next, alien3_ui_samples);
-                else
-                    $display("ALIEN3 UI FLICKER PASS: HUD and sight solid over %0d fields",
-                        alien3_ui_samples);
-            end
-        end
-        alien3_hud_opq = 0;
-        alien3_sight_opq = 0;
-        alien3_sight_green = 0;
         // +OVLOG=1: per-frame tilemap line-overrun + sprite-fb underrun telemetry
         if (ovlog) $display("[ov] f=%0d tile_overrun sticky=%b cnt=%0d  fb_underrun sticky=%b cnt=%0d",
             cur_frame, core.tm_line_overrun_sticky, core.tm_line_overrun_count,
@@ -825,20 +783,6 @@ always @(posedge clk_sys) begin
             dump_x = dump_x + 1;
         end
     end
-    if (ce_pix && !hb && !vb && core.mix0.spr_opaque) begin
-        if (core.hcnt >= 9'd8 && core.hcnt < 9'd145 &&
-            core.vcnt >= 9'd181 && core.vcnt < 9'd224)
-            alien3_hud_opq = alien3_hud_opq + 1;
-        if (core.hcnt >= 9'd145 && core.hcnt < 9'd177 &&
-            core.vcnt >= 9'd90 && core.vcnt < 9'd122)
-            alien3_sight_opq = alien3_sight_opq + 1;
-    end
-    // These two palette outputs are exclusive to the green sight in the
-    // deterministic centred-aim frame. Count globally because rgb_a exits the
-    // pipelined mixer several pixel clocks behind hcnt/vcnt.
-    if (ce_pix && !hb && !vb &&
-        (rgb_a == 24'h20f860 || rgb_a == 24'h00a000))
-        alien3_sight_green = alien3_sight_green + 1;
 end
 
 // instruction trace window (+TRLO/+TRHI plusargs): pc, opcode, key regs
@@ -1490,9 +1434,6 @@ initial begin
         $fatal(1, "ROMBOOT P1 start was never returned on SERVICE12 bit 4");
     if (p1_event_count > 0 && p1a_active_samples == 0)
         $fatal(1, "ROMBOOT P1 digital event was never returned on P1A");
-    if (alien3_ui_at >= 0 && !alien3_ui_done)
-        $fatal(1, "ALIEN3 UI window was not completed: at=%0d fields=%0d samples=%0d",
-            alien3_ui_at, alien3_ui_n, alien3_ui_samples);
     if (arab_perf_at >= 0 && !arab_perf_done)
         $fatal(1, "ARABIAN FIGHT PERF window was not completed: at=%0d frames=%0d samples=%0d",
             arab_perf_at, arab_perf_n, arab_perf_samples);

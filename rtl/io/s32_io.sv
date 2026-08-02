@@ -385,7 +385,7 @@ end
 endmodule
 
 // ---------------------------------------------------------------------------
-// Low-resource analog-stick conditioner for Alien 3: The Gun. MiSTer supplies
+// Low-resource analog-stick conditioner for positional-gun inputs. MiSTer supplies
 // signed two's-complement axes around zero;
 // the System 32 ADC expects offset-binary channels around 8'h80.
 //
@@ -396,7 +396,7 @@ endmodule
 //   * the live band uses a 62.5% linear / 37.5% quadratic response, giving
 //     precise small corrections without making large sweeps sluggish.
 //
-// Alien 3's four ADC ports are defined with 50% sensitivity.  The positional
+// The four ADC ports are defined with 50% sensitivity.  The positional
 // cabinet guns therefore occupy only +/-64 codes around 8'h80.  Feeding the
 // full 0x00..0xff span makes the game hit a screen edge at half stick travel.
 //
@@ -739,28 +739,38 @@ endmodule
 // ---------------------------------------------------------------------------
 module s32_msm6253 (
     input             clk,
+    input             rst,
     input             cs,
     input             we,
     input       [1:0] addr,
-    output reg        dout_bit,    // d7_r: serial-ish MSB-first read per MAME
+    output            dout_bit,    // d7_r: current MSB, then shift per read
     input       [7:0] an0, an1, an2, an3
 );
 
 reg [7:0] shifter;
 reg       rd_d;                  // read-strobe history: shift once per read (audit R20 IO-2)
+// MAME's d7_r returns shift_register[7] before applying the side-effecting
+// left shift. The V60 read mux samples this signal on the request edge, so a
+// registered output would be one transaction late (and undefined initially).
+assign dout_bit = shifter[7];
 always @(posedge clk) begin
-    rd_d <= cs && !we;
-    if (cs && we) begin
+    if (rst) begin
+        shifter <= 8'h00;
+        rd_d <= 1'b0;
+    end
+    else begin
+      rd_d <= cs && !we;
+      if (cs && we) begin
         case (addr)
             2'd0: shifter <= an0;
             2'd1: shifter <= an1;
             2'd2: shifter <= an2;
             2'd3: shifter <= an3;
         endcase
-    end
-    else if (cs && !we && !rd_d) begin   // rising edge only: MAME d7_r = one bit per read
-        dout_bit <= shifter[7];
+      end
+      else if (cs && !we && !rd_d) begin // rising edge only: one shift per read
         shifter  <= {shifter[6:0], 1'b0};
+      end
     end
 end
 
@@ -783,26 +793,43 @@ module s32_upd4701 (
     input       [7:0] buttons
 );
 
-reg signed [11:0] cx, cy;
+// MAME's upd4701 keeps a physical 12-bit counter and a reset origin.  A
+// reset_xy write captures the current position; it does not clear motion.
+// Each byte read then latches the current relative position independently.
+reg [11:0] cx, cy;
+reg [11:0] startx, starty;
 reg [11:0] lx, ly;
+wire [11:0] xrel = cx - startx;
+wire [11:0] yrel = cy - starty;
 
 always @(posedge clk) begin
-    if (rst) begin cx <= 0; cy <= 0; end
+    if (rst) begin
+        cx <= 0;
+        cy <= 0;
+        startx <= 0;
+        starty <= 0;
+        lx <= 0;
+        ly <= 0;
+        rdata <= 0;
+    end
     else begin
         if (delta_valid) begin
             cx <= cx + {{3{dx[8]}}, dx};
             cy <= cy + {{3{dy[8]}}, dy};
         end
-        if (cs && we) begin cx <= 0; cy <= 0; end
+        if (cs && we) begin
+            startx <= cx;
+            starty <= cy;
+        end
         if (cs && !we) begin
             case (addr)
-                2'd0: begin lx <= cx; rdata <= cx[7:0]; end
+                2'd0: begin lx <= xrel; rdata <= xrel[7:0]; end
                 // XH/YH high nibble = uPD4701 switch inputs; segas32 leaves them
                 // unconnected (MAME sets no switch callbacks) so they read idle,
                 // not the live joystick buttons. audit R20 IO-14
-                2'd1: rdata <= {4'h0, lx[11:8]};
-                2'd2: begin ly <= cy; rdata <= cy[7:0]; end
-                2'd3: rdata <= {4'h0, ly[11:8]};
+                2'd1: begin lx <= xrel; rdata <= {4'h0, xrel[11:8]}; end
+                2'd2: begin ly <= yrel; rdata <= yrel[7:0]; end
+                2'd3: begin ly <= yrel; rdata <= {4'h0, yrel[11:8]}; end
             endcase
         end
     end
@@ -826,13 +853,49 @@ module s32_i8255 (
 // device_reset(); a mode-set write (port 3, bit7=1) latches it and a
 // control-port read returns it with bit7 set. audit R20 IO-16
 reg [7:0] ctrl = 8'h9b;
+reg [7:0] pa_out = 8'h00;
+reg [7:0] pb_out = 8'h00;
+initial pc_out = 8'h00;
+
+// 8255 reads are direction-sensitive.  MAME's i8255 implementation returns
+// the external pin value for input bits and the output latch for output bits;
+// returning pc_in unconditionally made a mode-set write such as 0x93 observe
+// 0xff instead of the mixed Port-C value (upper output latch, lower input).
+wire [7:0] pa_read = ctrl[4] ? pa : pa_out;
+wire [7:0] pb_read = ctrl[1] ? pb : pb_out;
+wire [7:0] pc_read = {
+    ctrl[3] ? pc_in[7:4] : pc_out[7:4],
+    ctrl[0] ? pc_in[3:0] : pc_out[3:0]
+};
+
 always @(posedge clk) begin
-    if (cs && we && addr == 2'd2) pc_out <= wdata;
-    if (cs && we && addr == 2'd3 && wdata[7]) ctrl <= wdata;
+    if (cs && we) begin
+        case (addr)
+            2'd0: pa_out <= wdata;
+            2'd1: pb_out <= wdata;
+            2'd2: pc_out <= wdata;
+            2'd3: begin
+                if (wdata[7]) begin
+                    // MAME's set_mode() clears the output latches whenever a
+                    // new mode word is written.  This matters when a board
+                    // switches from the mixed 0x93 setup to all-output mode:
+                    // Port C must start at zero before subsequent BSR writes.
+                    ctrl <= wdata;
+                    pa_out <= 8'h00;
+                    pb_out <= 8'h00;
+                    pc_out <= 8'h00;
+                end
+                else if (wdata[3:1] != 3'b111)
+                    // Bit set/reset (BSR) mode addresses one Port-C bit.
+                    pc_out[wdata[3:1]] <= wdata[0];
+            end
+            default: ;
+        endcase
+    end
     case (addr)
-        2'd0: rdata <= pa;
-        2'd1: rdata <= pb;
-        2'd2: rdata <= pc_in;
+        2'd0: rdata <= pa_read;
+        2'd1: rdata <= pb_read;
+        2'd2: rdata <= pc_read;
         default: rdata <= ctrl;
     endcase
 end
@@ -877,7 +940,11 @@ reg [7:0] ctl [0:15];
 reg [4:0] pending;
 
 // Timers: t0 at MAIN/2 and t1 at the independent 50 MHz crystal /16.
-reg [23:0] t0_cnt, t1_cnt;
+// Timer 0's maximum 0xfff period is 0x17fe800 clk_sys ticks on System 32,
+// which needs 25 bits. A 24-bit counter wrapped that power-on/programming
+// value to 0x7fe800 and raised vector 3 roughly 21 frames too early.
+reg [24:0] t0_cnt;
+reg [23:0] t1_cnt;
 reg        t0_run, t1_run;
 reg [23:0] t1_acc;
 // round((3.125 MHz / 48.317307 MHz) * 2^24)
@@ -914,7 +981,7 @@ always @(posedge clk) begin
         pending <= 5'h1f;
         z80_doorbell <= 1'b0;
         t0_run <= 1'b0; t1_run <= 1'b0;
-        t0_cnt <= 24'd0; t1_cnt <= 24'd0;
+        t0_cnt <= 25'd0; t1_cnt <= 24'd0;
         t1_acc <= 24'd0;
         rdata <= 8'hff;
         // MAME/device-reset contract: the complete 16-byte register file
@@ -959,8 +1026,12 @@ always @(posedge clk) begin
                         // Multi 32 xtal=32MHz (16.0MHz source) -> N*0x1800*32.2159/32
                         // = N*6185, i.e. +N*41 (0.67% longer). audit R20 IO-5
                         // Store period-1: expiry is tested before the decrement.
-                        t0_cnt <= ({n, 11'b0} + {n, 12'b0}
-                                   + (is_multi32 ? ({n, 5'b0} + {n, 3'b0} + n) : 24'd0))
+                        t0_cnt <= ({2'b0, n, 11'b0} + {1'b0, n, 12'b0}
+                                   + (is_multi32
+                                      ? ({8'b0, n, 5'b0} +
+                                         {10'b0, n, 3'b0} +
+                                         {13'b0, n})
+                                      : 25'd0))
                                   - 1'b1;
                         t0_run <= 1'b1;
                     end
