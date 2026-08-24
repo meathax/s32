@@ -19,6 +19,8 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 - Alien3: The Gun and Jurassic Park positional-gun inputs through the generic
   MiSTer/JTFRAME-compatible analog, USB-relative-mouse, and d-pad paths;
   Jurassic Park additionally supports GunCon 2 over SNAC
+- SegaSonic the Hedgehog: relative three-player control-ball emulation from each
+  player’s left analog stick or d-pad; stick magnitude becomes running speed.
 
 ## PCB Accuracy
 
@@ -35,13 +37,14 @@ Open timing, analogue, PLD, and protection questions are tracked in the
 | Objects/frame memory | Schematics, sheets 3-4; Sega 315-5386 | Object processing and double-buffered framebuffer |
 | Colour/video output | Schematics, sheet 5; [315-5242 silicon evidence](https://github.com/furrtek/SiliconRE/tree/master/Sega/315-5242) | Palette, priority, shadow/highlight, and RGB output |
 | I/O, EEPROM, and sound | Schematics, sheets 6-8 | 315-5296 I/O, 93C46 storage, Z80, dual YM3438, and PCM |
+| SegaSonic control interface | [420-6095 service manual, pp. 5, 8, 11](https://arcade.segakore.fr/downloads/manuals/420-6095_segasonic_the_hedeghog_service_manual_1st.pdf): 837-8685 interface board, three XA/XB and YA/YB channels, and 1P/2P/3P control-ball test | Descriptor-gated relative counter adapter; exact gain/polarity remains a validation item |
 
 See [hardware references](docs/references.md) for the schematic provenance and
 detailed source record.
 
 ## Supported games
 
-The 32 tracked MRA variants use the same universal RBF:
+The 34 tracked MRA variants use the same universal RBF:
 
 - **Arabian Fight:** World, US, Japan
 - **Burning Rival:** World, Japan
@@ -56,8 +59,9 @@ The 32 tracked MRA variants use the same universal RBF:
 - **Spider-Man: The Videogame:** World, US Rev A, Japan
 - **Super Visual Football / Soccer:** European Rev A, US Rev A
 - **The J.League 1994:** Japan, Japan Rev A
+- **SegaSonic the Hedgehog:** Japan Rev C, Japan Prototype
 
-SegaSonic The Hedgehog, Hard Dunk, OutRunners, Stadium Cross, Title Fight, AS-1,
+Hard Dunk, OutRunners, Stadium Cross, Title Fight, AS-1,
 and other Multi 32 games remain outside the production profile. Alien3 retains
 its special SERVICE12 coin wiring; Jurassic Park keeps its one-button Shoot
 assignment and MRA compatibility patch. Neither game uses the retired
@@ -75,6 +79,7 @@ framebuffer/HUD blending workaround.
 | Sega 315-5296 I/O | JAMMA, DIP, service, coin | [`s32_io.sv`](rtl/io/s32_io.sv); schematic sheet 6 |
 | BR93C46 EEPROM | Serial NVRAM | `s32_io.sv`; MiSTer NVRAM upload/download |
 | MSM6253 ADC / 8255 PPI | Driving and parallel I/O, including Burning Rival's two-player six-button map | Descriptor-selected interfaces in `s32_io.sv`, `Arcade-SegaSystem32.sv`, and `s32_prot.sv` |
+| SegaSonic control-ball adapter | Three player channels, 12-bit relative X/Y counters, c00040/c00048/c00050-style byte reads and reset writes | [`s32_trackball_adapter`](rtl/io/s32_io.sv); service-manual control wiring and current MAME uPD4701A contract |
 | Generic MiSTer/JTFRAME positional-gun input | Signed analog reports, PS/2 mouse packets, d-pad events, native raster overlay | [`s32_lightgun.sv`](rtl/io/s32_lightgun.sv) and [`s32_lightgun_overlay.sv`](rtl/video/s32_lightgun_overlay.sv); descriptor-selected ADC channels and core-side Sinden border/crosshair controls |
 | Jurassic Park GunCon 2 | SNAC serial pins, normalized optical coordinates and buttons | [`s32_guncon_snac.sv`](rtl/io/s32_guncon_snac.sv); descriptor-gated Jurassic-only override |
 | NEC V25 protection | Program/cache and mailbox RAM | [`s32_v25_cpu.sv`](rtl/cpu/v25/s32_v25_cpu.sv); [s80x86 provenance](rtl/cpu/v25/s80x86/README.system32.md) |
@@ -88,7 +93,8 @@ framebuffer/HUD blending workaround.
 - **Meathax** - System 32 RTL, integration, MRA generation, verification, and packaging.
 - **Sega, Nemesis1207, and System 32 researchers** - original hardware and
   public schematic material recorded in [the source ledger](docs/references.md).
-- **MAME developers** - [System 32 behavioural reference](https://github.com/mamedev/mame).
+- **MAME developers** - [System 32 behavioural reference](https://github.com/mamedev/mame), including the uPD4701A trackball contract and SegaSonic ROM/input definitions.
+- **SegaSonic documentation** - [420-6095 service manual](https://arcade.segakore.fr/downloads/manuals/420-6095_segasonic_the_hedeghog_service_manual_1st.pdf) and [Sudden Desu’s debug analysis](https://sudden-desu.net/entry/segasonic-the-hedgehog-stage-select-and-debug-tools/), used for control wiring, stage order, and final protection behavior.
 - **Jamie Iles** - [s80x86](https://github.com/jamieiles/80x86), used by the
   V25 wrapper; pin and licence details are retained with the source.
 - **Jose Tejada Gomez / Jotego** - [JT12](https://github.com/jotego/jt12),
@@ -144,7 +150,7 @@ For automatic installation, add this to `/media/fat/downloader.ini` and run
 
 ```ini
 [meathax/meatcores]
-db_url = https://raw.githubusercontent.com/meathax/meatcores/db/db.json.zip
+db_url = https://raw.githubusercontent.com/meathax/meatcores/db/downloader_meathax_meatcores.zip
 ```
 
 ## Development

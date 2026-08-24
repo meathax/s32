@@ -9,6 +9,8 @@ module s32_driving_controls (
     input   [7:0] right_y,
     input         digital_accel,
     input         digital_brake,
+    input         digital_left,
+    input         digital_right,
     output  [7:0] wheel,
     output  [7:0] accel,
     output  [7:0] brake
@@ -31,18 +33,15 @@ module s32_driving_controls (
         end
     endfunction
 
-    wire [7:0] wheel_live = wheel_deadzone(left_x);
-
-    function automatic [8:0] wheel_distance(
-        input [7:0] a,
-        input [7:0] b
-    );
-        wheel_distance = (a >= b) ? ({1'b0, a} - {1'b0, b})
-                                  : ({1'b0, b} - {1'b0, a});
-    endfunction
+    wire [7:0] wheel_analog = wheel_deadzone(left_x);
+    // Rad Mobile's cabinet wheel is an absolute position. D-pad overrides
+    // are scoped to that profile; simultaneous directions return to center.
+    wire [7:0] wheel_digital = (digital_left && digital_right) ? 8'h80 :
+                                digital_left ? 8'h00 :
+                                digital_right ? 8'hff : wheel_analog;
+    wire [7:0] wheel_live = capture_wheel ? wheel_digital : wheel_analog;
 
     reg [7:0] wheel_latest;
-    reg [7:0] wheel_delivered;
     reg [7:0] wheel_pending;
     reg       wheel_pending_valid;
 
@@ -55,47 +54,34 @@ module s32_driving_controls (
         pedal = (magnitude >= 9'd127) ? 8'hff : {magnitude[6:0], 1'b0};
     endfunction
 
-    // Rad Mobile polls the MSM6253 more slowly than a USB stick can report a
-    // complete out-and-back motion. Retain the strongest excursion between
-    // channel-0 loads, then present the latest coordinate on the following
-    // load. Other driving sets keep the direct positional path.
+    // Rad Mobile polls MSM6253 more slowly than the controller reports new
+    // positions. Hold the newest unconsumed coordinate until channel 0 loads;
+    // a peak detector would discard a newer, less-extreme steering position.
     assign wheel = (capture_wheel && wheel_pending_valid)
                  ? wheel_pending : wheel_live;
 
     always @(posedge clk) begin
         if (rst) begin
             wheel_latest       <= 8'h80;
-            wheel_delivered    <= 8'h80;
             wheel_pending      <= 8'h80;
             wheel_pending_valid <= 1'b0;
         end
         else if (!capture_wheel) begin
             wheel_latest       <= wheel_live;
-            wheel_delivered    <= wheel_live;
             wheel_pending      <= wheel_live;
             wheel_pending_valid <= 1'b0;
         end
         else if (wheel_sample) begin
-            // The MSM6253 captures the pre-edge value of wheel. If the stick
-            // has already returned or moved elsewhere, retain that latest
-            // coordinate for the next conversion so steering cannot stick.
-            wheel_delivered <= wheel;
-            wheel_latest    <= wheel_live;
-            wheel_pending   <= wheel_live;
+            // MSM6253 captures pre-edge wheel. If the stick moved again,
+            // retain the current coordinate for the following conversion.
+            wheel_latest <= wheel_live;
+            wheel_pending <= wheel_live;
             wheel_pending_valid <= (wheel_live != wheel);
         end
         else if (wheel_live != wheel_latest) begin
             wheel_latest <= wheel_live;
-            if (!wheel_pending_valid) begin
-                if (wheel_live != wheel_delivered) begin
-                    wheel_pending       <= wheel_live;
-                    wheel_pending_valid <= 1'b1;
-                end
-            end
-            else if (wheel_distance(wheel_live, wheel_delivered) >=
-                     wheel_distance(wheel_pending, wheel_delivered)) begin
-                wheel_pending <= wheel_live;
-            end
+            wheel_pending <= wheel_live;
+            wheel_pending_valid <= 1'b1;
         end
     end
 

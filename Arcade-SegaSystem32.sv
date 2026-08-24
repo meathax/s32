@@ -117,6 +117,7 @@ wire [15:0] eep_rd_data;
 wire [31:0] joystick_0, joystick_1, joystick_2, joystick_3, joystick_4, joystick_5;
 wire [15:0] joystick_l_analog_0;
 wire [15:0] joystick_l_analog_1;
+wire [15:0] joystick_l_analog_2;
 wire [15:0] joystick_r_analog_0;
 wire        core_hs, core_vs;
 wire        mode_416_active;
@@ -350,7 +351,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
     .joystick_5(joystick_5),
     .joystick_l_analog_0(joystick_l_analog_0),
     .joystick_l_analog_1(joystick_l_analog_1),
-    .joystick_l_analog_2(),
+    .joystick_l_analog_2(joystick_l_analog_2),
     .joystick_r_analog_0(joystick_r_analog_0),
     .paddle_0(),
     .paddle_1(),
@@ -513,6 +514,8 @@ wire [3:0] lightgun_joy_p1 = {joystick_0[2], joystick_0[3],
                                joystick_0[1], joystick_0[0]};
 wire [3:0] lightgun_joy_p2 = {joystick_1[2], joystick_1[3],
                                joystick_1[1], joystick_1[0]};
+wire [3:0] lightgun_joy_p3 = {joystick_2[2], joystick_2[3],
+                               joystick_2[1], joystick_2[0]};
 wire [8:0] generic_gun_p1_x, generic_gun_p1_y;
 wire [8:0] generic_gun_p2_x, generic_gun_p2_y;
 wire [7:0] generic_adc_p1_x, generic_adc_p1_y;
@@ -760,15 +763,17 @@ s32_driving_controls driving_controls (
     .right_y(joystick_r_analog_0[15:8]),
     .digital_accel(joystick_0[4]),
     .digital_brake(joystick_0[5]),
+    .digital_left(joystick_0[1]),
+    .digital_right(joystick_0[0]),
     .wheel(driving_wheel),
     .accel(driving_accel),
     .brake(driving_brake)
 );
 // Driving cabinets wire the wheel, accelerator, and brake to the first three
 // MSM6253 channels. MiSTer's left-stick X is the wheel; right-stick up/down
-// are the analog pedals, with A/B as full-scale digital fallbacks. The wheel
-// follows the current deadzoned stick coordinate directly; retaining an IIR
-// history here made continuous sweeps pause at stale intermediate positions.
+// are the analog pedals, with A/B as full-scale digital fallbacks. Rad Mobile
+// also maps the MiSTer left/right D-pad bits to full-scale wheel endpoints;
+// the adapter holds the newest coordinate through the slower ADC poll.
 assign adc_ch[0] = active_board.gun_aim ? game_gun_p1_x : driving_wheel;
 assign adc_ch[1] = active_board.gun_aim ? game_gun_p1_y : driving_accel;
 assign adc_ch[2] = active_board.gun_aim ? game_gun_p2_x : driving_brake;
@@ -885,6 +890,11 @@ s32_core core (
     .in_p1b(p_dig(joystick_2)), .in_p2b(p_dig(joystick_3)),
     .in_portc_b(8'hff), .in_svc12_b(8'hff), .in_svc34_b(8'hff),
     .adc_ch(adc_ch),
+    .track_p1_x(joystick_l_analog_0[7:0]), .track_p1_y(joystick_l_analog_0[15:8]),
+    .track_p2_x(joystick_l_analog_1[7:0]), .track_p2_y(joystick_l_analog_1[15:8]),
+    .track_p3_x(joystick_l_analog_2[7:0]), .track_p3_y(joystick_l_analog_2[15:8]),
+    .track_p1_dir(lightgun_joy_p1), .track_p2_dir(lightgun_joy_p2),
+    .track_p3_dir(lightgun_joy_p3),
     .ppi_pa(core_ppi_pa), .ppi_pb(core_ppi_pb), .ppi_pc(core_ppi_pc),
     .adc0_load(adc0_load),
     .rgb_a(rgb_a), .rgb_b(rgb_b),

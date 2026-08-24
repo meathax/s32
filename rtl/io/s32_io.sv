@@ -644,6 +644,119 @@ endmodule
 
 
 // ---------------------------------------------------------------------------
+// Relative three-player control-ball adapter for SegaSonic.
+//
+// The real interface board feeds one uPD4701A per player. Counters are updated
+// once per frame from signed host-stick motion and expose the same low/high-byte
+// X/Y reads and per-player reset write window. The profile gate keeps this path
+// inert for every non-trackball descriptor.
+// ---------------------------------------------------------------------------
+module s32_trackball_adapter (
+    input             clk,
+    input             rst,
+    input             enable,
+    input             frame_tick,
+    input             cs,
+    input             we,
+    input       [2:0] player,
+    input       [1:0] addr,
+    output reg  [7:0] rdata,
+    input       [7:0] p1_x, p1_y, p2_x, p2_y, p3_x, p3_y,
+    input       [3:0] p1_dir, p2_dir, p3_dir
+);
+
+localparam signed [8:0] DIGITAL_STEP = 9'sd30;
+
+function automatic signed [8:0] axis_delta;
+    input [7:0] raw;
+    input       dir_pos;
+    input       dir_neg;
+    input       invert;
+    reg signed [8:0] raw_signed;
+    reg signed [8:0] value;
+    begin
+        raw_signed = $signed({raw[7], raw});
+        if (dir_pos && dir_neg)
+            value = 9'sd0;
+        else if (dir_pos)
+            value = DIGITAL_STEP;
+        else if (dir_neg)
+            value = -DIGITAL_STEP;
+        else if ((raw_signed > -9'sd8) && (raw_signed < 9'sd8))
+            value = 9'sd0;
+        else
+            value = raw_signed >>> 2;
+        axis_delta = invert ? -value : value;
+    end
+endfunction
+
+wire signed [8:0] x0_delta = axis_delta(p1_x, p1_dir[0], p1_dir[1], 1'b1);
+wire signed [8:0] y0_delta = axis_delta(p1_y, p1_dir[3], p1_dir[2], 1'b0);
+wire signed [8:0] x1_delta = axis_delta(p2_x, p2_dir[0], p2_dir[1], 1'b1);
+wire signed [8:0] y1_delta = axis_delta(p2_y, p2_dir[3], p2_dir[2], 1'b0);
+wire signed [8:0] x2_delta = axis_delta(p3_x, p3_dir[0], p3_dir[1], 1'b1);
+wire signed [8:0] y2_delta = axis_delta(p3_y, p3_dir[3], p3_dir[2], 1'b0);
+
+reg [11:0] x0, y0, x1, y1, x2, y2;
+wire [11:0] x0_next = x0 + {{3{x0_delta[8]}}, x0_delta};
+wire [11:0] y0_next = y0 + {{3{y0_delta[8]}}, y0_delta};
+wire [11:0] x1_next = x1 + {{3{x1_delta[8]}}, x1_delta};
+wire [11:0] y1_next = y1 + {{3{y1_delta[8]}}, y1_delta};
+wire [11:0] x2_next = x2 + {{3{x2_delta[8]}}, x2_delta};
+wire [11:0] y2_next = y2 + {{3{y2_delta[8]}}, y2_delta};
+
+always @(posedge clk) begin
+    if (rst || !enable) begin
+        x0 <= 12'd0; y0 <= 12'd0;
+        x1 <= 12'd0; y1 <= 12'd0;
+        x2 <= 12'd0; y2 <= 12'd0;
+    end
+    else begin
+        if (frame_tick) begin
+            x0 <= x0_next; y0 <= y0_next;
+            x1 <= x1_next; y1 <= y1_next;
+            x2 <= x2_next; y2 <= y2_next;
+        end
+        if (cs && we) begin
+            case (player)
+                3'd0: begin x0 <= 12'd0; y0 <= 12'd0; end
+                3'd1: begin x1 <= 12'd0; y1 <= 12'd0; end
+                3'd2: begin x2 <= 12'd0; y2 <= 12'd0; end
+                default: ;
+            endcase
+        end
+    end
+end
+
+always @(*) begin
+    rdata = 8'hff;
+    case (player)
+        3'd0: case (addr)
+            2'd0: rdata = x0[7:0];
+            2'd1: rdata = {4'h0, x0[11:8]};
+            2'd2: rdata = y0[7:0];
+            2'd3: rdata = {4'h0, y0[11:8]};
+        endcase
+        3'd1: case (addr)
+            2'd0: rdata = x1[7:0];
+            2'd1: rdata = {4'h0, x1[11:8]};
+            2'd2: rdata = y1[7:0];
+            2'd3: rdata = {4'h0, y1[11:8]};
+        endcase
+        3'd2: case (addr)
+            2'd0: rdata = x2[7:0];
+            2'd1: rdata = {4'h0, x2[11:8]};
+            2'd2: rdata = y2[7:0];
+            2'd3: rdata = {4'h0, y2[11:8]};
+        endcase
+        default: ;
+    endcase
+end
+
+endmodule
+
+
+// ---------------------------------------------------------------------------
 module s32_i8255 (
     input             clk,
     input             cs,

@@ -106,6 +106,7 @@ package s32_pkg;
     localparam [1:0] ANALOG_CENTERED = 2'd0; // sticks/guns: all channels rest at 80
     localparam [1:0] ANALOG_DRIVING  = 2'd1; // wheel=80, gas/brake=00
     localparam [1:0] ANALOG_ALL_FF   = 2'd2; // unknown pull-ups (dbzvrvs)
+    localparam [1:0] ANALOG_TRACKBALL = 2'd3; // three relative uPD4701 channels
     localparam [1:0] DIGITAL_GENERIC = 2'd0;
     localparam [1:0] DIGITAL_RADM    = 2'd1; // bit0 unused, Light/Wiper on 1/2
 
@@ -116,6 +117,7 @@ package s32_pkg;
     localparam [6:0] PROT_F1LAP    = 7'd4;
     localparam [6:0] PROT_DBZVRVS  = 7'd5;
     localparam [6:0] PROT_JLEAGUE  = 7'd6;
+    localparam [6:0] PROT_SONIC    = 7'd7;
 
     // ------------------------------------------------------------------
     // V60 interrupt sources — DESIGN.md §5.5

@@ -300,6 +300,113 @@ end
 endmodule
 
 // ---------------------------------------------------------------------------
+// SegaSonic final level-load protection HLE.
+//
+// The final set writes the cleared-level index at 0x20e5c4. MAME's handler
+// selects the corresponding stage ID from the ROM table and publishes it at
+// work RAM 0x20f06e, then clears the two status words at 0x20f0bc/0x20f0be.
+// The table values are the final-game order documented by the debug analysis.
+// Keep this responder profile-gated: the prototype does not install it.
+// ---------------------------------------------------------------------------
+module s32_prot_sonic #(
+    parameter ENABLE = 1'b1
+) (
+    input             clk,
+    input             rst,
+    input             enable,
+    input             cpu_write,
+    input      [23:0] cpu_addr,
+    input       [7:0] cpu_wdata,
+    output reg        wram_req,
+    output reg        wram_we,
+    output reg [15:0] wram_addr,
+    output reg [15:0] wram_wdata,
+    output reg  [1:0] wram_be,
+    input             wram_ack
+);
+
+typedef enum logic [1:0] { SONIC_IDLE, SONIC_LEVEL, SONIC_STATUS0, SONIC_STATUS1 } sonic_state_t;
+sonic_state_t state;
+
+function automatic [15:0] sonic_level(input [15:0] cleared);
+    case (cleared)
+        16'd0:  sonic_level = 16'h0007;
+        16'd1:  sonic_level = 16'h0007;
+        16'd2:  sonic_level = 16'h0006;
+        16'd3:  sonic_level = 16'h0005;
+        16'd4:  sonic_level = 16'h0008;
+        16'd5:  sonic_level = 16'h0009;
+        16'd6:  sonic_level = 16'h000a;
+        16'd7:  sonic_level = 16'h0003;
+        16'd8:  sonic_level = 16'h0004;
+        16'd9:  sonic_level = 16'h0010;
+        16'd10: sonic_level = 16'h000c;
+        16'd11: sonic_level = 16'h000d;
+        16'd12: sonic_level = 16'h000e;
+        16'd13: sonic_level = 16'h000f;
+        16'd14: sonic_level = 16'h000b;
+        16'd15: sonic_level = 16'h0011;
+        16'd16: sonic_level = 16'h000a;
+        16'd17: sonic_level = 16'h000a;
+        default: sonic_level = 16'h000a;
+    endcase
+endfunction
+
+always @(posedge clk) begin
+    if (rst || !ENABLE || !enable) begin
+        state      <= SONIC_IDLE;
+        wram_req   <= 1'b0;
+        wram_we    <= 1'b0;
+        wram_addr  <= 16'h0000;
+        wram_wdata <= 16'h0000;
+        wram_be    <= 2'b00;
+    end
+    else begin
+        wram_req <= 1'b0;
+        wram_we  <= 1'b0;
+        case (state)
+            SONIC_IDLE: begin
+                if (cpu_write && cpu_addr == 24'h20e5c4) begin
+                    wram_req   <= 1'b1;
+                    wram_we    <= 1'b1;
+                    wram_addr  <= 16'hf06e >> 1;
+                    wram_wdata <= sonic_level({8'h00, cpu_wdata});
+                    wram_be    <= 2'b11;
+                    state      <= SONIC_LEVEL;
+                end
+            end
+            SONIC_LEVEL: begin
+                if (wram_ack) begin
+                    wram_req   <= 1'b1;
+                    wram_we    <= 1'b1;
+                    wram_addr  <= 16'hf0bc >> 1;
+                    wram_wdata <= 16'h0000;
+                    wram_be    <= 2'b11;
+                    state      <= SONIC_STATUS0;
+                end
+            end
+            SONIC_STATUS0: begin
+                if (wram_ack) begin
+                    wram_req   <= 1'b1;
+                    wram_we    <= 1'b1;
+                    wram_addr  <= 16'hf0be >> 1;
+                    wram_wdata <= 16'h0000;
+                    wram_be    <= 2'b11;
+                    state      <= SONIC_STATUS1;
+                end
+            end
+            SONIC_STATUS1: begin
+                if (wram_ack)
+                    state <= SONIC_IDLE;
+            end
+            default: state <= SONIC_IDLE;
+        endcase
+    end
+end
+
+endmodule
+
+// ---------------------------------------------------------------------------
 //  s32_v25: protection MCU subsystem (§8.1) — ga2 / arabfgt
 //  v1 strategy per DESIGN.md: HLE responder implementing the documented
 //  wakeup/command protocol through the MB8421 dual-port RAM at 0xA00000,

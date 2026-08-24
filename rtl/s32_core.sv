@@ -157,6 +157,9 @@ module s32_core #(
     input       [7:0] in_p1a, in_p2a, in_portc, in_svc12, in_svc34,
     input       [7:0] in_p1b, in_p2b, in_portc_b, in_svc12_b, in_svc34_b,
     input       [7:0] adc_ch [0:7],
+    input       [7:0] track_p1_x, track_p1_y, track_p2_x, track_p2_y,
+    input       [7:0] track_p3_x, track_p3_y,
+    input       [3:0] track_p1_dir, track_p2_dir, track_p3_dir,
     input       [7:0] ppi_pa, ppi_pb, ppi_pc,
     output            adc0_load,
 
@@ -216,6 +219,8 @@ wire       cfg_sprite_bank_valid = board.sprite_bank_valid;
 wire [1:0] cfg_sprite_bank_mask  = board.sprite_bank_mask;
 wire       cfg_flip_y            = board.flip_y;
 `endif
+wire [1:0] cfg_analog_profile = board.analog_profile;
+wire       cfg_trackball      = cfg_analog_profile == ANALOG_TRACKBALL;
 // A System32-only bitstream must not enter a Multi 32 runtime configuration if
 // it is accidentally paired with a Multi 32 MRA.  The universal source build
 // retains the descriptor-selected path when SYSTEM32_ONLY is false.  GAME_ONLY
@@ -327,10 +332,11 @@ wire sel_v25    = sel_prot_a && (A[19:12] == 8'h00); // 0xA00000-A00FFF
 // MAME's I/O mirrors ignore A19:A7 (System 32) or A18:A7 (Multi 32).
 // A6:A5 remain decoded: 00 selects the 5296 and A6 selects expansion I/O.
 wire io0_area   = (A[23:20] == 4'hC) && (!is_multi32 || !A[19]);
-wire sel_io0    = io0_area && (A[6:5] == 2'b00);
-wire sel_ioex   = io0_area && A[6];
-wire sel_io1    = is_multi32 && (A[23:20] == 4'hC) && A[19] &&
-                  (A[6:5] == 2'b00);
+wire sel_io0      = io0_area && (A[6:5] == 2'b00);
+wire sel_ioex     = io0_area && A[6];
+wire sel_trackball = sel_ioex && cfg_trackball && (A[5:3] <= 3'b010);
+wire sel_io1      = is_multi32 && (A[23:20] == 4'hC) && A[19] &&
+                    (A[6:5] == 2'b00);
 wire sel_intc   = (A[23:20] == 4'hD) && !A[19];
 wire sel_rand   = (A[23:20] == 4'hD) &&  A[19];
 wire sel_romhi  = (A[23:20] == 4'hF);
@@ -1079,8 +1085,10 @@ s32_eeprom93c46 eeprom (
 );
 
 // extended IO: ADC / PPI
+wire [7:0] trackball_q;
 wire adc_bit;
-wire sel_adc   = sel_ioex && (A[5:3] == 3'b010) && cfg_has_adc;
+wire sel_adc   = sel_ioex && !cfg_trackball &&
+                 (A[5:3] == 3'b010) && cfg_has_adc;
 wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && cfg_has_ppi;
 assign adc0_load = wr_stb && sel_adc && m_be[0] && m_we &&
                    (A[2:1] == 2'd0);
@@ -1118,6 +1126,15 @@ generate
     end
 endgenerate
 
+s32_trackball_adapter trackball (
+    .clk(clk_sys), .rst(rst), .enable(cfg_trackball), .frame_tick(vbl_start),
+    .cs(wr_stb && sel_trackball && m_be[0]), .we(m_we),
+    .player(A[5:3]), .addr(A[2:1]), .rdata(trackball_q),
+    .p1_x(track_p1_x), .p1_y(track_p1_y), .p2_x(track_p2_x), .p2_y(track_p2_y),
+    .p3_x(track_p3_x), .p3_y(track_p3_y),
+    .p1_dir(track_p1_dir), .p2_dir(track_p2_dir), .p3_dir(track_p3_dir)
+);
+
 wire [7:0] ppi_q;
 s32_i8255 ppi (
     .clk(clk_sys),
@@ -1150,6 +1167,9 @@ wire [1:0]  dke_pr_be;
 wire        jl_pr_req, jl_pr_we;
 wire [15:0] jl_pr_addr, jl_pr_wdata;
 wire [1:0]  jl_pr_be;
+wire        sonic_pr_req, sonic_pr_we;
+wire [15:0] sonic_pr_addr, sonic_pr_wdata;
+wire [1:0]  sonic_pr_be;
 wire        jl_rom_req, jl_rom_ack;
 wire [20:0] jl_rom_addr;
 wire        br_trap;
@@ -1187,6 +1207,11 @@ generate
         assign jl_pr_addr   = 16'h0000;
         assign jl_pr_wdata  = 16'h0000;
         assign jl_pr_be     = 2'b00;
+        assign sonic_pr_req   = 1'b0;
+        assign sonic_pr_we    = 1'b0;
+        assign sonic_pr_addr  = 16'h0000;
+        assign sonic_pr_wdata = 16'h0000;
+        assign sonic_pr_be    = 2'b00;
         assign jl_rom_req   = 1'b0;
         assign jl_rom_addr  = 21'h000000;
     end
@@ -1209,6 +1234,14 @@ generate
             .wram_req(jl_pr_req), .wram_we(jl_pr_we), .wram_addr(jl_pr_addr),
             .wram_wdata(jl_pr_wdata), .wram_be(jl_pr_be),
             .wram_ack(pr_ack)
+        );
+        s32_prot_sonic #(.ENABLE(GAME_ONLY_STD || !GAME_ONLY)) sonic_prot (
+            .clk(clk_sys), .rst(rst),
+            .enable(cfg_prot_sel == PROT_SONIC),
+            .cpu_write(jl_cpu_write), .cpu_addr(A), .cpu_wdata(m_wdata[7:0]),
+            .wram_req(sonic_pr_req), .wram_we(sonic_pr_we),
+            .wram_addr(sonic_pr_addr), .wram_wdata(sonic_pr_wdata),
+            .wram_be(sonic_pr_be), .wram_ack(pr_ack)
         );
     end
 `endif
@@ -1240,11 +1273,16 @@ generate
     end
 endgenerate
 
-assign pr_req   = (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_req   : dke_pr_req;
-assign pr_we    = (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_we    : dke_pr_we;
-assign pr_addr  = (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_addr  : dke_pr_addr;
-assign pr_wdata = (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_wdata : dke_pr_wdata;
-assign pr_be    = (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_be    : dke_pr_be;
+assign pr_req   = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_req :
+                  (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_req : dke_pr_req;
+assign pr_we    = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_we :
+                  (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_we : dke_pr_we;
+assign pr_addr  = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_addr :
+                  (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_addr : dke_pr_addr;
+assign pr_wdata = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_wdata :
+                  (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_wdata : dke_pr_wdata;
+assign pr_be    = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_be :
+                  (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_be : dke_pr_be;
 
 `ifdef S32_V25_HW
 wire [15:3] v25_rom_addr;
@@ -1508,6 +1546,7 @@ always @(posedge clk_sys) begin
                 sel_prot_a:  rmux <= 16'hffff;
                 sel_io0:     rmux <= {8'hff, io0_q};
                 sel_io1:     rmux <= {8'hff, io1_q};
+                sel_trackball: rmux <= {8'hff, trackball_q};
                 // MSM6253 serial output is wired to D7, not D0 (MAME
                 // msm6253 d7_r); audit R20 IO-3.
                 sel_ioex:    rmux <= sel_adc ? {8'hff, adc_bit, 7'h7f} :
