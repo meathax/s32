@@ -161,7 +161,6 @@ module s32_core #(
     input       [7:0] track_p3_x, track_p3_y,
     input       [3:0] track_p1_dir, track_p2_dir, track_p3_dir,
     input       [7:0] ppi_pa, ppi_pb, ppi_pc,
-    output            adc0_load,
 
     // video out (screen A; screen B via second mixer on M32)
     output     [23:0] rgb_a,
@@ -1090,8 +1089,6 @@ wire adc_bit;
 wire sel_adc   = sel_ioex && !cfg_trackball &&
                  (A[5:3] == 3'b010) && cfg_has_adc;
 wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && cfg_has_ppi;
-assign adc0_load = wr_stb && sel_adc && m_be[0] && m_we &&
-                   (A[2:1] == 2'd0);
 generate
     if (GAME_ONLY && !GAME_ONLY_STD) begin : g_no_adc
         // Only the real-V25 dedicated shape has no ADC board. The standard

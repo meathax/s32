@@ -753,12 +753,9 @@ wire [7:0] adc_ch [0:7];
 wire [7:0] driving_wheel;
 wire [7:0] driving_accel;
 wire [7:0] driving_brake;
-wire       adc0_load;
 s32_driving_controls driving_controls (
-    .clk(clk_sys),
-    .rst(reset),
-    .capture_wheel(active_board.digital_profile == DIGITAL_RADM),
-    .wheel_sample(adc0_load),
+    .capture_wheel((active_board.digital_profile == DIGITAL_RADM) ||
+                   active_board.digital_steering),
     .left_x(joystick_l_analog_0[7:0]),
     .right_y(joystick_r_analog_0[15:8]),
     .digital_accel(joystick_0[4]),
@@ -772,8 +769,9 @@ s32_driving_controls driving_controls (
 // Driving cabinets wire the wheel, accelerator, and brake to the first three
 // MSM6253 channels. MiSTer's left-stick X is the wheel; right-stick up/down
 // are the analog pedals, with A/B as full-scale digital fallbacks. Rad Mobile
-// also maps the MiSTer left/right D-pad bits to full-scale wheel endpoints;
-// the adapter holds the newest coordinate through the slower ADC poll.
+// and descriptor-selected Slip Stream profiles also map the MiSTer left/right
+// D-pad bits to full-scale wheel endpoints; the MSM6253 samples the live value
+// on its accepted channel-load write.
 assign adc_ch[0] = active_board.gun_aim ? game_gun_p1_x : driving_wheel;
 assign adc_ch[1] = active_board.gun_aim ? game_gun_p1_y : driving_accel;
 assign adc_ch[2] = active_board.gun_aim ? game_gun_p2_x : driving_brake;
@@ -896,7 +894,6 @@ s32_core core (
     .track_p1_dir(lightgun_joy_p1), .track_p2_dir(lightgun_joy_p2),
     .track_p3_dir(lightgun_joy_p3),
     .ppi_pa(core_ppi_pa), .ppi_pb(core_ppi_pb), .ppi_pc(core_ppi_pc),
-    .adc0_load(adc0_load),
     .rgb_a(rgb_a), .rgb_b(rgb_b),
     .ce_pix(ce_pix_core),
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),

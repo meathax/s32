@@ -101,6 +101,7 @@ package s32_pkg;
         logic       dual_comm_ff;   // dual-PCB comm RAM reset state (F1 Exhaust Note)
         logic       gear_toggle;    // edge-latched two-state cabinet gear input
         logic [1:0] digital_profile; // player-port layout (DIGITAL_*)
+        logic       digital_steering; // host D-pad left/right wheel fallback
     } board_desc_t;
 
     localparam [1:0] ANALOG_CENTERED = 2'd0; // sticks/guns: all channels rest at 80
