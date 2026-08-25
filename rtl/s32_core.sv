@@ -1167,6 +1167,8 @@ wire [1:0]  jl_pr_be;
 wire        sonic_pr_req, sonic_pr_we;
 wire [15:0] sonic_pr_addr, sonic_pr_wdata;
 wire [1:0]  sonic_pr_be;
+wire        sonic_rom_req, sonic_rom_ack;
+wire [20:0] sonic_rom_addr;
 wire        jl_rom_req, jl_rom_ack;
 wire [20:0] jl_rom_addr;
 wire        br_trap;
@@ -1178,17 +1180,23 @@ wire        prot_rom_req;
 wire [20:0] prot_rom_addr;
 wire        prot_rom_ack;
 
-// J.League and Burning Rival are mutually exclusive descriptor-selected
-// protection clients sharing the cache's single protected-ROM lookup port.
-assign prot_rom_req  = jl_rom_req | br_rom_req;
-assign prot_rom_addr = br_rom_req ? br_rom_addr[20:0] : jl_rom_addr;
+// J.League, Burning Rival and SegaSonic are mutually exclusive
+// descriptor-selected protection clients sharing the cache's single
+// protected-ROM lookup port.
+assign prot_rom_req  = jl_rom_req | br_rom_req | sonic_rom_req;
+assign prot_rom_addr = br_rom_req ? br_rom_addr[20:0] :
+                       jl_rom_req ? jl_rom_addr : sonic_rom_addr;
 assign jl_rom_ack    = prot_rom_ack && !br_rom_req;
 assign br_rom_ack    = prot_rom_ack && br_rom_req;
+assign sonic_rom_ack = prot_rom_ack && !br_rom_req && !jl_rom_req;
 
 // The accepted write pulse is deliberately taken from wr_stb rather than
 // raw m_req: the V60 bus holds a write request until ack, while the original
 // write16 handler runs once per accepted transaction.
 wire jl_cpu_write = wr_stb && m_we && sel_wram && m_be[0];
+// SegaSonic's device reads the stored counter word back, so it reacts to a
+// write on either byte lane rather than to the low lane alone.
+wire sonic_cpu_write = wr_stb && m_we && sel_wram;
 
 // Descriptor-selected standard-board protection responders.
 generate
@@ -1209,6 +1217,8 @@ generate
         assign sonic_pr_addr  = 16'h0000;
         assign sonic_pr_wdata = 16'h0000;
         assign sonic_pr_be    = 2'b00;
+        assign sonic_rom_req  = 1'b0;
+        assign sonic_rom_addr = 21'h000000;
         assign jl_rom_req   = 1'b0;
         assign jl_rom_addr  = 21'h000000;
     end
@@ -1235,10 +1245,12 @@ generate
         s32_prot_sonic #(.ENABLE(GAME_ONLY_STD || !GAME_ONLY)) sonic_prot (
             .clk(clk_sys), .rst(rst),
             .enable(cfg_prot_sel == PROT_SONIC),
-            .cpu_write(jl_cpu_write), .cpu_addr(A), .cpu_wdata(m_wdata[7:0]),
+            .cpu_write(sonic_cpu_write), .cpu_addr(A),
+            .rom_req(sonic_rom_req), .rom_addr(sonic_rom_addr),
+            .rom_data(prot_rom_data), .rom_ack(sonic_rom_ack),
             .wram_req(sonic_pr_req), .wram_we(sonic_pr_we),
             .wram_addr(sonic_pr_addr), .wram_wdata(sonic_pr_wdata),
-            .wram_be(sonic_pr_be), .wram_ack(pr_ack)
+            .wram_be(sonic_pr_be), .wram_rdata(pr_q), .wram_ack(pr_ack)
         );
     end
 `endif

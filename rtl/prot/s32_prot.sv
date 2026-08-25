@@ -300,12 +300,21 @@ end
 endmodule
 
 // ---------------------------------------------------------------------------
-// SegaSonic final level-load protection HLE.
+// SegaSonic level-load protection device (final set, FD1149 317-0213 board).
 //
-// The final set writes the cleared-level index at 0x20e5c4. MAME's handler
-// selects the corresponding stage ID from the ROM table and publishes it at
-// work RAM 0x20f06e, then clears the two status words at 0x20f0bc/0x20f0be.
-// The table values are the final-game order documented by the debug analysis.
+// The game keeps a cleared-level counter at work RAM 0x20e5c4. Every time it
+// stores that counter the protection device selects the next stage from the
+// level-order table the main ROM carries at 0x2638, publishes the stage id at
+// work RAM 0x20f06e and clears the two status words at 0x20f0bc/0x20f0be.
+//
+// Table entries are big-endian words at 0x2638 + 2*cleared. Entry 0 overlaps
+// the preceding data word (0xff07), so a counter of zero yields the constant
+// 0x0007 instead of a table fetch. Stage 0x0007 is the trackball/button
+// tutorial the game runs first; the counter reaching 1 at the end of that
+// tutorial is what selects 0x0006, the first real stage. Reading the order
+// from ROM rather than carrying a transcribed copy keeps the progression
+// identical to the board's own data for every entry.
+//
 // Keep this responder profile-gated: the prototype does not install it.
 // ---------------------------------------------------------------------------
 module s32_prot_sonic #(
@@ -316,45 +325,31 @@ module s32_prot_sonic #(
     input             enable,
     input             cpu_write,
     input      [23:0] cpu_addr,
-    input       [7:0] cpu_wdata,
+    output reg        rom_req,
+    output reg [20:0] rom_addr,
+    input      [15:0] rom_data,
+    input             rom_ack,
     output reg        wram_req,
     output reg        wram_we,
     output reg [15:0] wram_addr,
     output reg [15:0] wram_wdata,
     output reg  [1:0] wram_be,
+    input      [15:0] wram_rdata,
     input             wram_ack
 );
 
-typedef enum logic [1:0] { SONIC_IDLE, SONIC_LEVEL, SONIC_STATUS0, SONIC_STATUS1 } sonic_state_t;
-sonic_state_t state;
+localparam [20:0] LEVEL_ORDER_BASE = 21'h002638;
 
-function automatic [15:0] sonic_level(input [15:0] cleared);
-    case (cleared)
-        16'd0:  sonic_level = 16'h0007;
-        16'd1:  sonic_level = 16'h0007;
-        16'd2:  sonic_level = 16'h0006;
-        16'd3:  sonic_level = 16'h0005;
-        16'd4:  sonic_level = 16'h0008;
-        16'd5:  sonic_level = 16'h0009;
-        16'd6:  sonic_level = 16'h000a;
-        16'd7:  sonic_level = 16'h0003;
-        16'd8:  sonic_level = 16'h0004;
-        16'd9:  sonic_level = 16'h0010;
-        16'd10: sonic_level = 16'h000c;
-        16'd11: sonic_level = 16'h000d;
-        16'd12: sonic_level = 16'h000e;
-        16'd13: sonic_level = 16'h000f;
-        16'd14: sonic_level = 16'h000b;
-        16'd15: sonic_level = 16'h0011;
-        16'd16: sonic_level = 16'h000a;
-        16'd17: sonic_level = 16'h000a;
-        default: sonic_level = 16'h000a;
-    endcase
-endfunction
+typedef enum logic [2:0] {
+    SONIC_IDLE, SONIC_COUNT, SONIC_ROM, SONIC_LEVEL, SONIC_STATUS0, SONIC_STATUS1
+} sonic_state_t;
+sonic_state_t state;
 
 always @(posedge clk) begin
     if (rst || !ENABLE || !enable) begin
         state      <= SONIC_IDLE;
+        rom_req    <= 1'b0;
+        rom_addr   <= 21'h000000;
         wram_req   <= 1'b0;
         wram_we    <= 1'b0;
         wram_addr  <= 16'h0000;
@@ -362,44 +357,74 @@ always @(posedge clk) begin
         wram_be    <= 2'b00;
     end
     else begin
-        wram_req <= 1'b0;
-        wram_we  <= 1'b0;
         case (state)
             SONIC_IDLE: begin
+                rom_req  <= 1'b0;
+                wram_req <= 1'b0;
                 if (cpu_write && cpu_addr == 24'h20e5c4) begin
+                    // Read back the counter the CPU just stored: the device
+                    // acts on the completed 16-bit word, not on the byte lanes
+                    // of one access.
+                    wram_req  <= 1'b1;
+                    wram_we   <= 1'b0;
+                    wram_addr <= 16'he5c4 >> 1;
+                    state     <= SONIC_COUNT;
+                end
+            end
+            SONIC_COUNT: if (wram_ack) begin
+                if (wram_rdata == 16'h0000) begin
                     wram_req   <= 1'b1;
                     wram_we    <= 1'b1;
                     wram_addr  <= 16'hf06e >> 1;
-                    wram_wdata <= sonic_level({8'h00, cpu_wdata});
+                    wram_wdata <= 16'h0007;
                     wram_be    <= 2'b11;
                     state      <= SONIC_LEVEL;
                 end
-            end
-            SONIC_LEVEL: begin
-                if (wram_ack) begin
-                    wram_req   <= 1'b1;
-                    wram_we    <= 1'b1;
-                    wram_addr  <= 16'hf0bc >> 1;
-                    wram_wdata <= 16'h0000;
-                    wram_be    <= 2'b11;
-                    state      <= SONIC_STATUS0;
+                else begin
+                    wram_req <= 1'b0;
+                    rom_req  <= 1'b1;
+                    rom_addr <= LEVEL_ORDER_BASE + {4'd0, wram_rdata, 1'b0};
+                    state    <= SONIC_ROM;
                 end
             end
-            SONIC_STATUS0: begin
-                if (wram_ack) begin
-                    wram_req   <= 1'b1;
-                    wram_we    <= 1'b1;
-                    wram_addr  <= 16'hf0be >> 1;
-                    wram_wdata <= 16'h0000;
-                    wram_be    <= 2'b11;
-                    state      <= SONIC_STATUS1;
-                end
+            SONIC_ROM: if (rom_ack) begin
+                rom_req    <= 1'b0;
+                wram_req   <= 1'b1;
+                wram_we    <= 1'b1;
+                wram_addr  <= 16'hf06e >> 1;
+                // The cache returns the word holding the requested byte with
+                // the even address in the low lane; table entries are stored
+                // high byte first.
+                wram_wdata <= {rom_data[7:0], rom_data[15:8]};
+                wram_be    <= 2'b11;
+                state      <= SONIC_LEVEL;
             end
-            SONIC_STATUS1: begin
-                if (wram_ack)
-                    state <= SONIC_IDLE;
+            SONIC_LEVEL: if (wram_ack) begin
+                wram_req   <= 1'b1;
+                wram_we    <= 1'b1;
+                wram_addr  <= 16'hf0bc >> 1;
+                wram_wdata <= 16'h0000;
+                wram_be    <= 2'b11;
+                state      <= SONIC_STATUS0;
             end
-            default: state <= SONIC_IDLE;
+            SONIC_STATUS0: if (wram_ack) begin
+                wram_req   <= 1'b1;
+                wram_we    <= 1'b1;
+                wram_addr  <= 16'hf0be >> 1;
+                wram_wdata <= 16'h0000;
+                wram_be    <= 2'b11;
+                state      <= SONIC_STATUS1;
+            end
+            SONIC_STATUS1: if (wram_ack) begin
+                wram_req <= 1'b0;
+                wram_we  <= 1'b0;
+                state    <= SONIC_IDLE;
+            end
+            default: begin
+                state    <= SONIC_IDLE;
+                rom_req  <= 1'b0;
+                wram_req <= 1'b0;
+            end
         endcase
     end
 end
