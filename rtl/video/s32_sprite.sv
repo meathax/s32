@@ -114,12 +114,11 @@ always @(*) begin
     case (ctl_raddr)
         // MAME exposes only selected-buffer bit 0. Erase-busy appears only
         // in an old source-code comment, not in the implementation.
-        // MAME reg 0 bit0 = (SPRITES.num < SPRITES_2.num): reads 1 at power-up
-        // (6<8) and toggles to 0 after the first swap — the exact complement of
-        // the internal displaying-buffer selector, which resets to 0 and reads
-        // 1 after the first swap.  Invert only the CPU-visible bit; the internal
-        // render/erase/display targeting is unchanged (audit R20 SP-1).
-        3'd0: ctl_rdata = {6'h3f, 1'b0, ~disp_buf[0]};
+        // MAME reg 0 bit0 = (SPRITES.num < SPRITES_2.num), i.e. the
+        // CPU-visible identity of the displayed buffer. After the physical
+        // triple-buffer publication split, that is scan_buf, not the logical
+        // command selector disp_buf.
+        3'd0: ctl_rdata = {6'h3f, 1'b0, ~scan_buf[0]};
         3'd1: ctl_rdata = {6'h3f, 2'd1};              // status: normal
         3'd2: ctl_rdata = {6'h3f, ctl_latched[2][1:0]};
         3'd3: ctl_rdata = {6'h3f, ctl_latched[3][1:0]};
