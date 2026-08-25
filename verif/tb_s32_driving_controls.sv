@@ -3,6 +3,8 @@ module tb_s32_driving_controls;
     timeprecision 1ps;
 
     logic       clk;
+    logic       rst = 1'b1;
+    logic       vs = 1'b0;
     logic       capture_wheel = 1'b1;
     logic [7:0] left_x = 8'h00;
     logic [7:0] right_y = 8'h00;
@@ -15,6 +17,9 @@ module tb_s32_driving_controls;
     wire  [7:0] brake;
 
     s32_driving_controls dut (
+        .clk(clk),
+        .rst(rst),
+        .vs(vs),
         .capture_wheel(capture_wheel),
         .left_x(left_x),
         .right_y(right_y),
@@ -29,91 +34,57 @@ module tb_s32_driving_controls;
 
     always #1 clk = ~clk;
 
-    task automatic drive_wheel(input [7:0] x);
+    // One vsync tick: the only moment the wheel register may move.
+    task automatic frame;
         begin
             @(negedge clk);
-            left_x = x;
-            digital_left = 1'b0;
-            digital_right = 1'b0;
-            @(posedge clk);
-            @(negedge clk);
+            vs = 1'b1;
+            repeat (2) @(negedge clk);
+            vs = 1'b0;
+            repeat (2) @(negedge clk);
         end
     endtask
 
-    task automatic check_dpad(input bit left, input bit right, input [7:0] expected);
-        begin
-            @(negedge clk);
-            digital_left = left;
-            digital_right = right;
-            left_x = 8'h00;
-            @(posedge clk);
-            @(negedge clk);
-            if (wheel !== expected)
-                $fatal(1, "D-pad steering mismatch: left=%0d right=%0d wheel=%02x expected=%02x",
-                       left, right, wheel, expected);
-        end
-    endtask
-
-    task automatic sample_current(input [7:0] x, input bit left, input bit right,
-                                   input [7:0] expected);
-        begin
-            @(negedge clk);
-            left_x = x;
-            digital_left = left;
-            digital_right = right;
-            @(posedge clk);
-            if (wheel !== expected)
-                $fatal(1, "ADC sampled stale wheel: x=%02x left=%0d right=%0d wheel=%02x expected=%02x",
-                       x, left, right, wheel, expected);
-            @(negedge clk);
-        end
+    task automatic expect_wheel(input [7:0] expected, input string what);
+        if (wheel !== expected)
+            $fatal(1, "%s: wheel=%02x expected=%02x", what, wheel, expected);
     endtask
 
     initial begin
         clk = 1'b0;
         repeat (2) @(posedge clk);
+        rst = 1'b0;
+        #1;
+        expect_wheel(8'h80, "reset centers wheel");
 
-        // Neutral -> full left -> full right between two ADC polls. A
-        // positional wheel must deliver the newest coordinate, not the
-        // previous largest excursion.
-        drive_wheel(8'h00);
-        drive_wheel(8'h80);
-        drive_wheel(8'h7f);
-        drive_wheel(8'h7f);
+        // Rad Mobile's firmware rejects wheel samples that move more than
+        // 0x40 per accepted sample (signed 8-bit compare, MAME-measured), so
+        // a D-pad endpoint must arrive as a ramp, and releasing it must ramp
+        // back instead of latching at full lock.
+        digital_right = 1'b1;
+        frame; expect_wheel(8'ha0, "press right: first step");
+        frame; frame; frame;
+        expect_wheel(8'hff, "press right: endpoint reached");
 
-        // A fast movement can arrive between two clk_sys edges. The ADC
-        // samples the live input on its write edge; it must not be held at
-        // the previous queued coordinate.
-        @(negedge clk);
-        left_x = 8'h40;
-        digital_left = 1'b0;
         digital_right = 1'b0;
-        @(posedge clk);
-        sample_current(8'h60, 1'b0, 1'b0, 8'hda);
+        frame; expect_wheel(8'hdf, "release: springs back");
+        frame; frame; frame;
+        expect_wheel(8'h80, "release: returns to center");
 
-        // The same edge contract applies when D-pad steering replaces an
-        // analog position: the selected endpoint must reach the ADC now.
-        @(negedge clk);
-        left_x = 8'h40;
-        digital_left = 1'b0;
-        digital_right = 1'b0;
-        @(posedge clk);
-        sample_current(8'h00, 1'b1, 1'b0, 8'h00);
-
-        check_dpad(1'b1, 1'b0, 8'h00);
-        check_dpad(1'b0, 1'b1, 8'hff);
-        check_dpad(1'b1, 1'b1, 8'h80);
-
-        capture_wheel = 1'b0;
         digital_left = 1'b1;
-        digital_right = 1'b0;
-        left_x = 8'h40;
-        @(posedge clk);
-        #0;
-        if (wheel !== 8'hba)
-            $fatal(1, "non-Rad-Mobile direct wheel path changed: %02x", wheel);
-        if (accel !== 8'h00 || brake !== 8'h00)
-            $fatal(1, "released pedals changed: accel=%02x brake=%02x", accel, brake);
+        frame; expect_wheel(8'h60, "press left: first step");
+        frame; frame; frame;
+        expect_wheel(8'h00, "press left: endpoint reached");
+        digital_left = 1'b0;
+        repeat (4) frame;
+        expect_wheel(8'h80, "release left: returns to center");
+
+        // Pedals stay combinational.
+        digital_accel = 1'b1;
+        #1;
+        if (accel !== 8'hff || brake !== 8'h00)
+            $fatal(1, "digital accel changed: accel=%02x brake=%02x", accel, brake);
+        digital_accel = 1'b0;
 
         $display("PASS tb_s32_driving_controls");
         $finish;

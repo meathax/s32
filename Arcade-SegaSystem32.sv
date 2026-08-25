@@ -754,6 +754,9 @@ wire [7:0] driving_wheel;
 wire [7:0] driving_accel;
 wire [7:0] driving_brake;
 s32_driving_controls driving_controls (
+    .clk(clk_sys),
+    .rst(reset),
+    .vs(core_vs),
     .capture_wheel((active_board.digital_profile == DIGITAL_RADM) ||
                    active_board.digital_steering),
     .left_x(joystick_l_analog_0[7:0]),
