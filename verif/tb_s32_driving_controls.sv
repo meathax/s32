@@ -4,7 +4,7 @@ module tb_s32_driving_controls;
 
     logic       clk;
     logic       rst = 1'b1;
-    logic       vs = 1'b0;
+    logic       wheel_sample = 1'b0;
     logic       capture_wheel = 1'b1;
     logic [7:0] left_x = 8'h00;
     logic [7:0] right_y = 8'h00;
@@ -19,7 +19,7 @@ module tb_s32_driving_controls;
     s32_driving_controls dut (
         .clk(clk),
         .rst(rst),
-        .vs(vs),
+        .wheel_sample(wheel_sample),
         .capture_wheel(capture_wheel),
         .left_x(left_x),
         .right_y(right_y),
@@ -34,14 +34,14 @@ module tb_s32_driving_controls;
 
     always #1 clk = ~clk;
 
-    // One vsync tick: the only moment the wheel register may move.
-    task automatic frame;
+    // One real ADC sample: the only moment the wheel register may move.
+    task automatic sample;
         begin
             @(negedge clk);
-            vs = 1'b1;
-            repeat (2) @(negedge clk);
-            vs = 1'b0;
-            repeat (2) @(negedge clk);
+            wheel_sample = 1'b1;
+            @(posedge clk);
+            @(negedge clk);
+            wheel_sample = 1'b0;
         end
     endtask
 
@@ -60,23 +60,24 @@ module tb_s32_driving_controls;
         // Rad Mobile's firmware rejects wheel samples that move more than
         // 0x40 per accepted sample (signed 8-bit compare, MAME-measured), so
         // a D-pad endpoint must arrive as a ramp, and releasing it must ramp
-        // back instead of latching at full lock.
+        // back instead of latching at full lock. The ramp advances once per
+        // real ADC sample (wheel_sample), not once per frame.
         digital_right = 1'b1;
-        frame; expect_wheel(8'ha0, "press right: first step");
-        frame; frame; frame;
+        sample; expect_wheel(8'hb8, "press right: first step");
+        sample; sample;
         expect_wheel(8'hff, "press right: endpoint reached");
 
         digital_right = 1'b0;
-        frame; expect_wheel(8'hdf, "release: springs back");
-        frame; frame; frame;
+        sample; expect_wheel(8'hc7, "release: springs back");
+        sample; sample;
         expect_wheel(8'h80, "release: returns to center");
 
         digital_left = 1'b1;
-        frame; expect_wheel(8'h60, "press left: first step");
-        frame; frame; frame;
+        sample; expect_wheel(8'h48, "press left: first step");
+        sample; sample;
         expect_wheel(8'h00, "press left: endpoint reached");
         digital_left = 1'b0;
-        repeat (4) frame;
+        repeat (3) sample;
         expect_wheel(8'h80, "release left: returns to center");
 
         // Pedals stay combinational.

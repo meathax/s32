@@ -3,7 +3,7 @@
 module s32_driving_controls (
     input         clk,
     input         rst,
-    input         vs,            // vertical sync: wheel slews once per rising edge
+    input         wheel_sample,  // one clk_sys pulse per real MSM6253 an0 load
     input         capture_wheel,
     input   [7:0] left_x,
     input   [7:0] right_y,
@@ -41,29 +41,36 @@ module s32_driving_controls (
                                 digital_right ? 8'hff : wheel_analog;
     wire [7:0] wheel_target = capture_wheel ? wheel_digital : wheel_analog;
 
-    // Rad Mobile's firmware validates every wheel ADC sample against the last
-    // accepted one and rejects the new sample forever when the signed 8-bit
-    // difference is outside [-0x40, +0x40] (measured in MAME by forcing
-    // ANALOG1: 0x50->0x90 accepted, 0x90->0xD1 rejected, 0xD0->0x10 accepted
-    // through the wrap, and a rejected value stays rejected for 120+ frames).
-    // A real potentiometer wheel can never jump, so host sticks and D-pad
-    // endpoints must be slew-limited toward the target. 0x20 per frame keeps
-    // consecutive firmware samples within tolerance even at half-rate
-    // sampling, and the linear ramp never crosses the 00<->FF wrap that the
-    // firmware's signed compare would accept as a small step (that wrap
-    // acceptance is what latched the D-pad at full lock).
-    localparam [7:0] WHEEL_STEP = 8'h20;
+    // Rad Mobile's firmware validates every wheel ADC sample against the
+    // last accepted one and rejects the new sample forever when the signed
+    // 8-bit difference is outside [-0x40, +0x40] (measured in MAME by
+    // forcing ANALOG1: 0x50->0x90 accepted, 0x90->0xD1 rejected, 0xD0->0x10
+    // accepted through the wrap). A real potentiometer wheel can never jump,
+    // so host sticks and D-pad endpoints must be slew-limited toward the
+    // target.
+    //
+    // The firmware's own polling cadence is not fixed: MAME shows it reads
+    // channel 0 every frame during actual driving but only every other
+    // frame on its Input Test screen. Sizing the step against an assumed
+    // frame rate would either be too timid (locked to the slowest observed
+    // cadence) or unsafe if a faster-assumed cadence is wrong. Instead,
+    // wheel_q takes one step per wheel_sample pulse -- the same real
+    // MSM6253-an0-load event the firmware's own read produces -- so every
+    // step is checked against the true interval between accepted samples,
+    // whatever that interval turns out to be. WHEEL_STEP can then sit close
+    // to the firmware's real 0x40 ceiling (0x38 measured safe live against
+    // real Rad Mobile gameplay reads, both directions, through the wrap)
+    // instead of the more conservative value a cadence guess would force.
+    localparam [7:0] WHEEL_STEP = 8'h38;
 
     reg [7:0] wheel_q = 8'h80;
-    reg       vs_d = 1'b0;
     wire signed [8:0] wheel_diff =
         $signed({1'b0, wheel_target}) - $signed({1'b0, wheel_q});
     always @(posedge clk) begin
-        vs_d <= vs;
         if (rst) begin
             wheel_q <= 8'h80;
         end
-        else if (vs && !vs_d) begin
+        else if (wheel_sample) begin
             if (wheel_diff > $signed({1'b0, WHEEL_STEP}))
                 wheel_q <= wheel_q + WHEEL_STEP;
             else if (wheel_diff < -$signed({1'b0, WHEEL_STEP}))
@@ -82,9 +89,11 @@ module s32_driving_controls (
         pedal = (magnitude >= 9'd127) ? 8'hff : {magnitude[6:0], 1'b0};
     endfunction
 
-    // The MSM6253 captures wheel_q on its accepted channel-load write;
-    // wheel_q only changes on the vsync tick, so every conversion sees one
-    // stable, slew-limited coordinate.
+    // The MSM6253 captures wheel_q on the same clk_sys edge that produces
+    // wheel_sample: both this module's step and the ADC's registered
+    // capture read the pre-edge wheel_q value, so the conversion always
+    // sees the coordinate as it stood since the previous accepted sample,
+    // and wheel_q only advances toward the next one afterward.
     assign wheel = wheel_q;
 
     assign accel = digital_accel ? 8'hff : pedal(accel_mag);

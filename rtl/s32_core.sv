@@ -171,7 +171,16 @@ module s32_core #(
 
     output signed [15:0] audio_l,
     output signed [15:0] audio_r,
-    output      [7:0] out_lamps
+    output      [7:0] out_lamps,
+
+    // Pulses for one clk_sys cycle when the MSM6253 accepts a channel-0
+    // (an0/wheel) load write. Driving-cabinet games poll this at whatever
+    // cadence their own code takes (measured in MAME: every frame during
+    // Rad Mobile gameplay, every other frame on its Input Test screen) --
+    // the host wheel adapter slews to this event directly instead of
+    // assuming a fixed rate, so its step stays safely inside the firmware's
+    // acceptance window regardless of polling cadence.
+    output            wheel_load_ch0
 );
 
 // The universal production profile is a single-screen System 32 build with
@@ -1088,6 +1097,11 @@ wire [7:0] trackball_q;
 wire adc_bit;
 wire sel_adc   = sel_ioex && !cfg_trackball &&
                  (A[5:3] == 3'b010) && cfg_has_adc;
+// Channel 0 (an0) is always the wheel for every driving-cabinet descriptor
+// (adc_ch[0] assignment at the emu top). One clk_sys pulse per accepted
+// channel-0 load write -- exactly the event the real MSM6253 samples an0 on.
+assign wheel_load_ch0 = wr_stb && sel_adc && m_we && m_be[0] &&
+                        (A[2:1] == 2'd0);
 wire sel_ppi   = sel_ioex && (A[5:3] == 3'b100) && cfg_has_ppi;
 generate
     if (GAME_ONLY && !GAME_ONLY_STD) begin : g_no_adc

@@ -753,10 +753,11 @@ wire [7:0] adc_ch [0:7];
 wire [7:0] driving_wheel;
 wire [7:0] driving_accel;
 wire [7:0] driving_brake;
+wire       wheel_load_ch0;
 s32_driving_controls driving_controls (
     .clk(clk_sys),
     .rst(reset),
-    .vs(core_vs),
+    .wheel_sample(wheel_load_ch0),
     .capture_wheel((active_board.digital_profile == DIGITAL_RADM) ||
                    active_board.digital_steering),
     .left_x(joystick_l_analog_0[7:0]),
@@ -902,7 +903,8 @@ s32_core core (
     .hs(core_hs), .vs(core_vs), .hb(core_hb), .vb(core_vb),
     .mode_416_active(mode_416_active),
     .audio_l(aud_l), .audio_r(aud_r),
-    .out_lamps()
+    .out_lamps(),
+    .wheel_load_ch0(wheel_load_ch0)
 );
 
 // Do not leave a held DAC sample audible while the game clocks are frozen.
