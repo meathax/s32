@@ -21,6 +21,8 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
   Jurassic Park additionally supports GunCon 2 over SNAC
 - SegaSonic the Hedgehog: relative three-player control-ball emulation from each
   player’s left analog stick or d-pad; stick magnitude becomes running speed.
+- Driving games: left-stick X is the analog wheel and right-stick up/down are
+  the pedals; Rad Mobile and Slip Stream also accept d-pad left/right endpoints.
 
 ## PCB Accuracy
 

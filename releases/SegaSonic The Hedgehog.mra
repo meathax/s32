@@ -12,8 +12,16 @@
   <rom index="4" zip="sonic.zip" md5="none">
     <part name="epr-15787c.ic17" crc="25e3c27e"/>
     <part name="epr-15787c.ic17" crc="25e3c27e"/>
+    <part name="epr-15787c.ic17" crc="25e3c27e"/>
+    <part name="epr-15787c.ic17" crc="25e3c27e"/>
     <part name="epr-15786c.ic8" crc="efe9524c"/>
     <part name="epr-15786c.ic8" crc="efe9524c"/>
+    <part name="epr-15786c.ic8" crc="efe9524c"/>
+    <part name="epr-15786c.ic8" crc="efe9524c"/>
+    <interleave output="16">
+      <part name="epr-15781c.ic18" crc="65b06c25" map="01"/>
+      <part name="epr-15780c.ic9" crc="2db66fd2" map="10"/>
+    </interleave>
     <interleave output="16">
       <part name="epr-15781c.ic18" crc="65b06c25" map="01"/>
       <part name="epr-15780c.ic9" crc="2db66fd2" map="10"/>
@@ -33,6 +41,7 @@
       <part name="mpr-15789.ic14" crc="4378f12b" map="01"/>
       <part name="mpr-15788.ic5" crc="a6ed5d7a" map="10"/>
     </interleave>
+    <part repeat="2097152">FF</part>
   </rom>
   <rom index="9" zip="sonic.zip" md5="none">
     <interleave output="64">
@@ -47,6 +56,7 @@
       <part name="mpr-15795.ic27" crc="7f3dad30" map="00210000"/>
       <part name="mpr-15797.ic25" crc="013c6cab" map="21000000"/>
     </interleave>
+    <part repeat="4194304">FF</part>
   </rom>
   <nvram index="3" size="128"/>
   <rom index="0">

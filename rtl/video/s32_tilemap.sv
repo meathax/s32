@@ -513,13 +513,15 @@ always @(posedge clk) begin
             logic [3:0] pen;
             logic       opaque_tile;
             col = srcx[3:0] ^ {4{name[14]}};
-            // $1FF8E[8+bgnum] makes pen 0 opaque for the corresponding NBG.
-            // MAME carries this flag through both the zoom and rowscroll
-            // renderers; it is a tile property for the mixer, not a layer
-            // enable.  Keeping the name/palette bits even for pen 0 lets the
-            // priority mixer place the opaque tile above the backdrop while
-            // still leaving sprites/text to win by their normal ranks.
-            opaque_tile = (lay < 3'd4) && r1ff8e[8 + lay];
+            // $1FF8E[8+bgnum] keeps an NBG's pen-0 pixels instead of forcing
+            // them transparent.  It is a two-stage rule: the renderer writes
+            // the whole pen (colour<<4 | 0) rather than zero, and the mixer
+            // then drops any pixel whose full 13-bit pen is zero.  A tile
+            // whose colour field is also zero therefore stays transparent
+            // even under the flag.  Testing only the pen nibble here made
+            // SegaSonic's blank NBG1 (name 0) opaque and painted palette
+            // entry 0 over the navy backdrop across 12,928 pixels.
+            opaque_tile = (lay < 3'd4) && r1ff8e[8 + lay] && (|name[12:4]);
             // 4bpp packed msb-first per 16px row (bgcharlayout nibble order)
             // bgcharlayout x-offsets {0,4,16,20,8,12,24,28,...}: column ->
             // nibble index swaps the middle bits; even nibble = high half of
