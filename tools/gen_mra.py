@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""
+MRA generator for the Sega System 32 MiSTer core.
+
+System 32 only: no Multi 32 set is emitted (see the note on GAMES below).
+
+Parses MAME's segas32.cpp (ROM_START blocks + GAME macros) and emits one
+.mra per supported set using independent download regions:
+
+  index 0: 64-byte board descriptor (emitted last as the boot commit)
+  indexes 4..9: maincpu, soundcpu, tiles, multipcm, mcu, sprites
+  index 2: eeprom default image (128B), when the set provides one
+
+Only regions present in the MAME set are transferred, eliminating fixed-slot
+padding while retaining a backward-compatible legacy index-0 RTL path.
+Region padding/interleave is derived from the ROM_LOAD macros:
+  ROM_LOAD                → linear
+  ROM_LOAD16_BYTE         → interleave 2, map 01/10
+  ROM_LOAD32_WORD         → interleave 4, two words
+  ROM_LOAD32_BYTE         → interleave 4, map per offset&3
+  ROM_LOAD_x2/_x4         → repeat each byte group (handled as repeats)
+  ROM_LOAD16_WORD         → linear 16-bit
+
+Usage: gen_mra.py <path-to-segas32.cpp> <outdir>
+"""
+
+import re, sys, os, textwrap
+from html import escape
+
+REGION_SIZES = {
+    "maincpu":  0x200000,
+    "soundcpu": 0x400000,
+    "tiles":    0x400000,
+    "sega":     0x400000,   # multipcm
+    "mcu":      0x010000,
+    "sprites":  0x1000000,
+}
+STREAM_ORDER = ["maincpu", "soundcpu", "tiles", "sega", "mcu", "sprites"]
+REGION_INDEX = dict(zip(STREAM_ORDER, range(4, 10)))
+
+# board descriptor per parent (DESIGN.md §3.4):
+#   b0: flags {multi32,v25,v25table,adc,reserved,ppi,motor_hle}
+#       multi32 is retained because the RTL still parses the bit, but it is
+#       always 0 here: this repository emits no Multi 32 set.
+#   b1: bit0=dual_pcb, bit1=vertical orientation flip, bit2=positional gun,
+#       bit3=Alien3 SERVICE12 coin layout, bits5:4=analog profile;
+#       bit6=dual-PCB comm RAM reset-to-FF
+#   b2: bits6:0=prot_sel; bit7=descriptor-selected EPR-14084 link HLE
+#   b3: bit7=physical sprite-bank metadata valid; bits1:0=bank mask
+PROT = dict(NONE=0, BRIVAL=2, DARKEDGE=3, F1LAP=4, DBZVRVS=5, JLEAGUE=6)
+ANALOG = dict(CENTERED=0, DRIVING=1, ALL_FF=2)
+DIGITAL = dict(GENERIC=0, RADM=1)
+def desc(multi32=0, v25=0, v25table=0, adc=0, ppi=0,
+         dual=0, flip_y=0, gun=0, coin_swap=0, prot=0, analog=0, dual_ff=0,
+         comm_hle=0, gear_toggle=0, digital=0, motor_hle=0):
+    b0 = (multi32 | v25 << 1 | v25table << 2 | adc << 3 |
+          ppi << 5 | motor_hle << 6)
+    b1 = (dual | (flip_y << 1) | (gun << 2) | (coin_swap << 3) |
+          (analog << 4) |
+          (dual_ff << 6) | (gear_toggle << 7))
+    b2 = prot | (comm_hle << 7)
+    # Byte 3 is populated from the physical sprite region by gen(); byte 4 is
+    # the semantic player-port layout.  Remaining bytes stay reserved/zero.
+    d = bytes([b0, b1, b2, 0, digital]) + bytes(59)
+    return d
+
+GAMES = {
+    # parent: (descriptor, per-set list built from clones automatically)
+    # One universal production profile contains both standard-board
+    # peripherals and the real V25 implementation. Runtime descriptor fields
+    # select the hardware used by each supported parent.
+    "arabfgt":  desc(v25=1, v25table=1, ppi=1),
+    "brival":   desc(ppi=1, prot=PROT["BRIVAL"]),
+    "darkedge": desc(ppi=1, prot=PROT["DARKEDGE"]),
+    "ga2":      desc(v25=1, v25table=0, ppi=1),
+    "holo":     desc(flip_y=1),
+    # Alien3 and Jurassic Park are standard System 32 analog gun boards. The
+    # gun flag selects direct USB/SNAC coordinates into the existing MSM6253
+    # ADC; it does not select a framebuffer/HUD blend path. Alien3's cabinet
+    # uses the alternate SERVICE12 coin/start wiring, while Jurassic Park does
+    # not.
+    "alien3":   desc(adc=1, gun=1, coin_swap=1),
+    "jpark":    desc(adc=1, gun=1),
+    # Rad Mobile Deluxe adds the 837-7753 moving-controller mailbox on the
+    # 315-5296 C/G/D port group. MAME does not emulate that board, but the Sega
+    # manual, main ROM transaction loop and EPR-13686 handshake establish it.
+    "radm":     desc(adc=1, analog=ANALOG["DRIVING"],
+                     digital=DIGITAL["RADM"], motor_hle=1),
+    "radr":     desc(adc=1, analog=ANALOG["DRIVING"], comm_hle=1,
+                     gear_toggle=1),
+    "spidman":  desc(ppi=1),
+    # Slip Stream's analog driving board is the MSM6253 at 0xC00050. The
+    # gear-change input is a latched toggle on P1_A bit 0; both are selected
+    # from the shared Standard-profile descriptor, never a game macro.
+    "slipstrm": desc(adc=1, analog=ANALOG["DRIVING"], gear_toggle=1),
+    # The football board uses the ordinary System 32 map.  J.League shares
+    # the same ROM/inputs but installs the 0x20f700 protection write handler;
+    # keep those clone-specific descriptors explicit rather than inheriting
+    # the plain svf parent descriptor.
+    "svf":      desc(),
+    "jleague":  desc(prot=PROT["JLEAGUE"]),
+    "jleagueo": desc(prot=PROT["JLEAGUE"]),
+    # NO MULTI 32 SETS.  harddunk/orunners/scross/titlef are Multi 32 boards and
+    # this repository builds System 32 only: every shipped revision sets
+    # S32_SYSTEM32_ONLY=1, which folds is_multi32 to a constant and removes the
+    # second palette, the second mixer, the MultiPCM path and half of work RAM.
+    # Emitting MRAs for them advertised games no RBF here can run.  Adding one
+    # back means restoring a Multi 32 revision first, not just a line here --
+    # Multi32ExclusionTests in verif/test_gen_mra.py fails if one reappears.
+}
+
+# These parents/sets are intentionally no longer part of the production
+# profile.  Keep clone names explicit when their parent is supported, otherwise
+# the parent fallback in gen() would emit them.
+# Keep the exclusion explicit so a future source refresh cannot re-emit them by
+# accident simply because MAME still contains their ROM definitions.
+IGNORED_PARENTS = {
+    "arescue", "dbzvrvs", "f1en", "f1lap", "sonic",
+}
+
+# The non-Rev-A European Football clone is intentionally not a production
+# target. Keep this set-level exclusion explicit so a refresh of MAME's clone
+# list cannot re-emit it through the supported svf parent fallback.
+IGNORED_SETS = {"svfo"}
+
+# Per-game button labels/defaults are part of the MRA contract, not the board
+# descriptor. Keep them here so regenerating tracked MRAs preserves the
+# remapping UI metadata as well as the ROM stream.
+BUTTONS = {
+    # Pause is the logical control after Service (joystick bit 14). The emu
+    # top freezes every CPU/audio enable and mutes audio while it is held.
+    # Use Y where it is not already an action button; four-to-six-button
+    # layouts keep Pause remappable but unbound by default to avoid collisions.
+    "ga2": (
+        "Attack,Jump,Magic,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,X,Start,Select,R,L,Y",
+    ),
+    "arabfgt": (
+        "Attack,Jump,-,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,Start,Select,R,L,Y",
+    ),
+    "brival": (
+        "Light Punch,Medium Punch,Heavy Punch,Light Kick,Medium Kick,Heavy Kick,Start,Coin,Test,Service,Pause",
+        "A,B,X,Y,R,L,Start,Select,-",
+    ),
+    "darkedge": (
+        "Light Punch,Heavy Punch,Jump,Light Kick,Heavy Kick,-,Start,Coin,Test,Service,Pause",
+        "A,B,R,X,Y,Start,Select,L,-",
+    ),
+    "holo": (
+        "Light Attack,Heavy Attack,-,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,Start,Select,R,L,Y",
+    ),
+    # Alien3's cabinet has a trigger plus a second gun button. Keep its
+    # button assignment separate from Jurassic Park's single Shoot input.
+    "alien3": (
+        "Trigger,Button,-,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,Start,Select,R,L,Y",
+    ),
+    "jpark": (
+        "Shoot,-,-,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,Start,Select,R,L,Y",
+    ),
+    # Every driving cabinet gets the shared digital Accelerate/Brake fallbacks
+    # on B1/B2 -- they drive the MSM6253 accelerator and brake channels to full
+    # scale for players without analog pedals.  Naming them here is what makes
+    # them visible and assignable in the MiSTer input menu.
+    #
+    # Rad Mobile's two cabinet switches are the headlight and the wiper
+    # (segas32.cpp INPUT_PORTS_START(radm): BUTTON1 "Light", BUTTON2 "Wiper"),
+    # carried on player-port bits 1/2 and sourced from B3/B4 so they do not
+    # collide with the pedals.  Rad Mobile has no gear selector.
+    "radm": (
+        "Accelerate,Brake,Light,Wiper,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,X,Y,Start,Select,R,L,-",
+    ),
+    # Rad Rally's gear toggle is on B3, matching Slip Stream; this previously
+    # named B1 "Gear Change", which was the accelerator button.
+    "radr": (
+        "Accelerate,Brake,Gear Change,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,X,Start,Select,R,L,Y",
+    ),
+    "spidman": (
+        "Attack,Jump,-,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,Start,Select,R,L,Y",
+    ),
+    "slipstrm": (
+        "Accelerate,Brake,Gear Change,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,X,Start,Select,R,L,Y",
+    ),
+    # Arcade Museum's Super Visual Football panel labels the three game
+    # buttons Shoot / Pass-A / Pass-B (see the linked machine record at
+    # https://www.arcade-museum.com/Videogame/super-visual-football-european-sega-cup).
+    # Supported football-family sets share this standard two-player,
+    # three-button System 32 input port.
+    "svf": (
+        "Shoot,Pass-A,Pass-B,-,-,-,Start,Coin,Test,Service,Pause",
+        "A,B,X,Start,Select,R,L,Y",
+    ),
+}
+
+BUTTON_COUNTS = {
+    "arabfgt": 2,
+    "brival": 6,
+    "darkedge": 5,
+    "ga2": 3,
+    "holo": 2,
+    "alien3": 2,
+    "jpark": 1,
+    "radm": 4,
+    "radr": 3,
+    "spidman": 2,
+    "slipstrm": 3,
+    "svf": 3,
+}
+# All supported parents use the one universal production image.
+RBF_BY_PARENT = {parent: "Arcade-SegaSystem32" for parent in GAMES}
+
+UNSUPPORTED = {"as1", "as1a", "as1b", "as1c", "sonicp"}
+
+# MAME init_* ROM pokes the hardware cannot supply, keyed by parent and applied
+# to every set of that parent. Offsets are local to the maincpu index-4 stream.
+PATCHES = {
+    # MAME's init_jpark applies this compatibility poke for an unmodelled
+    # moving-controller/drive-board response. Preserve it in the MRA stream;
+    # it is not an Alien3 video workaround and does not add framebuffer RAM.
+    "jpark": [(0xC15A8, "70 CD CD D8")],
+}
+
+def parse(src):
+    """Return {setname: {'regions': [(region, size, loads)], 'title', 'parent'}}"""
+    sets = {}
+    # ROM_START blocks
+    for m in re.finditer(r"ROM_START\(\s*(\w+)\s*\)(.*?)ROM_END", src, re.S):
+        name, body = m.group(1), m.group(2)
+        regions = []
+        cur = None
+        for line in body.splitlines():
+            rm = re.search(r'ROM_REGION\w*\(\s*(0x[0-9a-fA-F]+)\s*,\s*"([\w:]+)"', line)
+            if rm:
+                # strip the mainpcb: prefix; keep other prefixes (subpcb:) as
+                # distinct names so their loads never leak into the previous
+                # region (they are intentionally not part of the stream — the
+                # dual-PCB sub board is an HLE responder in the RTL)
+                rname = rm.group(2)
+                rname = rname[8:] if rname.startswith("mainpcb:") else rname.replace(":", "_")
+                cur = {"region": rname, "size": int(rm.group(1), 16), "loads": []}
+                regions.append(cur)
+                continue
+            lm = re.search(
+                r'(ROM_LOAD(?:16_BYTE(?:_x2|_x4)?|16_WORD|32_WORD(?:_x2|_x4)?|32_BYTE|64_BYTE|64_WORD|_x2|_x4|_x8|_x16)?)\(\s*"([^"]+)"\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*CRC\(([0-9a-fA-F]+)\)\s*SHA1\(([0-9a-fA-F]+)\)',
+                line)
+            if lm and cur is not None:
+                cur["loads"].append(dict(
+                    macro=lm.group(1), file=lm.group(2),
+                    offset=int(lm.group(3), 16), size=int(lm.group(4), 16),
+                    crc=lm.group(5)))
+        sets[name] = {"regions": regions}
+    # GAME macros for titles/parents
+    for m in re.finditer(
+            r'^GAMEL?\(\s*(\d+),\s*(\w+),\s*(\w+),\s*[\w]+,\s*\w+,\s*\w+,\s*init_\w+,\s*[\w_]+,\s*"([^"]*)",\s*"([^"]*)"',
+            src, re.M):
+        year, name, parent, manu, title = m.groups()
+        if name in sets:
+            sets[name].update(year=year, parent=parent if parent != "0" else "",
+                              manu=manu, title=title)
+    return sets
+
+def macro_base_rep(mac):
+    """Split a ROM_LOAD macro into its base form and repeat count."""
+    m = re.match(r"(.*?)(_x(2|4|8|16))?$", mac)
+    base = m.group(1)
+    rep = int(m.group(3)) if m.group(3) else 1
+    # plain ROM_LOAD_xN parses as base "ROM_LOAD"
+    return base, rep
+
+def interleave_parts(loads, region_size, ctx=""):
+    """Emit MRA <part> XML for a region's loads, padded to region_size.
+    Every load must be consumed and the emitted bytes tracked by a cursor —
+    silent drops previously left ga2 without its second program megabyte,
+    its Z80 program, and all sprite data."""
+    out = []
+    cursor = 0
+    i = 0
+    loads = sorted(loads, key=lambda l: l["offset"])
+
+    def pad_to(off):
+        nonlocal cursor
+        assert off >= cursor, f"{ctx}: overlapping loads at 0x{off:x}"
+        if off > cursor:
+            out.append(f'    <part repeat="{off - cursor}">FF</part>')
+            cursor = off
+
+    while i < len(loads):
+        l = loads[i]
+        base, rep = macro_base_rep(l["macro"])
+        if base == "ROM_LOAD16_BYTE":
+            pair = loads[i:i+2]
+            assert len(pair) == 2 and pair[1]["offset"] == pair[0]["offset"] + 1, \
+                f"{ctx}: unpaired ROM_LOAD16_BYTE {l['file']}"
+            pad_to(pair[0]["offset"])
+            block = ['    <interleave output="16">',
+                     f'      <part name="{escape(pair[0]["file"])}" crc="{pair[0]["crc"]}" map="01"/>',
+                     f'      <part name="{escape(pair[1]["file"])}" crc="{pair[1]["crc"]}" map="10"/>',
+                     '    </interleave>']
+            for _ in range(rep):
+                out.extend(block)
+            cursor += rep * (pair[0]["size"] + pair[1]["size"])
+            i += 2
+            continue
+        if base == "ROM_LOAD32_WORD":
+            pair = loads[i:i+2]
+            assert len(pair) == 2 and pair[1]["offset"] == pair[0]["offset"] + 2, \
+                f"{ctx}: unpaired ROM_LOAD32_WORD {l['file']}"
+            pad_to(pair[0]["offset"])
+            # each part is a 16-bit word per 32-bit group: map digits name the
+            # part's 1st/2nd byte, lanes read right-to-left
+            block = ['    <interleave output="32">',
+                     f'      <part name="{escape(pair[0]["file"])}" crc="{pair[0]["crc"]}" map="0021"/>',
+                     f'      <part name="{escape(pair[1]["file"])}" crc="{pair[1]["crc"]}" map="2100"/>',
+                     '    </interleave>']
+            for _ in range(rep):
+                out.extend(block)
+            cursor += rep * (pair[0]["size"] + pair[1]["size"])
+            i += 2
+            continue
+        if base == "ROM_LOAD64_WORD":
+            grp = loads[i:i+4]
+            assert len(grp) == 4 and all(
+                grp[k]["offset"] == grp[0]["offset"] + 2*k for k in range(4)), \
+                f"{ctx}: bad ROM_LOAD64_WORD group at {l['file']}"
+            pad_to(grp[0]["offset"])
+            out.append('    <interleave output="64">')
+            for k, g in enumerate(grp):
+                lanes = ["00"] * 4
+                lanes[k] = "21"
+                out.append(f'      <part name="{escape(g["file"])}" crc="{g["crc"]}" map="{"".join(reversed(lanes))}"/>')
+            out.append('    </interleave>')
+            cursor += sum(g["size"] for g in grp)
+            i += 4
+            continue
+        if base in ("ROM_LOAD32_BYTE", "ROM_LOAD64_BYTE"):
+            n = 4 if base == "ROM_LOAD32_BYTE" else 8
+            grp = loads[i:i+n]
+            assert len(grp) == n, f"{ctx}: short {base} group at {l['file']}"
+            pad_to(grp[0]["offset"])
+            out.append(f'    <interleave output="{n*8}">')
+            for k, g in enumerate(grp):
+                mp = "".join("1" if j == k else "0" for j in range(n))[::-1]
+                out.append(f'      <part name="{escape(g["file"])}" crc="{g["crc"]}" map="{mp}"/>')
+            out.append('    </interleave>')
+            cursor += sum(g["size"] for g in grp)
+            i += n
+            continue
+        # plain ROM_LOAD / ROM_LOAD16_WORD, with optional _xN repeats
+        pad_to(l["offset"])
+        for _ in range(rep):
+            out.append(f'    <part name="{escape(l["file"])}" crc="{l["crc"]}"/>')
+        cursor += l["size"] * rep
+        i += 1
+    assert cursor <= region_size, f"{ctx}: loads overflow region (0x{cursor:x} > 0x{region_size:x})"
+    if cursor < region_size:
+        out.append(f'    <part repeat="{region_size - cursor}">FF</part>')
+    return out, cursor
+
+def gen(setname, data, outdir):
+    parent = data.get("parent") or setname
+    if (setname in IGNORED_SETS or setname in IGNORED_PARENTS or
+            parent in IGNORED_PARENTS):
+        return False
+    # A set-specific entry must override its parent's board descriptor when
+    # MAME installs a different init/protection handler for the clone;
+    # falling back to the parent is correct only when no explicit set entry
+    # exists.
+    d_base = GAMES.get(setname) or GAMES.get(parent)
+    if d_base is None or setname in UNSUPPORTED:
+        return False
+    regions = {r["region"]: r for r in data["regions"]}
+    d = bytearray(d_base)
+    sprite_region_size = regions.get("sprites", {}).get("size", 0x1000000)
+    assert sprite_region_size in (0x400000, 0x800000, 0x1000000), (
+        f"{setname}: unsupported sprite region size {sprite_region_size:#x}")
+    sprite_banks = sprite_region_size // 0x400000
+    d[3] = 0x80 | (sprite_banks - 1)
+    # D1: no region may exceed its declared SDRAM slot size.
+    for reg, size in REGION_SIZES.items():
+        r = regions.get(reg)
+        if r:
+            loaded = sum(l["size"] for l in r["loads"])
+            assert loaded <= size, (
+                f"{setname}: region {reg} loads {loaded:#x} > slot {size:#x}")
+    lines = []
+    lines.append('<misterromdescription>')
+    lines.append(f'  <name>{escape(data.get("title", setname))}</name>')
+    lines.append(f'  <setname>{setname}</setname>')
+    if parent != setname:
+        lines.append(f'  <parent>{parent}</parent>')
+    lines.append(f'  <year>{data.get("year", "")}</year>')
+    lines.append(f'  <manufacturer>{escape(data.get("manu", "Sega"))}</manufacturer>')
+    lines.append(f'  <rbf>{RBF_BY_PARENT.get(parent, "Arcade-SegaSystem32")}</rbf>')
+    button_meta = BUTTONS.get(parent)
+    if button_meta:
+        names, defaults = button_meta
+        count = BUTTON_COUNTS[parent]
+        lines.append(
+            f'  <buttons names="{names}" default="{defaults}" count="{count}"/>'
+        )
+    # A clone MRA must be usable with all standard MAME set layouts.  The
+    # parent archive is needed by split sets, while merged sets keep the clone
+    # ROMs in that same parent-named archive.  MiSTer/mra-tools accepts a
+    # pipe-separated list and combines every archive that is present, so a
+    # missing side of the pair is harmless for standalone/non-merged sets.
+    rom_zips = f"{setname}.zip"
+    if parent != setname:
+        rom_zips = f"{parent}.zip|{rom_zips}"
+    # Region downloads precede the descriptor commit. Each is padded only to
+    # its MAME-declared size, rather than every core slot's maximum size.
+    for reg in STREAM_ORDER:
+        r = regions.get(reg)
+        if not r or not r["loads"]:
+            continue
+        region_size = r["size"]
+        assert region_size <= REGION_SIZES[reg], (
+            f"{setname}: region {reg} size {region_size:#x} exceeds slot")
+        lines.append(f'  <rom index="{REGION_INDEX[reg]}" zip="{rom_zips}" md5="none">')
+        parts, _ = interleave_parts(r["loads"], region_size, ctx=f"{setname}/{reg}")
+        lines += parts
+        if reg == "maincpu":
+            for off, patch_hex in PATCHES.get(parent, []):
+                lines.append(f'    <patch offset="0x{off:X}">{patch_hex}</patch>')
+        lines.append('  </rom>')
+
+    # Defaults precede index 0 so the descriptor is the final boot commit.
+    ee = regions.get("eeprom")
+    if ee and ee["loads"]:
+        # Every external part needs an archive source on its own rom/part
+        # element. Archive selection is not inherited from earlier region
+        # downloads, so omitting zip here makes MiSTer report the EEPROM as a
+        # missing loose file even when it is present in the MAME set archive.
+        lines.append(f'  <rom index="2" zip="{rom_zips}" md5="none">')
+        lines.append(f'    <part name="{escape(ee["loads"][0]["file"])}" crc="{ee["loads"][0]["crc"]}"/>')
+        lines.append('  </rom>')
+    lines.append('  <nvram index="3" size="128"/>')
+
+    hexd = bytes(d).hex().upper()
+    lines.append('  <rom index="0">')
+    lines.append(f'    <part>{hexd}</part>')
+    lines.append('  </rom>')
+    lines.append('</misterromdescription>')
+    title = data.get("title", setname).replace("/", "-").replace(":", "")
+    with open(os.path.join(outdir, f"{title}.mra"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return True
+
+def main():
+    src = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    outdir = sys.argv[2]
+    os.makedirs(outdir, exist_ok=True)
+    # D2: the emitted stream layout must match the RTL loader's OFF_* stream
+    # boundaries (rtl/mem/s32_rom_loader.sv) — descriptor(0x40) then each
+    # region padded to REGION_SIZES in STREAM_ORDER. This is the real
+    # generator<->loader contract (the loader's map_addr then translates
+    # each stream offset to its SDRAM region base, DESIGN.md §4.2/§9.3).
+    LOADER_OFF = {"maincpu": 0x40}
+    acc = 0x40
+    for reg in STREAM_ORDER:
+        LOADER_OFF.setdefault(reg, acc)
+        acc += REGION_SIZES[reg]
+    assert LOADER_OFF["soundcpu"] == 0x40 + 0x200000
+    assert LOADER_OFF["sprites"] == 0x40 + 0x200000 + 0x400000*3 + 0x10000, \
+        "stream layout drifted from s32_rom_loader OFF_SPRITES"
+    sets = parse(src)
+    n = 0
+    for name, data in sorted(sets.items()):
+        if "title" not in data:
+            continue
+        if gen(name, data, outdir):
+            n += 1
+        else:
+            print(f"skip {name} (unsupported)")
+    print(f"generated {n} MRAs")
+
+if __name__ == "__main__":
+    main()

@@ -26,6 +26,7 @@ set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
 
 set_global_assignment -name GENERATE_RBF_FILE ON
+set_global_assignment -name COMPRESSION_MODE ON
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name SAVE_DISK_SPACE OFF
 # Preserve compilation databases so Smart Recompile can reuse unchanged work.
@@ -135,7 +136,17 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # -0.054 ns at slow -40C (same see-saw as 2026-08-18). Seed 6 passed all
 # four corners: setup +0.356/+0.111/+2.515/+2.571, hold +0.107, recovery
 # +3.472, removal +0.779, min pulse +0.398. Persist seed 6 for release.
-set_global_assignment -name SEED 6
+# 2026-08-26 Sonic USB/PS2 mouse trackball RTL change: the clean seed-6
+# compile still fit but missed main clk_ram hold at -0.285 ns (one endpoint).
+# Run the bounded historical-winner seed-2 placement experiment before any
+# RTL or SDC change; update this record with the measured result.
+# Result: seed 2 closed clk_ram hold, but STA exposed a new Slow -40C HDMI
+# setup miss at -0.312 ns (TNS -2.459 ns); hold was +0.089 ns there.
+# Seed 5 also fit but missed setup at -0.548 ns (TNS -3.967 ns); hold was
+# +0.113 ns worst-case. Seed 1 then passed all four corners: setup +0.075 ns,
+# hold +0.117 ns, recovery +3.752 ns, removal +0.475 ns, min pulse +0.398 ns.
+# Keep seed 1 for the required clean full compile.
+set_global_assignment -name SEED 1
 # 2026-08-13: dropped from 8 to 2.  At 8, quartus_map and quartus_fit both died
 # with `*** Fatal Error: Access Violation` on this host; the fitter's stack
 # trace named deeply recursive TIS_ADVANCED_SPICE_RC_BODY::annotate_delay_tree
