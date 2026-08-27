@@ -160,6 +160,9 @@ module s32_core #(
     input       [7:0] track_p1_x, track_p1_y, track_p2_x, track_p2_y,
     input       [7:0] track_p3_x, track_p3_y,
     input       [3:0] track_p1_dir, track_p2_dir, track_p3_dir,
+    input signed [8:0] track_mouse_dx, track_mouse_dy,
+    input              track_mouse_strobe,
+    input              trackball_y_invert,
     input       [7:0] ppi_pa, ppi_pb, ppi_pc,
 
     // video out (screen A; screen B via second mixer on M32)
@@ -1143,7 +1146,10 @@ s32_trackball_adapter trackball (
     .player(A[5:3]), .addr(A[2:1]), .rdata(trackball_q),
     .p1_x(track_p1_x), .p1_y(track_p1_y), .p2_x(track_p2_x), .p2_y(track_p2_y),
     .p3_x(track_p3_x), .p3_y(track_p3_y),
-    .p1_dir(track_p1_dir), .p2_dir(track_p2_dir), .p3_dir(track_p3_dir)
+    .p1_dir(track_p1_dir), .p2_dir(track_p2_dir), .p3_dir(track_p3_dir),
+    .mouse_dx(track_mouse_dx), .mouse_dy(track_mouse_dy),
+    .mouse_strobe(track_mouse_strobe),
+    .invert_y(trackball_y_invert)
 );
 
 wire [7:0] ppi_q;

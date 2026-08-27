@@ -662,7 +662,10 @@ module s32_trackball_adapter (
     input       [1:0] addr,
     output reg  [7:0] rdata,
     input       [7:0] p1_x, p1_y, p2_x, p2_y, p3_x, p3_y,
-    input       [3:0] p1_dir, p2_dir, p3_dir
+    input       [3:0] p1_dir, p2_dir, p3_dir,
+    input signed [8:0] mouse_dx, mouse_dy,
+    input             mouse_strobe,
+    input             invert_y
 );
 
 localparam signed [8:0] DIGITAL_STEP = 9'sd30;
@@ -691,11 +694,19 @@ function automatic signed [8:0] axis_delta;
 endfunction
 
 wire signed [8:0] x0_delta = axis_delta(p1_x, p1_dir[0], p1_dir[1], 1'b1);
-wire signed [8:0] y0_delta = axis_delta(p1_y, p1_dir[3], p1_dir[2], 1'b0);
+wire signed [8:0] y0_delta = axis_delta(p1_y, p1_dir[3], p1_dir[2], invert_y);
 wire signed [8:0] x1_delta = axis_delta(p2_x, p2_dir[0], p2_dir[1], 1'b1);
-wire signed [8:0] y1_delta = axis_delta(p2_y, p2_dir[3], p2_dir[2], 1'b0);
+wire signed [8:0] y1_delta = axis_delta(p2_y, p2_dir[3], p2_dir[2], invert_y);
 wire signed [8:0] x2_delta = axis_delta(p3_x, p3_dir[0], p3_dir[1], 1'b1);
-wire signed [8:0] y2_delta = axis_delta(p3_y, p3_dir[3], p3_dir[2], 1'b0);
+wire signed [8:0] y2_delta = axis_delta(p3_y, p3_dir[3], p3_dir[2], invert_y);
+
+// The shared host mouse is a relative report stream.  SegaSonic's X counter
+// is reversed like the MAME TRACKX input; Y defaults positive-down and can be
+// inverted with the descriptor-gated OSD option.  Consume each accepted report
+// immediately so short host bursts are not collapsed by the frame-paced
+// analog compatibility path.
+wire signed [8:0] mouse_x_delta = -mouse_dx;
+wire signed [8:0] mouse_y_delta = invert_y ? -mouse_dy : mouse_dy;
 
 reg [11:0] x0, y0, x1, y1, x2, y2;
 wire [11:0] x0_next = x0 + {{3{x0_delta[8]}}, x0_delta};
@@ -704,6 +715,12 @@ wire [11:0] x1_next = x1 + {{3{x1_delta[8]}}, x1_delta};
 wire [11:0] y1_next = y1 + {{3{y1_delta[8]}}, y1_delta};
 wire [11:0] x2_next = x2 + {{3{x2_delta[8]}}, x2_delta};
 wire [11:0] y2_next = y2 + {{3{y2_delta[8]}}, y2_delta};
+wire [11:0] x0_mouse_next = x0 + {{3{mouse_x_delta[8]}}, mouse_x_delta};
+wire [11:0] y0_mouse_next = y0 + {{3{mouse_y_delta[8]}}, mouse_y_delta};
+wire [11:0] x0_frame_mouse_next = x0_next +
+                                   (mouse_strobe ? {{3{mouse_x_delta[8]}}, mouse_x_delta} : 12'd0);
+wire [11:0] y0_frame_mouse_next = y0_next +
+                                   (mouse_strobe ? {{3{mouse_y_delta[8]}}, mouse_y_delta} : 12'd0);
 
 always @(posedge clk) begin
     if (rst || !enable) begin
@@ -713,9 +730,12 @@ always @(posedge clk) begin
     end
     else begin
         if (frame_tick) begin
-            x0 <= x0_next; y0 <= y0_next;
+            x0 <= x0_frame_mouse_next; y0 <= y0_frame_mouse_next;
             x1 <= x1_next; y1 <= y1_next;
             x2 <= x2_next; y2 <= y2_next;
+        end
+        else if (mouse_strobe) begin
+            x0 <= x0_mouse_next; y0 <= y0_mouse_next;
         end
         if (cs && we) begin
             case (player)

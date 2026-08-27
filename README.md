@@ -11,6 +11,9 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 
 - Original 4:3 or full-screen aspect ratio
 - Normal, vertical-integer, or full-integer scaling
+- Native direct-video output for HDMI-to-VGA/DAC and 15 kHz CRT setups
+- MiSTer analog VGA output plus the full HDMI scaler/OSD output path
+- Full native CRT path with adjustable 15 kHz geometry controls
 - Optional CRT 25%, 50%, and 75% scandoubler effects
 - CRT horizontal size/position and vertical-shift controls for 15 kHz output
 - Persistent 128-byte 93C46 high-score/settings storage
@@ -19,9 +22,11 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 - Alien3: The Gun and Jurassic Park positional-gun inputs through the generic
   MiSTer/JTFRAME-compatible analog, USB-relative-mouse, and d-pad paths;
   Jurassic Park additionally supports GunCon 2 over SNAC
-- SegaSonic the Hedgehog: three-player control-ball support with relative input
-  emulation from each player’s left analog stick or d-pad; stick magnitude
-  becomes running speed.
+- SegaSonic the Hedgehog: descriptor-gated three-player control-ball support;
+  player 1 accepts native MiSTer USB/PS/2 mouse relative X/Y reports, while all
+  three players retain left-analog-stick or d-pad compatibility input. Its
+  optional Invert Trackball Y setting applies to both analog/d-pad and
+  USB/mouse trackball input and is only exposed for SegaSonic.
 - Driving games: left-stick X is the analog wheel and right-stick up/down are
   the pedals; Rad Mobile and Slip Stream also accept d-pad left/right endpoints.
 

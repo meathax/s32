@@ -140,7 +140,10 @@ assign VGA_F1 = 0;
 assign VGA_SCALER = 0;
 assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
-assign HDMI_BLACKOUT = 0;
+// s32_video changes the native horizontal size at a frame boundary.  Keep
+// ascal's resolution-switch blackout enabled so scaled HDMI gets clean
+// remeasurement frames; direct video and analog output do not use this gate.
+assign HDMI_BLACKOUT = 1'b1;
 assign HDMI_BOB_DEINT = 0;
 assign AUDIO_S = 1;
 assign AUDIO_MIX = 0;
@@ -169,14 +172,15 @@ localparam CONF_STR = {
     "O[7],Service Mode,Off,On;",
     // Analog sticks/USB lightguns remain the default positional source;
     // GunCon SNAC is an additional opt-in source for either player.
-    "O[31:30],P1 Gun Input,Stick/USB Gun/Sinden,SNAC Port 1;",
-    "o[1:0],P2 Gun Input,Stick/USB Gun/Sinden,SNAC Port 2;",
+    "h0O[31:30],P1 Gun Input,Stick/USB Gun/Sinden,SNAC Port 1;",
+    "h0o[1:0],P2 Gun Input,Stick/USB Gun/Sinden,SNAC Port 2;",
     // JTFRAME-compatible generic lightgun presentation controls.  status[8]
     // intentionally follows the MiSTer/JTFRAME Sinden-border convention;
     // status[9] is already the established CRT Adjust option in this core.
-    "O[8],Sinden Borders,Off,On;",
-    "O[34],Gun Crosshair,Off,On;",
-    "O[37:36],Gun Sensitivity,Normal,High,Low,Lowest;",
+    "h0O[8],Sinden Borders,Off,On;",
+    "h0O[34],Gun Crosshair,Off,On;",
+    "h0O[37:36],Gun Sensitivity,Normal,High,Low,Lowest;",
+    "h2O[35],Invert Trackball Y,Off,On;",
     // status[29] is RESERVED and intentionally unused.  It used to select
     // "V60 Fetch,Fast,PCB (Reset)"; the Fast instruction-fetch transport has
     // been removed and the core always uses the PCB fetch path.  The bit is
@@ -329,7 +333,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
     .buttons(buttons),
     .status(status),
     // H1 CRT controls remain hidden until CRT Adjust is enabled.
-    .status_menumask({14'd0, ~status[9], 1'b0}),
+    .status_menumask({13'd0, (active_board.prot_sel == PROT_SONIC), ~status[9], active_board.gun_aim}),
 
     .ioctl_download(ioctl_download),
     .ioctl_upload(ioctl_upload),
@@ -359,9 +363,9 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
 );
 
 // hps_io toggles ps2_mouse[24] for each host report.  Decode that toggle once
-// in the clk_sys domain so the P1 generic lightgun sees a one-clock event;
-// P2 deliberately receives no mouse stream because MiSTer exposes one shared
-// PS/2 mouse packet path.
+// in the clk_sys domain so the P1 generic lightgun and Sonic trackball see a
+// one-clock event.  P2 deliberately receives no mouse stream because MiSTer
+// exposes one shared PS/2 mouse packet path.
 reg ps2_mouse_event_d;
 wire ps2_mouse_strobe = ps2_mouse[24] ^ ps2_mouse_event_d;
 // JTFRAME's MiSTer target sign-extends the PS/2 report with flags[4]/[5]
@@ -838,10 +842,11 @@ wire brival_inputs = active_board.prot_sel == PROT_BRIVAL;
 wire darkedge_inputs = active_board.prot_sel == PROT_DARKEDGE;
 wire [7:0] core_ppi_pa = (brival_inputs || darkedge_inputs) ? 8'hff :
                           p_dig(joystick_2);
-wire [7:0] core_ppi_pb = brival_inputs ? brival_ppi_pb :
-                          darkedge_inputs ? darkedge_ppi_pb : p_dig(joystick_3);
-wire [7:0] core_ppi_pc = (brival_inputs || darkedge_inputs) ? 8'hff :
-                          ga2_ppi_pc;
+    wire [7:0] core_ppi_pb = brival_inputs ? brival_ppi_pb :
+                              darkedge_inputs ? darkedge_ppi_pb : p_dig(joystick_3);
+    wire [7:0] core_ppi_pc = (brival_inputs || darkedge_inputs) ? 8'hff :
+                              ga2_ppi_pc;
+    wire trackball_y_invert = (active_board.prot_sel == PROT_SONIC) && status[35];
 
 //////////////////////////////   CORE   ///////////////////////////////////////
 wire [23:0] rgb_a, rgb_b;
@@ -897,6 +902,9 @@ s32_core core (
     .track_p3_x(joystick_l_analog_2[7:0]), .track_p3_y(joystick_l_analog_2[15:8]),
     .track_p1_dir(lightgun_joy_p1), .track_p2_dir(lightgun_joy_p2),
     .track_p3_dir(lightgun_joy_p3),
+    .track_mouse_dx(ps2_mouse_dx9), .track_mouse_dy(ps2_mouse_dy9),
+    .track_mouse_strobe(ps2_mouse_strobe),
+    .trackball_y_invert(trackball_y_invert),
     .ppi_pa(core_ppi_pa), .ppi_pb(core_ppi_pb), .ppi_pc(core_ppi_pc),
     .rgb_a(rgb_a), .rgb_b(rgb_b),
     .ce_pix(ce_pix_core),
