@@ -3,9 +3,10 @@
 MiSTer FPGA core for Sega's standard single-screen System 32 arcade board
 (837-7428 / 171-5964E), including the descriptor-gated three-player
 control-ball interface used by SegaSonic the Hedgehog. It targets the
-DE10-Nano with SDRAM and uses one universal `Arcade-SegaSystem32.rbf`; each
-MRA selects the required game hardware, including the real NEC V25 path for
-Arabian Fight and Golden Axe II.
+DE10-Nano with SDRAM and uses one universal dated
+`Arcade-SegaSystem32_YYYYMMDD.rbf` release artifact; each MRA selects the
+required game hardware, including the real NEC V25 path for Arabian Fight and
+Golden Axe II.
 
 Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 
@@ -163,7 +164,8 @@ Linked reference projects and arcade ROMs remain under their respective terms.
 
 ## How to install
 
-Copy `Arcade-SegaSystem32.rbf` and the MRA files to `/media/fat/_Arcade/`.
+Copy the latest `Arcade-SegaSystem32_YYYYMMDD.rbf` and the MRA files to
+`/media/fat/_Arcade/`.
 Place the required MAME ROM ZIPs in `/media/fat/games/mame/`, then launch a
 game from the MiSTer Arcade menu.
 
