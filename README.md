@@ -45,8 +45,8 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 
 This table lists only areas supported by schematics or silicon evidence. It
 defines the implemented hardware boundary, not a blanket cycle-accuracy claim.
-Open timing, analogue, PLD, and protection questions are tracked in the
-[PCB evidence ledger](docs/pcb/system32_evidence.json).
+Open timing, analogue, PLD, and protection questions remain outside the
+documented claims below.
 
 | Area | Evidence | Core implementation |
 | --- | --- | --- |
@@ -58,9 +58,6 @@ Open timing, analogue, PLD, and protection questions are tracked in the
 | I/O, EEPROM, and sound | Schematics, sheets 6-8 | 315-5296 I/O, 93C46 storage, Z80, dual YM3438, and PCM |
 | SegaSonic control interface | [420-6095 service manual, pp. 5, 8, 11](https://arcade.segakore.fr/downloads/manuals/420-6095_segasonic_the_hedeghog_service_manual_1st.pdf): 837-8685 interface board, three XA/XB and YA/YB channels, and 1P/2P/3P control-ball test | Descriptor-gated relative counter adapter; exact gain/polarity remains a validation item |
 | Driving input adapter | MiSTer HPS paddle, spinner-toggle, and PS/2 mouse packet contracts; MSM6253 channel-0 load boundary | [s32_driving_controls.sv](rtl/io/s32_driving_controls.sv); descriptor-gated Slip Stream, Rad Mobile, and Rad Rally source selection |
-
-See [hardware references](docs/references.md) for the schematic provenance and
-detailed source record.
 
 ## Supported games
 
@@ -113,7 +110,7 @@ framebuffer/HUD blending workaround.
 - **Meathax** - System 32 RTL, integration, MRA generation, verification, and packaging.
 - **meathax/s32multi** - [pinned driving-control adapter source](https://github.com/meathax/s32multi/blob/1e89f67005ae0eb11ae0622cb52e8214c78ed76e/rtl/io/s32_driving_controls.sv), adapted here for the single-screen HPS paddle, spinner, and mouse-relative input path; the donor project is GPLv3.
 - **Sega, Nemesis1207, and System 32 researchers** - original hardware and
-  public schematic material recorded in [the source ledger](docs/references.md).
+  public schematic material used by this project.
 - **MAME developers** - [System 32 behavioural reference](https://github.com/mamedev/mame), including the uPD4701A trackball contract and SegaSonic ROM/input definitions.
 - **SegaSonic documentation** - [420-6095 service manual](https://arcade.segakore.fr/downloads/manuals/420-6095_segasonic_the_hedeghog_service_manual_1st.pdf) and [Sudden Desu’s debug analysis](https://sudden-desu.net/entry/segasonic-the-hedgehog-stage-select-and-debug-tools/), used for control wiring, stage order, and final protection behavior.
 - **Jamie Iles** - [s80x86](https://github.com/jamieiles/80x86), used by the
@@ -136,7 +133,7 @@ framebuffer/HUD blending workaround.
   attribution is retained in [`s32_guncon_snac.sv`](rtl/io/s32_guncon_snac.sv).
 - **MiSTer-devel and reference-core authors** - MiSTer framework, MRA tooling,
   and the audited S32X, Irem M92, WonderSwan, and MegaCD integration references
-  listed in [reference-cores.md](docs/reference-cores.md).
+  used by this project.
 - Intel Quartus, Verilator, Icarus Verilog, ModelSim, and MAME tool authors.
 
 ## License
@@ -155,7 +152,8 @@ components retain their own terms and notices:
   [`s32_lightgun_overlay.sv`](rtl/video/s32_lightgun_overlay.sv), with pinned
   provenance in [`verif/donors/README.md`](verif/donors/README.md)
 - GunCon SNAC transport reference: GPL-2.0-or-later; pinned source and notice in [`rtl/io/s32_guncon_snac.sv`](rtl/io/s32_guncon_snac.sv)
-- SiliconRE material: [SiliconRE licence](docs/references/siliconre/315-5385/SiliconRE-LICENSE)
+- SiliconRE material: upstream [SiliconRE project](https://github.com/furrtek/SiliconRE)
+  licence and notices
 - Driving-control adapter: GPLv3-compatible adaptation of the pinned
   [s32multi source](https://github.com/meathax/s32multi/tree/1e89f67005ae0eb11ae0622cb52e8214c78ed76e).
 - MiSTer framework and Intel/Altera IP: retained upstream/vendor notices
