@@ -11,6 +11,8 @@ scratch/
 roms/
 /docs/
 /reference/
+/cfg/
+/tools/
 /.codex-mister-build/
 /.playwright-mcp/
 /artifacts/

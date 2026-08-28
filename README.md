@@ -180,5 +180,6 @@ db_url = https://raw.githubusercontent.com/meathax/meatcores/db/db.json.zip
 ## Development
 
 Quartus Prime 17.0.2 Build 602 is the pinned toolchain. Build the universal
-profile with `tools/build-segas32.bat`. See [PROFILE_CONTRACT.md](PROFILE_CONTRACT.md)
-for profile rules and verification commands.
+profile from the standard `Arcade-SegaSystem32.qpf`,
+`Arcade-SegaSystem32.qsf`, `files.qip`, and `clean.bat` project files. Local
+build and verification utilities are not part of the public core distribution.
