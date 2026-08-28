@@ -27,8 +27,13 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
   three players retain left-analog-stick or d-pad compatibility input. Its
   optional Invert Trackball Y setting applies to both analog/d-pad and
   USB/mouse trackball input and is only exposed for SegaSonic.
-- Driving games: left-stick X is the analog wheel and right-stick up/down are
-  the pedals; Rad Mobile and Slip Stream also accept d-pad left/right endpoints.
+- Driving games: left-stick X is the analog steering source and right-stick
+  up/down are the pedals; Rad Mobile and Slip Stream also accept d-pad
+  left/right endpoints.
+- Slip Stream, Rad Mobile, and Rad Rally expose P1 Steering (analog stick,
+  paddle, spinner, or reverse spinner) plus Low/Normal/High steering
+  sensitivity. Dedicated HPS spinner events and mouse-relative reports are
+  accumulated before the MSM6253 wheel sample.
 
 ## PCB Accuracy
 
@@ -46,6 +51,7 @@ Open timing, analogue, PLD, and protection questions are tracked in the
 | Colour/video output | Schematics, sheet 5; [315-5242 silicon evidence](https://github.com/furrtek/SiliconRE/tree/master/Sega/315-5242) | Palette, priority, shadow/highlight, and RGB output |
 | I/O, EEPROM, and sound | Schematics, sheets 6-8 | 315-5296 I/O, 93C46 storage, Z80, dual YM3438, and PCM |
 | SegaSonic control interface | [420-6095 service manual, pp. 5, 8, 11](https://arcade.segakore.fr/downloads/manuals/420-6095_segasonic_the_hedeghog_service_manual_1st.pdf): 837-8685 interface board, three XA/XB and YA/YB channels, and 1P/2P/3P control-ball test | Descriptor-gated relative counter adapter; exact gain/polarity remains a validation item |
+| Driving input adapter | MiSTer HPS paddle, spinner-toggle, and PS/2 mouse packet contracts; MSM6253 channel-0 load boundary | [s32_driving_controls.sv](rtl/io/s32_driving_controls.sv); descriptor-gated Slip Stream, Rad Mobile, and Rad Rally source selection |
 
 See [hardware references](docs/references.md) for the schematic provenance and
 detailed source record.
@@ -99,6 +105,7 @@ framebuffer/HUD blending workaround.
 ## Credits
 
 - **Meathax** - System 32 RTL, integration, MRA generation, verification, and packaging.
+- **meathax/s32multi** - [pinned driving-control adapter source](https://github.com/meathax/s32multi/blob/1e89f67005ae0eb11ae0622cb52e8214c78ed76e/rtl/io/s32_driving_controls.sv), adapted here for the single-screen HPS paddle, spinner, and mouse-relative input path; the donor project is GPLv3.
 - **Sega, Nemesis1207, and System 32 researchers** - original hardware and
   public schematic material recorded in [the source ledger](docs/references.md).
 - **MAME developers** - [System 32 behavioural reference](https://github.com/mamedev/mame), including the uPD4701A trackball contract and SegaSonic ROM/input definitions.
@@ -143,6 +150,8 @@ components retain their own terms and notices:
   provenance in [`verif/donors/README.md`](verif/donors/README.md)
 - GunCon SNAC transport reference: GPL-2.0-or-later; pinned source and notice in [`rtl/io/s32_guncon_snac.sv`](rtl/io/s32_guncon_snac.sv)
 - SiliconRE material: [SiliconRE licence](docs/references/siliconre/315-5385/SiliconRE-LICENSE)
+- Driving-control adapter: GPLv3-compatible adaptation of the pinned
+  [s32multi source](https://github.com/meathax/s32multi/tree/1e89f67005ae0eb11ae0622cb52e8214c78ed76e).
 - MiSTer framework and Intel/Altera IP: retained upstream/vendor notices
 
 Linked reference projects and arcade ROMs remain under their respective terms.

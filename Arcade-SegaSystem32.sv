@@ -119,6 +119,8 @@ wire [15:0] joystick_l_analog_0;
 wire [15:0] joystick_l_analog_1;
 wire [15:0] joystick_l_analog_2;
 wire [15:0] joystick_r_analog_0;
+wire  [7:0] paddle_0;
+wire  [8:0] spinner_0;
 wire        core_hs, core_vs;
 wire        mode_416_active;
 wire [24:0] ps2_mouse;
@@ -135,6 +137,12 @@ always @(*) begin
     active_board.v25_table        = board_desc.v25_table;
 `endif
 end
+
+// The current MRA descriptor inventory uses these three descriptor features
+// only for Slip Stream, Rad Mobile, and Rad Rally respectively.
+wire driving_controls_visible = active_board.digital_steering ||
+                                 (active_board.digital_profile == DIGITAL_RADM) ||
+                                 active_board.comm_link_hle;
 
 assign VGA_F1 = 0;
 assign VGA_SCALER = 0;
@@ -170,6 +178,9 @@ localparam CONF_STR = {
     "O[6],Screen (Multi32),A,B;",
 `endif
     "O[7],Service Mode,Off,On;",
+    // These controls are meaningful only on the three driving descriptors.
+    "h3O[40:39],P1 Steering,Analog Stick,Paddle,Spinner,Spinner Reverse;",
+    "h3O[42:41],Steering Sensitivity,Normal,Low,High;",
     // Analog sticks/USB lightguns remain the default positional source;
     // GunCon SNAC is an additional opt-in source for either player.
     "h0O[31:30],P1 Gun Input,Stick/USB Gun/Sinden,SNAC Port 1;",
@@ -332,8 +343,10 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
 
     .buttons(buttons),
     .status(status),
-    // H1 CRT controls remain hidden until CRT Adjust is enabled.
-    .status_menumask({13'd0, (active_board.prot_sel == PROT_SONIC), ~status[9], active_board.gun_aim}),
+    // H1/H2/H3 controls remain hidden until their descriptor/runtime gate.
+    .status_menumask({12'd0, driving_controls_visible,
+                      (active_board.prot_sel == PROT_SONIC), ~status[9],
+                      active_board.gun_aim}),
 
     .ioctl_download(ioctl_download),
     .ioctl_upload(ioctl_upload),
@@ -357,8 +370,10 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
     .joystick_l_analog_1(joystick_l_analog_1),
     .joystick_l_analog_2(joystick_l_analog_2),
     .joystick_r_analog_0(joystick_r_analog_0),
-    .paddle_0(),
+    .paddle_0(paddle_0),
     .paddle_1(),
+    .spinner_0(spinner_0),
+    .spinner_1(),
     .ps2_mouse(ps2_mouse)
 );
 
@@ -758,6 +773,10 @@ wire [7:0] driving_wheel;
 wire [7:0] driving_accel;
 wire [7:0] driving_brake;
 wire       wheel_load_ch0;
+wire [1:0] driving_wheel_source = driving_controls_visible
+                                 ? status[40:39] : 2'd0;
+wire [1:0] driving_steering_sensitivity = driving_controls_visible
+                                         ? status[42:41] : 2'd0;
 s32_driving_controls driving_controls (
     .clk(clk_sys),
     .rst(reset),
@@ -765,6 +784,11 @@ s32_driving_controls driving_controls (
     .capture_wheel((active_board.digital_profile == DIGITAL_RADM) ||
                    active_board.digital_steering),
     .left_x(joystick_l_analog_0[7:0]),
+    .paddle(paddle_0),
+    .spinner(spinner_0),
+    .mouse(ps2_mouse),
+    .wheel_source(driving_wheel_source),
+    .steering_sensitivity(driving_steering_sensitivity),
     .right_y(joystick_r_analog_0[15:8]),
     .digital_accel(joystick_0[4]),
     .digital_brake(joystick_0[5]),
@@ -776,9 +800,10 @@ s32_driving_controls driving_controls (
 );
 // Driving cabinets wire the wheel, accelerator, and brake to the first three
 // MSM6253 channels. MiSTer's left-stick X is the wheel; right-stick up/down
-// are the analog pedals, with A/B as full-scale digital fallbacks. Rad Mobile
+// are the analog pedals, with A/B as full-scale digital fallbacks. The driving
+// OSD selects the absolute paddle or relative spinner/mouse source; Rad Mobile
 // and descriptor-selected Slip Stream profiles also map the MiSTer left/right
-// D-pad bits to full-scale wheel endpoints; the MSM6253 samples the live value
+// D-pad bits to full-scale wheel endpoints. The MSM6253 samples the live value
 // on its accepted channel-load write.
 assign adc_ch[0] = active_board.gun_aim ? game_gun_p1_x : driving_wheel;
 assign adc_ch[1] = active_board.gun_aim ? game_gun_p1_y : driving_accel;

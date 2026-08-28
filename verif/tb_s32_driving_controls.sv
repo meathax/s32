@@ -7,6 +7,11 @@ module tb_s32_driving_controls;
     logic       wheel_sample = 1'b0;
     logic       capture_wheel = 1'b1;
     logic [7:0] left_x = 8'h00;
+    logic [7:0] paddle = 8'h80;
+    logic [8:0] spinner = 9'h000;
+    logic [24:0] mouse = 25'd0;
+    logic [1:0] wheel_source = 2'd0;
+    logic [1:0] steering_sensitivity = 2'd0;
     logic [7:0] right_y = 8'h00;
     logic       digital_accel = 1'b0;
     logic       digital_brake = 1'b0;
@@ -22,6 +27,11 @@ module tb_s32_driving_controls;
         .wheel_sample(wheel_sample),
         .capture_wheel(capture_wheel),
         .left_x(left_x),
+        .paddle(paddle),
+        .spinner(spinner),
+        .mouse(mouse),
+        .wheel_source(wheel_source),
+        .steering_sensitivity(steering_sensitivity),
         .right_y(right_y),
         .digital_accel(digital_accel),
         .digital_brake(digital_brake),

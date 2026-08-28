@@ -11,11 +11,16 @@
 // at most WHEEL_STEP per wheel_sample pulse and must never cross the
 // 00<->FF wrap. Pedals stay combinational.
 module tb_driving_controls;
-    reg        clk = 1'b0;
+    reg        clk;
     reg        rst;
     reg        wheel_sample = 1'b0;
     reg        capture_wheel;
     reg  [7:0] left_x;
+    reg  [7:0] paddle;
+    reg  [8:0] spinner;
+    reg [24:0] mouse;
+    reg  [1:0] wheel_source;
+    reg  [1:0] steering_sensitivity;
     reg  [7:0] right_y;
     reg        digital_accel;
     reg        digital_brake;
@@ -31,6 +36,11 @@ module tb_driving_controls;
         .wheel_sample(wheel_sample),
         .capture_wheel(capture_wheel),
         .left_x(left_x),
+        .paddle(paddle),
+        .spinner(spinner),
+        .mouse(mouse),
+        .wheel_source(wheel_source),
+        .steering_sensitivity(steering_sensitivity),
         .right_y(right_y),
         .digital_accel(digital_accel),
         .digital_brake(digital_brake),
@@ -43,7 +53,7 @@ module tb_driving_controls;
 
     always #5 clk = ~clk;
 
-    task automatic check(input condition, input [255:0] message);
+    task automatic check(input condition, input string message);
         if (!condition) begin
             $display("FAIL: %0s", message);
             $fatal(1);
@@ -87,7 +97,13 @@ module tb_driving_controls;
     endtask
 
     initial begin
+        clk = 1'b0;
         left_x = 8'h00;
+        paddle = 8'h80;
+        spinner = 9'h000;
+        mouse = 25'd0;
+        wheel_source = 2'd0;
+        steering_sensitivity = 2'd0;
         right_y = 8'h00;
         digital_accel = 1'b0;
         digital_brake = 1'b0;
@@ -173,6 +189,103 @@ module tb_driving_controls;
         check(wheel == 8'h80, "both directions return to center");
         digital_left = 1'b0;
         digital_right = 1'b0;
+
+        // Absolute paddle steering uses the same neutral-centered sensitivity
+        // transfer as the analog stick.
+        wheel_source = 2'd1;
+        paddle = 8'he0;
+        run_samples(3);
+        check(wheel == 8'he0, "paddle source reaches its position");
+        paddle = 8'h80;
+        run_samples(3);
+        check(wheel == 8'h80, "paddle source returns to center");
+
+        steering_sensitivity = 2'd1; // low
+        paddle = 8'he0;
+        run_samples(2);
+        check(wheel == 8'hb0, "low sensitivity halves paddle deflection");
+        steering_sensitivity = 2'd2; // high
+        run_samples(2);
+        check(wheel == 8'hff, "high sensitivity doubles and saturates paddle");
+        steering_sensitivity = 2'd0; // normal
+        paddle = 8'h80;
+        run_samples(3);
+        check(wheel == 8'h80, "paddle sensitivity returns to neutral");
+
+        // The analog stick uses the same sensitivity options.
+        wheel_source = 2'd0;
+        steering_sensitivity = 2'd1;
+        left_x = 8'h10; // deadzone-adjusted position 0x8a
+        run_samples(1);
+        check(wheel == 8'h85, "low sensitivity halves analog deflection");
+        steering_sensitivity = 2'd2;
+        run_samples(1);
+        check(wheel == 8'h94, "high sensitivity doubles analog deflection");
+
+        // Dedicated spinner reports are relative events, not absolute
+        // positions. The toggle must be consumed once and the delta must be
+        // scaled before it is accumulated.
+        steering_sensitivity = 2'd0;
+        wheel_source = 2'd2;
+        left_x = 8'h00;
+        run_samples(2);
+        @(negedge clk);
+        spinner = 9'h120; // +0x20, toggle=1
+        @(posedge clk);
+        #1;
+        sample;
+        check(wheel == 8'ha0, "spinner source applies a positive delta");
+        sample;
+        check(wheel == 8'ha0, "spinner toggle is consumed once");
+
+        @(negedge clk);
+        steering_sensitivity = 2'd1; // low
+        spinner = 9'h0e0; // -0x20, toggle=0
+        @(posedge clk);
+        #1;
+        sample;
+        check(wheel == 8'h90, "low sensitivity halves spinner delta");
+
+        @(negedge clk);
+        steering_sensitivity = 2'd2; // high
+        spinner = 9'h120; // +0x20, toggle=1
+        @(posedge clk);
+        #1;
+        sample;
+        sample;
+        check(wheel == 8'hd0, "high sensitivity doubles spinner delta");
+
+        // Reverse mode inverts relative input without changing the position
+        // source or sensitivity transfer.
+        @(negedge clk);
+        steering_sensitivity = 2'd0;
+        wheel_source = 2'd3;
+        spinner = 9'h010; // +0x10, toggle=0
+        @(posedge clk);
+        #1;
+        sample;
+        check(wheel == 8'hc0, "reverse spinner inverts direction");
+
+        // The shared PS/2 mouse packet feeds the same relative spinner
+        // accumulator. Its event toggle is intentionally two-stage sampled.
+        wheel_source = 2'd2;
+        mouse = 25'd0;
+        @(negedge clk);
+        mouse[15:8] = 8'h10;
+        mouse[4] = 1'b0;
+        mouse[24] = 1'b1;
+        @(posedge clk);
+        @(posedge clk);
+        #1;
+        sample;
+        check(wheel == 8'hd0, "mouse-relative spinner applies its delta");
+
+        // Return the adapter to the analog neutral before the existing
+        // non-capture and idle-sample checks.
+        wheel_source = 2'd0;
+        steering_sensitivity = 2'd0;
+        left_x = 8'h00;
+        run_samples(2);
 
         // Non-capture profile still slews from the analog coordinate.
         capture_wheel = 1'b0;
