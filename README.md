@@ -30,6 +30,9 @@ Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 - Driving games: left-stick X is the analog steering source and right-stick
   up/down are the pedals; Rad Mobile and Slip Stream also accept d-pad
   left/right endpoints.
+- Rad Mobile also supports P1 steering from a paddle/wheel, dedicated spinner,
+  reverse spinner, or mouse-relative input; Low/Normal/High sensitivity applies
+  to analog stick, wheel, and spinner steering.
 - Slip Stream, Rad Mobile, and Rad Rally expose P1 Steering (analog stick,
   paddle, spinner, or reverse spinner) plus Low/Normal/High steering
   sensitivity. Dedicated HPS spinner events and mouse-relative reports are
