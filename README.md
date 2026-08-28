@@ -1,9 +1,11 @@
 # Sega System 32 for MiSTer FPGA
 
 MiSTer FPGA core for Sega's standard single-screen System 32 arcade board
-(837-7428 / 171-5964E). It targets the DE10-Nano with SDRAM and uses one
-universal `Arcade-SegaSystem32.rbf`; each MRA selects the required game
-hardware, including the real NEC V25 path for Arabian Fight and Golden Axe II.
+(837-7428 / 171-5964E), including the descriptor-gated three-player
+control-ball interface used by SegaSonic the Hedgehog. It targets the
+DE10-Nano with SDRAM and uses one universal `Arcade-SegaSystem32.rbf`; each
+MRA selects the required game hardware, including the real NEC V25 path for
+Arabian Fight and Golden Axe II.
 
 Commercial ROMs are not included. Multi 32 and AS-1 hardware are not supported.
 
@@ -170,7 +172,7 @@ For automatic installation, add this to `/media/fat/downloader.ini` and run
 
 ```ini
 [meathax/meatcores]
-db_url = https://raw.githubusercontent.com/meathax/meatcores/db/downloader_meathax_meatcores.zip
+db_url = https://raw.githubusercontent.com/meathax/meatcores/db/db.json.zip
 ```
 
 ## Development
