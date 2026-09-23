@@ -300,6 +300,72 @@ end
 endmodule
 
 // ---------------------------------------------------------------------------
+// Dragon Ball Z V.R. V.S. FD1149 protection handler (MAME init_dbzvrvs).
+// A write in 0xa00000-0xa7ffff copies work RAM 0x200044 to 0x2080c8.
+// ---------------------------------------------------------------------------
+module s32_prot_dbzvrvs #(
+    parameter ENABLE = 1'b1
+) (
+    input             clk,
+    input             rst,
+    input             enable,
+    input             cpu_write,
+    output reg        wram_req,
+    output reg        wram_we,
+    output reg [15:0] wram_addr,
+    output reg [15:0] wram_wdata,
+    output reg  [1:0] wram_be,
+    input      [15:0] wram_rdata,
+    input             wram_ack
+);
+
+typedef enum logic [1:0] { DBZ_IDLE, DBZ_READ, DBZ_WRITE } dbz_state_t;
+dbz_state_t state;
+
+always @(posedge clk) begin
+    if (rst || !ENABLE || !enable) begin
+        state      <= DBZ_IDLE;
+        wram_req   <= 1'b0;
+        wram_we    <= 1'b0;
+        wram_addr  <= 16'h0000;
+        wram_wdata <= 16'h0000;
+        wram_be    <= 2'b00;
+    end
+    else begin
+        case (state)
+        DBZ_IDLE: begin
+            wram_req <= 1'b0;
+            if (cpu_write) begin
+                wram_req  <= 1'b1;
+                wram_we   <= 1'b0;
+                wram_addr <= 16'h0022; // 0x200044 >> 1
+                wram_be   <= 2'b00;
+                state     <= DBZ_READ;
+            end
+        end
+        DBZ_READ: if (wram_ack) begin
+            wram_req   <= 1'b1;
+            wram_we    <= 1'b1;
+            wram_addr  <= 16'h4064; // 0x2080c8 >> 1
+            wram_wdata <= wram_rdata;
+            wram_be    <= 2'b11;
+            state      <= DBZ_WRITE;
+        end
+        DBZ_WRITE: if (wram_ack) begin
+            wram_req <= 1'b0;
+            state    <= DBZ_IDLE;
+        end
+        default: begin
+            wram_req <= 1'b0;
+            state    <= DBZ_IDLE;
+        end
+        endcase
+    end
+end
+
+endmodule
+
+// ---------------------------------------------------------------------------
 // SegaSonic level-load protection device (final set, FD1149 317-0213 board).
 //
 // The game keeps a cleared-level counter at work RAM 0x20e5c4. Every time it
@@ -547,5 +613,90 @@ assign rdata = (rd_addr >= 11'h80 && rd_addr < 11'hB0)
              : (!rd_table_sel && rd_addr < 11'h10)
              ? ga2_prot(rd_addr[4:1])
              : dpram_q;
+
+endmodule
+
+
+// ---------------------------------------------------------------------------
+//  Air Rescue DSP register HLE (single-board reduction)
+//  MAME segas32_m.cpp maps the uPD7725-facing register block at
+//  0xa00000-0xa00007. The production RTL retains the documented register
+//  protocol while the external DSP program/second PCB remain outside this
+//  reduced one-screen profile.
+// ---------------------------------------------------------------------------
+module s32_prot_arescue_dsp (
+    input             clk,
+    input             rst,
+    input             enable,
+    input             cpu_rd,
+    input             cpu_wr,
+    input       [1:0] addr,
+    input      [15:0] wdata,
+    input       [1:0] be,
+    output reg [15:0] rdata
+);
+
+reg [15:0] io0;
+reg [15:0] io1;
+reg [15:0] io2;
+reg [15:0] io3;
+
+// MAME arescue_dsp_w uses COMBINE_DATA, so each CPU byte lane is retained.
+// arescue_dsp_r(offset=2) performs the command side effects before returning
+// the offset-2 word: command 3 publishes io0=0x8000 and io1=1, command 6
+// publishes io0=4*io1, and all other commands leave the registers unchanged.
+always @(posedge clk) begin
+    if (rst || !enable) begin
+        io0 <= 16'h0000;
+        io1 <= 16'h0000;
+        io2 <= 16'h0000;
+        io3 <= 16'h0000;
+    end
+    else begin
+        if (cpu_wr) begin
+            case (addr)
+                2'd0: begin
+                    if (be[0]) io0[7:0]  <= wdata[7:0];
+                    if (be[1]) io0[15:8] <= wdata[15:8];
+                end
+                2'd1: begin
+                    if (be[0]) io1[7:0]  <= wdata[7:0];
+                    if (be[1]) io1[15:8] <= wdata[15:8];
+                end
+                2'd2: begin
+                    if (be[0]) io2[7:0]  <= wdata[7:0];
+                    if (be[1]) io2[15:8] <= wdata[15:8];
+                end
+                default: begin
+                    if (be[0]) io3[7:0]  <= wdata[7:0];
+                    if (be[1]) io3[15:8] <= wdata[15:8];
+                end
+            endcase
+        end
+
+        if (cpu_rd && (addr == 2'd2)) begin
+            case (io0)
+                16'h0003: begin
+                    io0 <= 16'h8000;
+                    io1 <= 16'h0001;
+                end
+                16'h0006: io0 <= {io1[13:0], 2'b00};
+                default: ;
+            endcase
+        end
+    end
+end
+
+always @(*) begin
+    rdata = 16'h0000;
+    if (enable) begin
+        case (addr)
+            2'd0: rdata = io0;
+            2'd1: rdata = io1;
+            2'd2: rdata = io2;
+            default: rdata = io3;
+        endcase
+    end
+end
 
 endmodule

@@ -524,6 +524,9 @@ try {
     ) "FB THROUGHPUT PASS" @("SIMULATION")
 
     Write-Tier 10 "mixer directed + pixel latency + 512-case independent differential test"
+    Run-HdlTest "t10_mixer_tie_order" "tb_mixer_tie_order" @(
+        "rtl/video/s32_mixer.sv", "verif/common/tb_mixer_tie_order.sv"
+    ) "MIXER TIE ORDER PASS"
     Run-HdlTest "t10_mixer" "tb_mixer" @("rtl/video/s32_linebuf.sv", "rtl/video/s32_mixer.sv", "rtl/video/s32_palette.sv", "verif/common/tb_mixer.sv") "MIXER PASS"
     # The mixer must finish a pixel inside one 416-wide pixel period (12
     # clk_ram edges). At 13 the picture is displayed one column late.
@@ -595,6 +598,9 @@ try {
     Run-HdlTest "t22_linebuf" "tb_linebuf" @("rtl/video/s32_linebuf.sv", "verif/common/tb_linebuf.sv") "LINEBUF PASS"
 
     Write-Tier 23 "tilemap VRAM fetches and deadline-safe scanline scheduling"
+    Run-HdlTest "t23_tilemap_regcap" "tb_tilemap_regcap" @(
+        "rtl/video/s32_tilemap_regcap.sv", "verif/common/tb_tilemap_regcap.sv"
+    ) "TILEMAP REGCAP PASS"
     Run-HdlTest "t23_tilemap_vram" "tb_tilemap_vram" @("rtl/video/s32_big_dpram.sv", "rtl/video/s32_vram.sv", "rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_vram.sv") "TILEMAP VRAM PASS" @("SIMULATION")
     Run-HdlTest "t23_tilemap_scale" "tb_tilemap_scale" @("rtl/video/s32_tilemap.sv", "verif/common/tb_tilemap_scale.sv") "TILEMAP SCALE PASS"
     Run-HdlTest "t23_tile_scheduler" "tb_tile_scheduler" @(
@@ -606,9 +612,16 @@ try {
     Run-HdlTest "t23_video_mode" "tb_video_mode" @(
         "rtl/video/s32_video.sv", "verif/common/tb_video_mode.sv"
     ) "VIDEO MODE LATCH PASS"
+    Run-HdlTest "t23_video_retime" "tb_video_retime" @(
+        "rtl/video/s32_video_retime.sv", "verif/common/tb_video_retime.sv"
+    ) "VIDEO RETIME PASS"
 
     Write-Tier 24 "byte-wide true-dual-port BRAM and audio clock cadence"
     Run-HdlTest "t24_byte_dpram" "tb_byte_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_byte_dpram.sv") "BYTE DPRAM PASS"
+    Run-HdlTest "t24_big_dpram" "tb_big_dpram" @("rtl/video/s32_big_dpram.sv", "verif/common/tb_big_dpram.sv") "BIG DPRAM PASS"
+    Run-HdlTest "t24_dpram_mixed_collision" "tb_dpram_mixed_collision" @(
+        "rtl/video/s32_big_dpram.sv", "verif/common/tb_dpram_mixed_collision.sv"
+    ) "DPRAM MIXED COLLISION PASS"
     Run-HdlTest "t24_audio_ce" "tb_audio_ce" @(
         "rtl/audio/s32_audio_ce.sv", "verif/common/tb_audio_ce.sv"
     ) "AUDIO CE PASS"

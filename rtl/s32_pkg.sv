@@ -86,7 +86,7 @@ package s32_pkg;
         logic       has_adc;       // MSM6253 analog board
         logic       has_ppi;       // i8255 4/6-player board
         logic       has_motor_hle; // Rad Mobile 837-7753 mailbox responder
-        logic       dual_pcb;      // reserved descriptor bit; unsupported
+        logic       dual_pcb;      // Air Rescue direct-link RAM profile
         logic [6:0] prot_sel;      // HLE protection select (PROT_*)
         logic       comm_link_hle; // descriptor-selected EPR-14084 link HLE
         // Sprite ROMs contain one, two, or four 4 MiB banks.  MAME mirrors
@@ -119,6 +119,7 @@ package s32_pkg;
     localparam [6:0] PROT_DBZVRVS  = 7'd5;
     localparam [6:0] PROT_JLEAGUE  = 7'd6;
     localparam [6:0] PROT_SONIC    = 7'd7;
+    localparam [6:0] PROT_ARESCUE  = 7'd8;
 
     // ------------------------------------------------------------------
     // V60 interrupt sources — DESIGN.md §5.5

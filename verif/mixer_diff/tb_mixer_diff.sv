@@ -29,7 +29,8 @@ s32_mixer dut (
     .reg_we(reg_we), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_be(reg_be),
     .reg_rdata(), .reg_raddr(6'd0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1),
-    .display_en(1'b1), .flip_y(1'b0), .layer_off(layer_off), .bg_ctrl(bg_ctrl),
+    .display_en(1'b1), .flip_y(1'b0), .layer_off(layer_off),
+    .sprite_over_nbg0(1'b0), .bg_ctrl(bg_ctrl),
     .px_text(px[0]), .px_nbg0(px[1]), .px_nbg1(px[2]),
     .px_nbg2(px[3]), .px_nbg3(px[4]), .px_bmp(px[5]),
     .spr_pix(spr_pix), .pal_addr(pal_addr), .pal_data(pal_data), .rgb(rgb)

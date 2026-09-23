@@ -39,6 +39,7 @@ module s32_mixer (
     input             display_en,    // 315-5296 CNT1
     input             flip_y,        // cabinet ORIENTATION_FLIP_Y (backdrop line)
     input       [5:0] layer_off,     // per-layer disable (TEXT,NBG0-3,BITMAP)
+    input             sprite_over_nbg0, // Alien 3/Sonic: sprites win equal-code NBG0 ties
     input      [15:0] bg_ctrl,       // VRAM $1FF5E backdrop/line-color select
 
     // registered pixels from the shared tile/bitmap line buffer
@@ -145,8 +146,19 @@ wire        spr_opaque = !spr_transp && !spr_shadow_pen;   // can win the scan
 
 // ---------------------------------------------------------------------------
 // effective priority per layer:  {prio[3:0], rank[2:0]}
-//   ordinary rank: sprites=7, text=6, nbg0=5 ... bitmap=1
+//   ordinary rank: text=7, nbg0/sprites=6/5 (swapped for Alien 3/Sonic), nbg1=4,
+//                  nbg2=3, nbg3=2, bitmap=1
 //   special low keys: backdrop=1, opaque-zero NBG3/2/1/0=2/3/4/5
+//
+// At an equal priority code, NBG0 beats sprites in Rad Mobile: its monitor
+// bezel (NBG0, code $E) covers its car sprites (group 0, code $E). Alien 3's
+// B1F meat-locker sprites (group 2, code $B) instead cover NBG0 (code $B).
+// SegaSonic's opening vehicle (group 0, code $E) also covers NBG0 terrain
+// (code $E). The board descriptor selects which side wins that tie. Sonic's normal
+// body (group 2, code $C) must beat its grey floor (NBG1, code $C), and
+// Jurassic Park's scenery (group 0, code $A) must beat NBG3 (code $A).
+// MAME guesses sprites above every fixed layer; the Rad Mobile observation
+// places them between NBG0 and NBG1, while Alien 3 and Sonic need that tie flipped.
 //   layer regs: 0x20+2*lay (TEXT..BITMAP), 0x2C background, 0x00+2*grp sprites
 //
 // $1FF8E[8+bg] makes an NBG pen-0 pixel valid.  MAME records the unresolved
@@ -166,7 +178,8 @@ always @(*) begin
     sprreg = mreg[{2'b00, spr_group}];
     lr_t = mreg[6'h10]; lr_0 = mreg[6'h11]; lr_1 = mreg[6'h12];
     lr_2 = mreg[6'h13]; lr_3 = mreg[6'h14]; lr_b = mreg[6'h15];
-    ep_spr_nom = (sprreg[3:0] != 0) ? {sprreg[3:0], 3'd7} : 7'd0;
+    ep_spr_nom = (sprreg[3:0] != 0)
+               ? {sprreg[3:0], sprite_over_nbg0 ? 3'd6 : 3'd5} : 7'd0;
     ep_spr  = spr_opaque ? ep_spr_nom : 7'd0;
     // bit13 = drawn/opaque.  TEXT and BITMAP set it for real pixels; NBG0-3
     // additionally set it for $1FF8E opaque pen 0, which receives only its
@@ -174,9 +187,10 @@ always @(*) begin
     // low nibble must not be re-tested here.
     // disabled layers never mix (MAME enablemask) — a disabled layer's
     // line buffer keeps stale pixels, so it must be gated here
-    ep_text = (!layer_off[0] && px_text[13] && lr_t[3:0] != 0) ? {lr_t[3:0], 3'd6} : 7'd0;
+    ep_text = (!layer_off[0] && px_text[13] && lr_t[3:0] != 0) ? {lr_t[3:0], 3'd7} : 7'd0;
     ep_nbg0 = (!layer_off[1] && px_nbg0[13] && lr_0[3:0] != 0)
-            ? ((px_nbg0[3:0] == 4'd0) ? {4'd0, 3'd5} : {lr_0[3:0], 3'd5}) : 7'd0;
+            ? ((px_nbg0[3:0] == 4'd0) ? {4'd0, 3'd5}
+               : {lr_0[3:0], sprite_over_nbg0 ? 3'd5 : 3'd6}) : 7'd0;
     ep_nbg1 = (!layer_off[2] && px_nbg1[13] && lr_1[3:0] != 0)
             ? ((px_nbg1[3:0] == 4'd0) ? {4'd0, 3'd4} : {lr_1[3:0], 3'd4}) : 7'd0;
     ep_nbg2 = (!layer_off[3] && px_nbg2[13] && lr_2[3:0] != 0)

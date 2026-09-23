@@ -69,7 +69,7 @@ s32_mixer mix (
     .reg_rdata(), .reg_raddr(6'h0), .reg_r4e(),
     .disp_x(disp_x), .disp_y(disp_y), .disp_active(1'b1), .display_en(1'b1),
     .flip_y(1'b0),
-    .layer_off(layer_off), .bg_ctrl(bg_ctrl),
+    .layer_off(layer_off), .sprite_over_nbg0(1'b0), .bg_ctrl(bg_ctrl),
     .px_text(px_text), .px_nbg0(px_nbg0), .px_nbg1(px_nbg1),
     .px_nbg2(px_nbg2), .px_nbg3(px_nbg3), .px_bmp(px_bmp),
     .spr_pix(spr_pix),
@@ -356,19 +356,27 @@ initial begin
     // sprite group = (pix>>11)&F = 0 -> group reg 0 priority must be nonzero
     wreg(6'h26, 16'h0007);             // 0x4C = mode 7 (no RMW-shadow bit)
     wreg(6'h00, 16'h000F);             // sprite group 0 prio F
+    wreg(6'h11, 16'h000E);             // NBG0 prio E: shadow slot outranks it
     spr_pix = 16'h07FE;                // shadow pen (transparent, shadows below)
     px(9'd10);                         // white halved: 31>>1=15 -> 78
     check(rgb, 24'h7B7B7B, 9'd10);
+    wreg(6'h11, 16'h000F);             // equal code: NBG0 outranks the shadow
+    px(9'd10);                         // slot, so no shading
+    check(rgb, 24'hFFFFFF, 9'd10);
     spr_pix = 16'hffff;
     px(9'd10);                         // back to full white
     check(rgb, 24'hFFFFFF, 9'd10);
 
-    // --- 4: opaque sprite wins over NBG0 ---
-    // sprite pen 1 group 0: pix = 0x8001 -> masked pen 1 -> palette[1] white
-    // group reg 0 palbase 0 shift 0 prio F (rank 7 beats NBG0 rank 5)
-    spr_pix = 16'h8001;
+    // --- 4: sprite/NBG0 priority, including the equal-code order ---
+    // sprite pen 2 group 0: pix = 0x8002 -> masked pen 2 -> palette[2] blue
+    // equal code F: NBG0 rank 6 beats sprite rank 5 (radm monitor bezel)
+    spr_pix = 16'h8002;
     px(9'd10);
     check(rgb, 24'hFFFFFF, 9'd10);
+    wreg(6'h11, 16'h000E);             // sprite code above NBG0 -> sprite wins
+    px(9'd10);
+    check(rgb, 24'h000040, 9'd10);
+    wreg(6'h11, 16'h000F);             // restore NBG0 prio F
     spr_pix = 16'hffff;
 
     // --- 5: blend mask uses raw sprite group, not effective register group ---
@@ -376,7 +384,10 @@ initial begin
     // and palette selection. MAME still tests sprite-blend bit 0. With a
     // half blend, white NBG0 over blue sprite produces 78/78/98.
     wreg(6'h26, 16'h0001);             // shift14 mask1, effective OR=2
-    wreg(6'h02, 16'h0007);             // effective sprite group 2 priority 7
+    wreg(6'h02, 16'h0008);             // effective sprite group 2 priority 8
+                                       // (above NBG1's code 7: at an equal
+                                       // code NBG1 would outrank the sprite
+                                       // and steal the runner-up slot)
     wreg(6'h27, 16'h0B00);             // blend enable, factor 3
     wreg(6'h19, 16'h1000);             // NBG0 blends with sprite; code=raw group 0
     spr_pix = 16'h8002;                // raw group 0, palette[2] blue

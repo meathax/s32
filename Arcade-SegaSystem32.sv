@@ -224,7 +224,10 @@ pll pll (
     .locked_export(pll_locked)
 );
 assign DDRAM_CLK = clk_ram;
-assign CLK_VIDEO = clk_sys;
+// clk_ram, not clk_sys: the 320-wide dot clock is 7.5 clk_sys periods, so a
+// uniform CE_PIXEL only exists in the 96.6 MHz domain (15 clocks per pixel;
+// 416 mode is 12).  See s32_video_retime.sv (direct-video column-tearing fix).
+assign CLK_VIDEO = clk_ram;
 
 // Keep every game subsystem reset until a complete index-0 ROM transfer has
 // drained into SDRAM. The loader itself is reset only by PLL startup so soft
@@ -513,6 +516,12 @@ function automatic [7:0] p_dig(input [31:0] j);
     p_dig = ~{j[1], j[0], j[3], j[2], 1'b0, j[6], j[5], j[4]};
 endfunction
 wire [7:0] p1a_dig = p_dig(joystick_0);
+// Air Rescue's documented main-board port keeps only P1 BUTTON1/2.
+// The reduced profile has no local P2 port or start inputs.
+wire arescue_inputs = (active_board.prot_sel == PROT_ARESCUE) &&
+                      active_board.dual_pcb;
+wire [7:0] arescue_p1a = {6'h3f, p1a_dig[1:0]};
+wire [7:0] arescue_p2a = 8'hff;
 // Rad Mobile leaves raw player-port bit 0 unused and places its two cabinet
 // switches, Light and Wiper, on bits 1/2.  Drive them from B3/B4 rather than
 // B1/B2: B1/B2 are the shared digital accelerator/brake fallbacks that feed
@@ -596,7 +605,9 @@ always @(posedge clk_sys) begin
             radr_gear <= ~radr_gear;
     end
 end
-wire [7:0] gear_toggle_p1a = {p1a_dig[7:1], ~radr_gear};
+// Only bit 0 is wired on these cabinets.  Passing B3 through on bit 2 also
+// presents the Gear Change press as a second game input.
+wire [7:0] gear_toggle_p1a = {7'h7f, ~radr_gear};
 // Dark Edge leaves raw player-port bit 0 unused and places its first two
 // buttons on bits 1/2.  Adapt MiSTer's logical B1/B2 here; the remaining
 // three buttons are on the PPI below.  Select from the existing descriptor so
@@ -753,13 +764,15 @@ wire [7:0] alien3_p2a = {6'h3f, gun_p2a[1], gun_p2a[0] & ~joystick_1[10]};
 // Jurassic Park's port mask leaves only BUTTON1 (Shoot) connected.
 wire [7:0] jpark_p1a = {7'h7f, gun_p1a[0]};
 wire [7:0] jpark_p2a = {7'h7f, gun_p2a[0]};
-wire [7:0] core_p1a = active_board.gun_aim ?
+wire [7:0] core_p1a = arescue_inputs ? arescue_p1a :
+                       active_board.gun_aim ?
                        (active_board.coin_swap ? alien3_p1a : jpark_p1a) :
                        (active_board.prot_sel == PROT_DARKEDGE) ? darkedge_p1a :
                        active_board.gear_toggle ? gear_toggle_p1a :
                        (active_board.digital_profile == DIGITAL_RADM) ? radm_p1a :
                        p1a_dig;
-wire [7:0] core_p2a = active_board.gun_aim ?
+wire [7:0] core_p2a = arescue_inputs ? arescue_p2a :
+                       active_board.gun_aim ?
                        (active_board.coin_swap ? alien3_p2a : jpark_p2a) :
                        (active_board.prot_sel == PROT_DARKEDGE) ? darkedge_p2a :
                        p2a_dig;
@@ -805,9 +818,24 @@ s32_driving_controls driving_controls (
 // and descriptor-selected Slip Stream profiles also map the MiSTer left/right
 // D-pad bits to full-scale wheel endpoints. The MSM6253 samples the live value
 // on its accepted channel-load write.
-assign adc_ch[0] = active_board.gun_aim ? game_gun_p1_x : driving_wheel;
-assign adc_ch[1] = active_board.gun_aim ? game_gun_p1_y : driving_accel;
-assign adc_ch[2] = active_board.gun_aim ? game_gun_p2_x : driving_brake;
+wire analog_all_ff = active_board.analog_profile == ANALOG_ALL_FF;
+// MAME marks Air Rescue ANALOG1 PORT_REVERSE, ANALOG2 normal, and
+// ANALOG3 centered. Its flight stick is P1's left analog stick: X is the
+// low byte and Y the high byte of joystick_l_analog_0. Keep this source direct
+// for the Air Rescue ADC path; the shared positional-gun adapter remains for
+// gun titles. The complement preserves the documented X polarity.
+wire [7:0] arescue_stick_x = joystick_l_analog_0[7:0] + 8'h80;
+wire [7:0] arescue_stick_y = joystick_l_analog_0[15:8] + 8'h80;
+wire [7:0] arescue_analog_z = joystick_r_analog_0[15:8] + 8'h80;
+assign adc_ch[0] = analog_all_ff ? 8'hff :
+                   arescue_inputs ? ~arescue_stick_x :
+                   active_board.gun_aim ? game_gun_p1_x : driving_wheel;
+assign adc_ch[1] = analog_all_ff ? 8'hff :
+                   arescue_inputs ? arescue_stick_y :
+                   active_board.gun_aim ? game_gun_p1_y : driving_accel;
+assign adc_ch[2] = analog_all_ff ? 8'hff :
+                   arescue_inputs ? arescue_analog_z :
+                   active_board.gun_aim ? game_gun_p2_x : driving_brake;
 assign adc_ch[3] = active_board.gun_aim ? game_gun_p2_y : 8'hff;
 assign adc_ch[4] = 8'h80;
 assign adc_ch[5] = 8'h80;
@@ -835,13 +863,23 @@ wire [7:0] svc12_alien3 = ~{
                      joystick_0[11] | gun_snac_coin_p1,
                      joystick_1[11] | gun_snac_coin_p2,
                      test_btn, svc_btn};
-wire [7:0] svc12 = active_board.coin_swap ? svc12_alien3 : svc12_generic;
+// Air Rescue leaves START1/START2 physically unused; only the two coin
+// inputs and the service/test lines remain in SERVICE12.
+wire [7:0] svc12_arescue = ~{
+                      2'b00, 2'b00,
+                      joystick_1[11], joystick_0[11],
+                      test_btn, svc_btn};
+wire [7:0] svc12 = arescue_inputs ? svc12_arescue :
+                   active_board.coin_swap ? svc12_alien3 : svc12_generic;
 // Port F/SERVICE34: bits 3:0 = DIP SW1:1-4 (Off), bit4 = PCB Push SW1
 // (Service), bit5 = PCB Push SW2 (Test), bit6 unknown; bit7 is replaced by the
 // EEPROM DO line inside s32_core.  Some games poll the PCB push switches
 // rather than the cabinet Test line, so drive them from the same buttons —
 // physically equivalent to pressing the matching switch on the board.
-wire [7:0] svc34 = ~{2'b00, test_btn, svc_btn, 4'b0000};
+// Air Rescue masks SERVICE34 bits 4/5 as unused; EEPROM DO is inserted by s32_core.
+wire [7:0] svc34_arescue = 8'hff;
+wire [7:0] svc34 = arescue_inputs ? svc34_arescue :
+                   ~{2'b00, test_btn, svc_btn, 4'b0000};
 // GA2's 4-player i8255 port C is MAME EXTRA3 (ppi.in_pc_callback -> "EXTRA3").
 // Base sets: bit0=Start3, bit1=Start4, bits[7:2] unused. The US sets (ga2u,
 // spidmanu, arabfgtu) instead read COIN1 on bit3 (0x08) and COIN2 on bit2
@@ -1143,12 +1181,62 @@ s32_lightgun_overlay #(.BORDER_WIDTH(4)) lightgun_overlay (
     .raster_y     (lightgun_raster_y)
 );
 
-assign CE_PIXEL = crt_adjust_active ? crt_rd_ce : ce_pix_core;
-assign VGA_R  = video_rgb_overlay[23:16];
-assign VGA_G  = video_rgb_overlay[15:8];
-assign VGA_B  = video_rgb_overlay[7:0];
-assign VGA_HS = crt_adjust_active ? crt_hs : core_hs;
-assign VGA_VS = crt_adjust_active ? crt_vs : core_vs;
-assign VGA_DE = crt_adjust_active ? crt_de_osd : ~(core_hb | core_vb);
+// Re-sample the finished clk_sys-domain stream onto the uniform clk_ram pixel
+// grid (CLK_VIDEO = clk_ram).  The native fractional CE alternates 8/7 clk_sys
+// per pixel in 320-wide mode; direct video transmits that jitter and a
+// fixed-stride sampler (RetroTink 4K DV) turns it into tile-column tearing
+// during scroll.  CRT Adjust keeps its intentionally fractional stretch
+// cadence via the bypass path.
+wire        final_ce = crt_adjust_active ? crt_rd_ce : ce_pix_core;
+wire        final_hs = crt_adjust_active ? crt_hs : core_hs;
+wire        final_vs = crt_adjust_active ? crt_vs : core_vs;
+wire        final_de = crt_adjust_active ? crt_de_osd : ~(core_hb | core_vb);
+// Close the real 48.3-to-96.6 MHz output path before the fast retimer.  The
+// lightgun decorator is combinational by design; register the complete stream
+// together so RGB cannot arrive a cycle apart from its raster controls.
+reg [23:0] retime_rgb_src;
+reg        retime_ce_src, retime_hs_src, retime_vs_src, retime_de_src;
+always @(posedge clk_sys) begin
+    if (video_reset) begin
+        retime_rgb_src <= 24'h000000;
+        retime_ce_src  <= 1'b0;
+        retime_hs_src  <= 1'b0;
+        retime_vs_src  <= 1'b0;
+        retime_de_src  <= 1'b0;
+    end
+    else begin
+        retime_rgb_src <= video_rgb_overlay;
+        retime_ce_src  <= final_ce;
+        retime_hs_src  <= final_hs;
+        retime_vs_src  <= final_vs;
+        retime_de_src  <= final_de;
+    end
+end
+wire        rt_ce, rt_hs, rt_vs, rt_de;
+wire [23:0] rt_rgb;
+s32_video_retime video_retime (
+    .clk     (clk_ram),
+    .rst     (video_reset),
+    .mode_416(mode_416_active),
+    .bypass  (crt_adjust_active),
+    .raw_ce  (retime_ce_src),
+    .raw_rgb (retime_rgb_src),
+    .raw_hs  (retime_hs_src),
+    .raw_vs  (retime_vs_src),
+    .raw_de  (retime_de_src),
+    .ce      (rt_ce),
+    .rgb     (rt_rgb),
+    .hs      (rt_hs),
+    .vs      (rt_vs),
+    .de      (rt_de)
+);
+
+assign CE_PIXEL = rt_ce;
+assign VGA_R  = rt_rgb[23:16];
+assign VGA_G  = rt_rgb[15:8];
+assign VGA_B  = rt_rgb[7:0];
+assign VGA_HS = rt_hs;
+assign VGA_VS = rt_vs;
+assign VGA_DE = rt_de;
 
 endmodule

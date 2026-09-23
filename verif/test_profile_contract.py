@@ -352,13 +352,25 @@ class GlobalProfileContractTests(unittest.TestCase):
         self.assertIn("status[28:27]", text)
         self.assertIn("SYSTEMVERILOG_FILE rtl/crt_adjust.sv", files_qip)
         self.assertIn('"rtl/crt_adjust.sv",', regression)
+        self.assertIn('"rtl/video/s32_video_retime.sv",', regression)
+        self.assertIn('"verif/common/tb_video_retime.sv"', regression)
+        self.assertIn('"VIDEO RETIME PASS"', regression)
         self.assertIn("rtl/video/*.sv rtl/crt_adjust.sv rtl/audio/", shell_regression)
+        self.assertIn("rtl/video/s32_video_retime.sv", shell_regression)
+        self.assertIn("VIDEO RETIME PASS", shell_regression)
         self.assertIn("wire hdmi_output_active", text)
         self.assertIn("!hdmi_output_active", text)
         self.assertIn("scandoubler_fx == 3'd0", text)
-        self.assertIn("assign CE_PIXEL = crt_adjust_active ? crt_rd_ce : ce_pix_core;", text)
-        self.assertIn("assign VGA_HS = crt_adjust_active ? crt_hs : core_hs;", text)
-        self.assertIn("assign VGA_VS = crt_adjust_active ? crt_vs : core_vs;", text)
+        # The final output stage re-samples onto the uniform clk_ram pixel grid
+        # (s32_video_retime); CRT Adjust keeps its fractional cadence via the
+        # bypass input.
+        self.assertIn("wire        final_ce = crt_adjust_active ? crt_rd_ce : ce_pix_core;", text)
+        self.assertIn("wire        final_hs = crt_adjust_active ? crt_hs : core_hs;", text)
+        self.assertIn("wire        final_vs = crt_adjust_active ? crt_vs : core_vs;", text)
+        self.assertIn(".bypass  (crt_adjust_active)", text)
+        self.assertIn("assign CE_PIXEL = rt_ce;", text)
+        self.assertIn("assign VGA_HS = rt_hs;", text)
+        self.assertIn("assign VGA_VS = rt_vs;", text)
 
     def test_video_output_contract_covers_direct_analog_crt_and_hdmi(self) -> None:
         top = (ROOT / "Arcade-SegaSystem32.sv").read_text(encoding="utf-8")
@@ -373,7 +385,12 @@ class GlobalProfileContractTests(unittest.TestCase):
             "HDMI_HEIGHT", "HDMI_FREEZE", "HDMI_BLACKOUT", "HDMI_BOB_DEINT",
         ):
             self.assertIn(signal, top)
-        self.assertIn("assign CLK_VIDEO = clk_sys;", top)
+        # CLK_VIDEO is clk_ram: the 320-wide dot clock is 7.5 clk_sys periods,
+        # so a uniform CE_PIXEL (direct-video requirement) only exists in the
+        # 96.6 MHz domain (15 clocks per pixel; 416 mode is 12).
+        self.assertIn("assign CLK_VIDEO = clk_ram;", top)
+        self.assertIn("s32_video_retime video_retime", top)
+        self.assertIn("SYSTEMVERILOG_FILE rtl/video/s32_video_retime.sv", files_qip)
         self.assertIn("assign VGA_SCALER = 0;", top)
         self.assertIn("assign VGA_DISABLE = 0;", top)
         self.assertIn("assign HDMI_BLACKOUT = 1'b1;", top)

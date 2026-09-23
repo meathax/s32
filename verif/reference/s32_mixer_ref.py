@@ -1,9 +1,10 @@
 """Independent, scalar reference for the System 32 315-5387 mixer.
 
 The implementation follows MAME ``segas32_v.cpp::mix_all_layers`` rather
-than the pipelined structure of ``rtl/video/s32_mixer.sv``, plus MAME's
-documented System 24-style theory for $1FF8E opaque NBG pen 0: above the
-backdrop, behind every ordinary pixel.  Line-buffer pixels use the RTL
+than the pipelined structure of ``rtl/video/s32_mixer.sv``, with the observed
+NBG0 > sprite > NBG1 equal-code order and MAME's documented System 24-style
+theory for $1FF8E opaque NBG pen 0: above the backdrop, behind every
+ordinary pixel. Line-buffer pixels use the RTL
 boundary format: bit 13 is opaque and bits 12:0 are the layer pixel value.
 """
 
@@ -133,7 +134,7 @@ def mix_pixel(
             layers.append(_Layer(
                 index=layer,
                 effpri=(6 - layer) if opaque_zero
-                       else (priority << 3) | (6 - layer),
+                       else (priority << 3) | (6 - layer + (1 if layer <= NBG0 else 0)),
                 palbase=(control & 0xF0) << 6,
                 mixshift=(control >> 8) & 3,
                 blendmask=((blendreg >> 6) & 0xFF) if r4e & 0x0800 else 0,
@@ -161,7 +162,9 @@ def mix_pixel(
     if sprreg & 0xF:
         layers.append(_Layer(
             index=SPRITE,
-            effpri=((sprreg & 0xF) << 3) | 7,
+            # NBG0 beats sprites at a tie (radm bezel/cars), while sprites
+            # beat NBG1 at a tie (SegaSonic player/floor). MAME guesses "| 7".
+            effpri=((sprreg & 0xF) << 3) | 5,
             palbase=(sprite_pal & 0xF0) << 6,
             mixshift=(sprreg >> 8) & 3,
             blendmask=0,

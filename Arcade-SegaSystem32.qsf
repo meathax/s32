@@ -17,10 +17,9 @@
 # compiles the V25 implementation. Descriptor selection keeps each optional
 # block inactive for games that do not use it.
 #
-# NOT YET TIMING-CLOSED: the recorded standard-only fit below does not include
-# the V25 core. This universal revision intentionally changes the resource and
-# timing shape; optimization and fit qualification are a later user-requested
-# step.
+# Timing-qualified universal production profile: the clean seed-5 compile on
+# 2026-08-29 passed all four TimeQuest corners; historical pre-qualification
+# notes below are retained as placement/resource provenance.
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 
 set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Lite Edition"
@@ -145,8 +144,12 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
 # Seed 5 also fit but missed setup at -0.548 ns (TNS -3.967 ns); hold was
 # +0.113 ns worst-case. Seed 1 then passed all four corners: setup +0.075 ns,
 # hold +0.117 ns, recovery +3.752 ns, removal +0.475 ns, min pulse +0.398 ns.
-# Keep seed 1 for the required clean full compile.
-set_global_assignment -name SEED 1
+# 2026-08-29 direct-video retimer/source-register fix: seed-5 clean fit and
+# four-corner STA pass (worst setup +0.075 ns, worst hold +0.079 ns).
+# 2026-08-28 Air Rescue byte-plane M10K relocation: seed-1 clean compile
+# missed Slow-corner setup/hold. Seed-5 is retained after the measured
+# placement sweep; no RTL or SDC workaround is required for this margin.
+set_global_assignment -name SEED 5
 # 2026-08-13: dropped from 8 to 2.  At 8, quartus_map and quartus_fit both died
 # with `*** Fatal Error: Access Violation` on this host; the fitter's stack
 # trace named deeply recursive TIS_ADVANCED_SPICE_RC_BODY::annotate_delay_tree

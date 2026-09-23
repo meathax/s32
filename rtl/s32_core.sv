@@ -337,8 +337,19 @@ wire sel_comm   = (A[23:16] == 8'h80);
 // stores bit 0 only while CN is enabled (s32comm.cpp).
 wire sel_comm_cn  = sel_comm && (A[15:1] == 15'h0800);
 wire sel_comm_fg  = sel_comm && (A[15:1] == 15'h0801);
+// Air Rescue's reduced one-board profile retains the documented 4-KiB
+// direct-link window, main-board ID, and DSP register block.  The selects are
+// title-gated so the normal 0x81/open-bus and 0xA protection mirrors remain
+// unchanged for every other descriptor.
+wire arescue_hle = (cfg_prot_sel == PROT_ARESCUE) && board.dual_pcb;
+wire sel_arescue_link_ram = arescue_hle && (A[23:12] == 12'h810);
+wire sel_arescue_link_id  = arescue_hle && (A[23:12] == 12'h818) &&
+                            (A[11:2] == 10'd0);
 wire sel_dual   = (A[23:16] == 8'h81);
 wire sel_prot_a = (A[23:20] == 4'hA);
+wire sel_arescue_dsp = arescue_hle && (A[23:3] == 21'h140000) &&
+                         (A[2:1] <= 2'd3);
+wire sel_dbz_prot = sel_prot_a && !A[19]; // 0xa00000-0xa7ffff
 wire sel_v25    = sel_prot_a && (A[19:12] == 8'h00); // 0xA00000-A00FFF
 // MAME's I/O mirrors ignore A19:A7 (System 32) or A18:A7 (Multi 32).
 // A6:A5 remain decoded: 00 selects the 5296 and A6 selects expansion I/O.
@@ -494,12 +505,13 @@ reg        tm_mode_416;
 reg  [7:0] tm_ext_tilebank;
 reg [15:0] tm_r1ff00, tm_r1ff02, tm_r1ff04, tm_r1ff06;
 reg [15:0] tm_r1ff5c, tm_r1ff5e, tm_r1ff88, tm_r1ff8a, tm_r1ff8c, tm_r1ff8e;
-reg [15:0] tm_scrollfracx [0:1], tm_scrollfracy [0:1];
-reg [15:0] tm_scrollx [0:3], tm_scrolly [0:3];
-reg [15:0] tm_offsx [0:3], tm_offsy [0:3];
-reg [15:0] tm_pages [0:7];
-reg [15:0] tm_zoomx [0:1], tm_zoomy [0:1];
-reg [15:0] tm_clips [0:19];
+// Layer position snapshot: driven by s32_tilemap_regcap, not by this file.
+wire [15:0] tm_scrollfracx [0:1], tm_scrollfracy [0:1];
+wire [15:0] tm_scrollx [0:3], tm_scrolly [0:3];
+wire [15:0] tm_offsx [0:3], tm_offsy [0:3];
+wire [15:0] tm_pages [0:7];
+wire [15:0] tm_zoomx [0:1], tm_zoomy [0:1];
+reg  [15:0] tm_clips [0:19];
 reg [15:0] tm_clips_cdc [0:19];
 // The tile renderer snapshots controls for the line in the opposite parity
 // bank.  The mixer must use the matching snapshot for the line currently
@@ -519,15 +531,7 @@ initial begin
     tm_r1ff5c = 0; tm_r1ff5e = 0;
     mix_bg_ctrl = 0;
     tm_r1ff88 = 0; tm_r1ff8a = 0; tm_r1ff8c = 0; tm_r1ff8e = 0;
-    for (tm_init_i = 0; tm_init_i < 4; tm_init_i = tm_init_i + 1) begin
-        tm_scrollx[tm_init_i] = 0; tm_scrolly[tm_init_i] = 0;
-        tm_offsx[tm_init_i] = 0; tm_offsy[tm_init_i] = 0;
-    end
-    for (tm_init_i = 0; tm_init_i < 8; tm_init_i = tm_init_i + 1) tm_pages[tm_init_i] = 0;
-    for (tm_init_i = 0; tm_init_i < 2; tm_init_i = tm_init_i + 1) begin
-        tm_scrollfracx[tm_init_i] = 0; tm_scrollfracy[tm_init_i] = 0;
-        tm_zoomx[tm_init_i] = 16'h0200; tm_zoomy[tm_init_i] = 16'h0200; // neutral 1.0 zoom default
-    end
+    // scroll/offs/pages/zoom power-up values live in s32_tilemap_regcap
     for (tm_init_i = 0; tm_init_i < 20; tm_init_i = tm_init_i + 1) begin
         tm_clips[tm_init_i] = 0;
         tm_clips_cdc[tm_init_i] = 0;
@@ -614,35 +618,30 @@ always @(posedge clk_ram) begin
             r1ff02[0] | r1ff8e[1],
             r1ff02[4] | r1ff8e[0]
             };
-        for (tm_cap_i = 0; tm_cap_i < 8; tm_cap_i = tm_cap_i + 1)
-            tm_pages[tm_cap_i] <= w_pages[tm_cap_i];
         for (tm_cap_i = 0; tm_cap_i < 20; tm_cap_i = tm_cap_i + 1)
             tm_clips[tm_cap_i] <= tm_clips_cdc[tm_cap_i];
     end
 
-    // Whole-layer scroll, zoom and centre are frame quantities, not per-line
-    // ones: the 315-5387 exposes rowscroll/rowselect tables ($1FF04) precisely
-    // so software can vary scroll per scanline, which would be redundant if
-    // the scroll registers themselves took effect mid-frame.  Capturing them
-    // per line let a mid-frame update land between the integer ($1FF16) and
-    // fractional ($1FF14) halves of one scroll value, so the scanlines drawn
-    // in between mixed an old fraction with a new integer and rendered the
-    // layer at the wrong source Y.  Snapshot once at vblank instead.
-    if (vbl_start) begin
-        for (tm_cap_i = 0; tm_cap_i < 4; tm_cap_i = tm_cap_i + 1) begin
-            tm_scrollx[tm_cap_i] <= w_scrollx[tm_cap_i];
-            tm_scrolly[tm_cap_i] <= w_scrolly[tm_cap_i];
-            tm_offsx[tm_cap_i] <= w_offsx[tm_cap_i];
-            tm_offsy[tm_cap_i] <= w_offsy[tm_cap_i];
-        end
-        for (tm_cap_i = 0; tm_cap_i < 2; tm_cap_i = tm_cap_i + 1) begin
-            tm_scrollfracx[tm_cap_i] <= w_scrollfracx[tm_cap_i];
-            tm_scrollfracy[tm_cap_i] <= w_scrollfracy[tm_cap_i];
-            tm_zoomx[tm_cap_i] <= w_zoomx[tm_cap_i];
-            tm_zoomy[tm_cap_i] <= w_zoomy[tm_cap_i];
-        end
-    end
 end
+
+// Layer position: scroll and page-select are one coupled address and must be
+// snapshotted together.  See s32_tilemap_regcap.sv for the full reasoning and
+// the measured Spider-Man register trace that proved the skew.
+s32_tilemap_regcap tilemap_regcap (
+    .clk(clk_ram), .rst(rst),
+    .vbl_start(vbl_start), .line_start(line_start_r),
+    .w_pages(w_pages),
+    .w_scrollx(w_scrollx), .w_scrolly(w_scrolly),
+    .w_offsx(w_offsx), .w_offsy(w_offsy),
+    .w_scrollfracx(w_scrollfracx), .w_scrollfracy(w_scrollfracy),
+    .w_zoomx(w_zoomx), .w_zoomy(w_zoomy),
+    .tm_pages(tm_pages),
+    .tm_scrollx(tm_scrollx), .tm_scrolly(tm_scrolly),
+    .tm_offsx(tm_offsx), .tm_offsy(tm_offsy),
+    .tm_scrollfracx(tm_scrollfracx), .tm_scrollfracy(tm_scrollfracy),
+    .tm_zoomx(tm_zoomx), .tm_zoomy(tm_zoomy),
+    .frame_capture()
+);
 
 wire [5:0] tm_layer_off;
 wire [5:0] tm_layer_off_disp = vcnt[0] ? tm_layer_off_bank1 : tm_layer_off_bank0;
@@ -800,6 +799,10 @@ wire [15:0] mix0_q, mix1_q;
 wire [15:0] mix0_r4e, mix1_r4e;
 wire [13:0] mix_px_text, mix_px_nbg0, mix_px_nbg1;
 wire [13:0] mix_px_nbg2, mix_px_nbg3, mix_px_bmp;
+// Sonic's opening vehicle and NBG0 terrain both use priority E; the vehicle
+// wins that tie, as do Alien 3's B1F enemies against its NBG0 walls.
+wire sprite_over_nbg0 = (cfg_prot_sel == PROT_SONIC) ||
+                        (board.gun_aim && board.coin_swap);
 
 // Both current screen mixers consume the same tilemap-renderer stream.  Share
 // the twelve physical parity/layer RAM banks and fan out their registered
@@ -829,7 +832,8 @@ s32_mixer mix0 (
     .reg_rdata(mix0_q), .reg_raddr(A[6:1]), .reg_r4e(mix0_r4e),
     .disp_x(mix_disp_x), .disp_y(vcnt), .disp_active(~hb & ~vb),
     .frame_latch(vbl_start),
-    .display_en(io0_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off_disp), .bg_ctrl(mix_bg_ctrl),
+    .display_en(io0_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off_disp),
+    .sprite_over_nbg0(sprite_over_nbg0), .bg_ctrl(mix_bg_ctrl),
     .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
     .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
     .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -868,7 +872,8 @@ generate
             .reg_rdata(mix1_q), .reg_raddr(A[6:1]), .reg_r4e(mix1_r4e),
             .disp_x(mix_disp_x), .disp_y(vcnt), .disp_active(~hb & ~vb),
             .frame_latch(vbl_start),
-            .display_en(io1_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off_disp), .bg_ctrl(mix_bg_ctrl),
+            .display_en(io1_cnt1), .flip_y(cfg_flip_y), .layer_off(tm_layer_off_disp),
+            .sprite_over_nbg0(sprite_over_nbg0), .bg_ctrl(mix_bg_ctrl),
             .px_text(mix_px_text), .px_nbg0(mix_px_nbg0),
             .px_nbg1(mix_px_nbg1), .px_nbg2(mix_px_nbg2),
             .px_nbg3(mix_px_nbg3), .px_bmp(mix_px_bmp),
@@ -938,17 +943,29 @@ assign sdr_wave_wr_be   = wave_wr_addr_i[0] ? 2'b10 : 2'b01;
 // this window behaves as byte-wide RAM even with no link partner: a game that
 // writes then reads the share area must read its own data back, not open bus.
 // Only D[7:0] is mapped (MAME maps 0x800000-0x800fff share_r/w with
-// umask16 0x00ff); the cn/fg link registers at 0x801000/2 use the small HLE
-// below, and the rest of the 0x80xxxx page reads link-not-connected (0xFFFF).
+// umask16 0x00ff); the title-gated Air Rescue 0x810000-0x810fff window reuses
+// the high byte of this physical array for its 16-bit direct-link words. The
+// cn/fg link registers at 0x801000/2 use the small HLE below, and the rest of
+// the 0x80xxxx page reads link-not-connected (0xFFFF).
 // ---------------------------------------------------------------------------
 wire       sel_comm_ram = sel_comm && (A[15:12] == 4'h0);
 `ifdef S32_UNIVERSAL_DISABLED
-wire [7:0]  comm_q = 8'h00;
+wire [15:0] comm_word_q = 16'h0000;
+wire [7:0]  comm_q = comm_word_q[7:0];
+wire [15:0] arescue_link_q = 16'h0000;
 wire        comm_cn = 1'b0;
 wire        comm_fg = 1'b0;
 `else
-reg [7:0]  comm_ram [0:2047];
-reg [7:0]  comm_q;
+// Standard communication uses the low byte; Air Rescue reuses the same
+// physical word storage for its title-gated full-width link window. Keep the
+// byte planes flat and independent so Quartus 17 infers two simple dual-port
+// M10Ks instead of turning the 2Kx16 array into registers.
+(* ramstyle = "M10K, no_rw_check" *) reg [7:0] comm_ram_lo [0:2047];
+(* ramstyle = "M10K, no_rw_check" *) reg [7:0] comm_ram_hi [0:2047];
+reg [7:0] comm_lo_q;
+reg [7:0] comm_hi_q;
+wire [15:0] comm_word_q = {comm_hi_q, comm_lo_q};
+wire [7:0] comm_q = comm_lo_q;
 reg        comm_cn;
 reg        comm_fg;
 reg [15:0] comm_link_timer;
@@ -959,24 +976,26 @@ initial begin
     // is deliberately not touched by `if (rst)` below), matching M10K/MLAB
     // initial-contents semantics. A game reading share RAM before ever
     // writing it must read 0x00, not X or open bus.
-    for (comm_init_i = 0; comm_init_i < 2048; comm_init_i = comm_init_i + 1)
-        comm_ram[comm_init_i] = 8'h00;
+    for (comm_init_i = 0; comm_init_i < 2048; comm_init_i = comm_init_i + 1) begin
+        comm_ram_lo[comm_init_i] = 8'h00;
+        comm_ram_hi[comm_init_i] = 8'h00;
+    end
 end
 
 // Inference note: the previous version additionally scattered comm_ram
 // writes across five separate call sites, including three simultaneous
 // writes (bytes 0/1/4) in one cycle when the EPR-14084 link-status timer
-// expires. Quartus 17 never classified comm_ram as a RAM candidate under
-// that shape (no diagnostic at all -- same silent-failure class documented
-// for rtl/prot/s32_prot.sv). Below, comm_ram gets exactly one write
-// (address/data selected combinationally by priority) and one
-// unconditional registered read; the three-way "link established" publish
+// expires. Quartus 17 never classified the widened comm_ram as a RAM candidate
+// under that shape (no diagnostic at all -- same silent-failure class documented
+// for rtl/prot/s32_prot.sv). Below, each byte plane gets exactly one write
+// (address/data selected combinationally by priority) and one unconditional
+// registered read; the three-way "link established" publish
 // is spread across three consecutive clk_sys cycles by comm_pub_seq instead
 // of landing in one cycle -- invisible to the game, which only polls
 // comm_link_status (set after the sequence completes) and never has any
 // protocol reason to read bytes 0/1/4 mid-sequence. Everything else
 // (comm_cn/comm_fg/timer/status) is unchanged, in its own block, and never
-// touches comm_ram.
+// touches either byte plane outside this block.
 reg [1:0]  comm_pub_seq;   // 0=idle, 1..3=publishing bytes 0,1,4 in order
 wire       comm_pub_start = cfg_comm_link_hle && comm_cn && !comm_link_status &&
                              vbl_start && (comm_link_timer <= 16'd1) &&
@@ -984,18 +1003,46 @@ wire       comm_pub_start = cfg_comm_link_hle && comm_cn && !comm_link_status &&
 wire       comm_cpu_we    = m_req && m_we && sel_comm_ram && m_be[0];
 wire       comm_cn_clr_we = m_req && m_we && sel_comm_cn && m_be[0] &&
                              cfg_comm_link_hle;   // both cn=0 and cn=1 clear byte 4 to 0x00
-wire       comm_ram_we    = comm_cpu_we || comm_cn_clr_we || (comm_pub_seq != 2'd0);
-wire [10:0] comm_ram_waddr = comm_cpu_we    ? A[11:1] :
+reg        arescue_link_selftest_done;
+wire       arescue_link_we = wr_stb && m_we && sel_arescue_link_ram;
+wire       arescue_link_selftest_zero = !arescue_link_selftest_done &&
+                                         (A[11:1] == 11'd0) && m_be[1] &&
+                                         (m_wdata[15:8] == 8'haa);
+wire       comm_ram_we    = arescue_link_we || comm_cpu_we || comm_cn_clr_we ||
+                             (comm_pub_seq != 2'd0);
+wire [10:0] comm_ram_waddr = arescue_link_we ? A[11:1] :
+                              comm_cpu_we    ? A[11:1] :
                               comm_cn_clr_we ? 11'd4 :
                               (comm_pub_seq == 2'd1) ? 11'd0 :
                               (comm_pub_seq == 2'd2) ? 11'd1 : 11'd4;
-wire [7:0]  comm_ram_wdata = comm_cpu_we ? m_wdata[7:0] :
-                              comm_cn_clr_we ? 8'h00 : 8'h01;
+wire [15:0] comm_ram_wdata = arescue_link_we ?
+                              {arescue_link_selftest_zero ? 8'h00 : m_wdata[15:8],
+                               m_wdata[7:0]} :
+                              comm_cpu_we ? {8'h00, m_wdata[7:0]} :
+                              comm_cn_clr_we ? 16'h0000 : 16'h0001;
+wire [1:0]  comm_ram_wbe = arescue_link_we ? m_be : 2'b01;
 
 always @(posedge clk_sys) begin
-    if (comm_ram_we) comm_ram[comm_ram_waddr] <= comm_ram_wdata;
-    comm_q <= comm_ram[A[11:1]];
+    if (rst || !arescue_hle)
+        arescue_link_selftest_done <= 1'b0;
+    else if (arescue_link_we && arescue_link_selftest_zero)
+        arescue_link_selftest_done <= 1'b1;
 end
+
+always @(posedge clk_sys) begin
+    if (comm_ram_we && comm_ram_wbe[0])
+        comm_ram_lo[comm_ram_waddr] <= comm_ram_wdata[7:0];
+    comm_lo_q <= comm_ram_lo[A[11:1]];
+end
+
+always @(posedge clk_sys) begin
+    if (comm_ram_we && comm_ram_wbe[1])
+        comm_ram_hi[comm_ram_waddr] <= comm_ram_wdata[15:8];
+    comm_hi_q <= comm_ram_hi[A[11:1]];
+end
+
+// Air Rescue uses the same registered word read; no second link-memory bank.
+wire [15:0] arescue_link_q = comm_word_q;
 
 always @(posedge clk_sys) begin
     if (rst) begin
@@ -1181,6 +1228,9 @@ wire [7:0]  v25_q;
 wire        dke_pr_req, dke_pr_we;
 wire [15:0] dke_pr_addr, dke_pr_wdata;
 wire [1:0]  dke_pr_be;
+wire        dbz_pr_req, dbz_pr_we;
+wire [15:0] dbz_pr_addr, dbz_pr_wdata;
+wire [1:0]  dbz_pr_be;
 wire        jl_pr_req, jl_pr_we;
 wire [15:0] jl_pr_addr, jl_pr_wdata;
 wire [1:0]  jl_pr_be;
@@ -1199,6 +1249,9 @@ wire [15:0] prot_rom_data;
 wire        prot_rom_req;
 wire [20:0] prot_rom_addr;
 wire        prot_rom_ack;
+wire [15:0] arescue_dsp_q;
+wire        arescue_dsp_rd;
+wire        arescue_dsp_wr;
 
 // J.League, Burning Rival and SegaSonic are mutually exclusive
 // descriptor-selected protection clients sharing the cache's single
@@ -1217,6 +1270,7 @@ wire jl_cpu_write = wr_stb && m_we && sel_wram && m_be[0];
 // SegaSonic's device reads the stored counter word back, so it reacts to a
 // write on either byte lane rather than to the low lane alone.
 wire sonic_cpu_write = wr_stb && m_we && sel_wram;
+wire dbz_cpu_write = wr_stb && m_we && sel_dbz_prot;
 
 // Descriptor-selected standard-board protection responders.
 generate
@@ -1227,6 +1281,11 @@ generate
         assign dke_pr_addr  = 16'h0000;
         assign dke_pr_wdata = 16'h0000;
         assign dke_pr_be    = 2'b00;
+        assign dbz_pr_req   = 1'b0;
+        assign dbz_pr_we    = 1'b0;
+        assign dbz_pr_addr  = 16'h0000;
+        assign dbz_pr_wdata = 16'h0000;
+        assign dbz_pr_be    = 2'b00;
         assign jl_pr_req    = 1'b0;
         assign jl_pr_we     = 1'b0;
         assign jl_pr_addr   = 16'h0000;
@@ -1250,6 +1309,14 @@ generate
             .vblank(vbl_start),
             .wram_req(dke_pr_req), .wram_we(dke_pr_we), .wram_addr(dke_pr_addr),
             .wram_wdata(dke_pr_wdata), .wram_be(dke_pr_be),
+            .wram_rdata(pr_q), .wram_ack(pr_ack)
+        );
+        s32_prot_dbzvrvs #(.ENABLE(GAME_ONLY_STD || !GAME_ONLY)) dbzvrvs_prot (
+            .clk(clk_sys), .rst(rst),
+            .enable(cfg_prot_sel == PROT_DBZVRVS),
+            .cpu_write(dbz_cpu_write),
+            .wram_req(dbz_pr_req), .wram_we(dbz_pr_we), .wram_addr(dbz_pr_addr),
+            .wram_wdata(dbz_pr_wdata), .wram_be(dbz_pr_be),
             .wram_rdata(pr_q), .wram_ack(pr_ack)
         );
         s32_prot_jleague #(.ENABLE(GAME_ONLY_STD || !GAME_ONLY)) jleague_prot (
@@ -1302,15 +1369,29 @@ generate
     end
 endgenerate
 
-assign pr_req   = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_req :
+// The documented Air Rescue DSP block is a register/command device at
+// 0xa00000-0xa00007. It is title-gated and intentionally independent of the
+// standard-board protection RAM port.
+s32_prot_arescue_dsp arescue_dsp (
+    .clk(clk_sys), .rst(rst), .enable(arescue_hle),
+    .cpu_rd(arescue_dsp_rd), .cpu_wr(arescue_dsp_wr),
+    .addr(A[2:1]), .wdata(m_wdata), .be(m_be), .rdata(arescue_dsp_q)
+);
+
+assign pr_req   = (cfg_prot_sel == PROT_DBZVRVS) ? dbz_pr_req :
+                  (cfg_prot_sel == PROT_SONIC) ? sonic_pr_req :
                   (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_req : dke_pr_req;
-assign pr_we    = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_we :
+assign pr_we    = (cfg_prot_sel == PROT_DBZVRVS) ? dbz_pr_we :
+                  (cfg_prot_sel == PROT_SONIC) ? sonic_pr_we :
                   (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_we : dke_pr_we;
-assign pr_addr  = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_addr :
+assign pr_addr  = (cfg_prot_sel == PROT_DBZVRVS) ? dbz_pr_addr :
+                  (cfg_prot_sel == PROT_SONIC) ? sonic_pr_addr :
                   (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_addr : dke_pr_addr;
-assign pr_wdata = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_wdata :
+assign pr_wdata = (cfg_prot_sel == PROT_DBZVRVS) ? dbz_pr_wdata :
+                  (cfg_prot_sel == PROT_SONIC) ? sonic_pr_wdata :
                   (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_wdata : dke_pr_wdata;
-assign pr_be    = (cfg_prot_sel == PROT_SONIC) ? sonic_pr_be :
+assign pr_be    = (cfg_prot_sel == PROT_DBZVRVS) ? dbz_pr_be :
+                  (cfg_prot_sel == PROT_SONIC) ? sonic_pr_be :
                   (cfg_prot_sel == PROT_JLEAGUE) ? jl_pr_be : dke_pr_be;
 
 `ifdef S32_V25_HW
@@ -1523,6 +1604,8 @@ reg rd_wait;   // BRAM/register reads: one dead cycle so the registered q
                // Without it rmux latches the previous access's data — the q
                // registers update on the same edge the ack mux samples them.
 assign wr_stb = ack_r & ~ack_d;   // one-shot per transaction (for side-effect regs)
+assign arescue_dsp_rd = m_req && !m_we && sel_arescue_dsp && !ack_r && rd_wait;
+assign arescue_dsp_wr = wr_stb && m_we && sel_arescue_dsp;
 always @(posedge clk_sys) begin
     ack_d <= ack_r;
     if (!m_req) begin ack_r <= 0; rd_wait <= 0; end
@@ -1564,7 +1647,12 @@ always @(posedge clk_sys) begin
                 // Open-bus outside the comm RAM (A[15]=0) and the 4-byte id
                 // window (A[15] && A[14:2]==0); the module holds stale rdata
                 // when neither chip-select fires (audit R20 IO-10a).
+                // Air Rescue's local link RAM and main-board ID are the only
+                // 0x81xxxx devices retained by the one-board reduction.
+                sel_arescue_link_ram: rmux <= arescue_link_q;
+                sel_arescue_link_id:  rmux <= 16'h0000;
                 sel_dual:    rmux <= 16'hffff;
+                sel_arescue_dsp: rmux <= arescue_dsp_q;
                 sel_v25:     if (GAME_ONLY && !GAME_ONLY_STD)
                                  // Open-bus when this board has no V25 (holo,
                                  // spidman): MAME leaves 0xA00000 unmapped

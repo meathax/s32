@@ -18,11 +18,13 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/v60/s32_v60_bus.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_big_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_vram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_tilemap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_tilemap_regcap.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_sprite.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_linebuf.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_mixer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_palette.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_video.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_video_retime.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/video/s32_lightgun_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt_adjust.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/s32_audio_mix.sv

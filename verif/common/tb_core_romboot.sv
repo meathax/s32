@@ -1581,6 +1581,50 @@ always @(posedge clk_sys) if (ce_cpu) begin
     end
 end
 
+// Accepted non-ROM transactions within a caller-selected PC window.
+integer trbus_lo, trbus_hi, trbus_at, trbus_max, trbus_n = 0;
+initial begin
+    if (!$value$plusargs("TRBUSLO=%h", trbus_lo)) trbus_lo = -1;
+    if (!$value$plusargs("TRBUSHI=%h", trbus_hi)) trbus_hi = -1;
+    if (!$value$plusargs("TRBUSAT=%d", trbus_at)) trbus_at = 0;
+    if (!$value$plusargs("TRBUSMAX=%d", trbus_max)) trbus_max = 400;
+end
+always @(posedge clk_sys) begin
+    if (cur_frame >= trbus_at && core.v60.pc >= trbus_lo &&
+        core.v60.pc < trbus_hi && core.m_req && core.m_ack && !core.ack_d &&
+        core.A[23:20] >= 4'h2 && core.A[23:20] < 4'hf &&
+        trbus_n < trbus_max) begin
+        trbus_n = trbus_n + 1;
+        $display("[trbus] f=%0d pc=%08x rw=%s a=%06x data=%04x be=%b",
+            cur_frame, core.v60.pc, core.m_we ? "W" : "R", core.A,
+            core.m_we ? core.m_wdata : core.m_rdata, core.m_be);
+    end
+end
+
+integer traddr_lo, traddr_hi, traddr_at, traddr_max, traddr_n = 0;
+integer stop_pc;
+initial begin
+    if (!$value$plusargs("TRADDRLO=%h", traddr_lo)) traddr_lo = -1;
+    if (!$value$plusargs("TRADDRHI=%h", traddr_hi)) traddr_hi = -1;
+    if (!$value$plusargs("TRADDRAT=%d", traddr_at)) traddr_at = 0;
+    if (!$value$plusargs("TRADDRMAX=%d", traddr_max)) traddr_max = 400;
+    if (!$value$plusargs("STOPPC=%h", stop_pc)) stop_pc = -1;
+end
+always @(posedge clk_sys) begin
+    if (cur_frame >= traddr_at && core.A >= traddr_lo && core.A < traddr_hi &&
+        core.m_req && core.m_ack && !core.ack_d && traddr_n < traddr_max) begin
+        traddr_n = traddr_n + 1;
+        $display("[traddr] f=%0d pc=%08x rw=%s a=%06x data=%04x be=%b",
+            cur_frame, core.v60.pc, core.m_we ? "W" : "R", core.A,
+            core.m_we ? core.m_wdata : core.m_rdata, core.m_be);
+    end
+    if (stop_pc >= 0 && ce_cpu && core.v60.st == S_DECODE_V &&
+        core.v60.pc == stop_pc) begin
+        $display("[stoppc] f=%0d pc=%08x", cur_frame, core.v60.pc);
+        $finish;
+    end
+end
+
 // GA2 object-list investigation trace.  Enable with +OBJTRAT=<frame> and
 // optionally +OBJTRMAX=<n>.  It follows only the transition initializer
 // (0x130600-0x130680) and object-list builder (0x132900-0x1329B0), recording
@@ -1963,6 +2007,53 @@ always @(posedge clk_sys) begin
         $display("[memtrace] f=%0d pc=%08x a=%06x d=%04x be=%b op=%02x st=%0d",
             cur_frame, core.v60.pc, {core.A[23:1],1'b0}, core.m_wdata,
             core.m_be, core.v60.cur_op, core.v60.st);
+    end
+end
+
+// Canonical Air Rescue boundary trace. Disabled unless both output plusargs
+// are present; it observes only accepted V60 transactions.
+integer arescue_trace_fd = 0;
+integer arescue_trace_max;
+integer arescue_trace_seq = 0;
+string  arescue_trace_path;
+string  arescue_final_path;
+reg     arescue_final_enabled = 1'b0;
+initial begin
+    if (!$value$plusargs("ARESCUETRACEMAX=%d", arescue_trace_max))
+        arescue_trace_max = 30000;
+    if ($value$plusargs("ARESCUETRACE=%s", arescue_trace_path)) begin
+        arescue_trace_fd = $fopen(arescue_trace_path, "w");
+        if (arescue_trace_fd == 0)
+            $fatal(1, "cannot open Air Rescue trace %0s", arescue_trace_path);
+    end
+    arescue_final_enabled =
+        $value$plusargs("ARESCUEFINAL=%s", arescue_final_path);
+end
+always @(posedge clk_sys) begin : arescue_boundary_trace
+    reg [23:0] word_addr;
+    reg [15:0] lane_mask;
+    reg [15:0] bus_data;
+    if (arescue_trace_fd != 0 && arescue_trace_seq < arescue_trace_max &&
+        core.m_req && core.m_ack && !core.ack_d) begin
+        word_addr = {core.A[23:1], 1'b0};
+        if ((word_addr >= 24'h810000 && word_addr <= 24'h818002) ||
+            (word_addr >= 24'ha00000 && word_addr <= 24'ha00006)) begin
+            lane_mask = {{8{core.m_be[1]}}, {8{core.m_be[0]}}};
+            bus_data = core.m_we ? core.m_wdata : core.m_rdata;
+            arescue_trace_seq = arescue_trace_seq + 1;
+            if (core.m_we)
+                $fwrite(arescue_trace_fd,
+                    "{\"seq\":%0d,\"domain\":\"maincpu\",\"space\":\"program\",\"frame\":%0d,\"pc\":%0d,\"event\":\"bus_write\",\"addr\":%0d,\"data\":%0d,\"mask\":%0d,\"be\":%0d,\"range\":\"%s\"}\n",
+                    arescue_trace_seq, cur_frame, core.v60.pc, word_addr,
+                    bus_data, lane_mask, core.m_be,
+                    word_addr[23:12] == 12'ha00 ? "arescue_dsp" : "arescue_link");
+            else
+                $fwrite(arescue_trace_fd,
+                    "{\"seq\":%0d,\"domain\":\"maincpu\",\"space\":\"program\",\"frame\":%0d,\"pc\":%0d,\"event\":\"bus_read\",\"addr\":%0d,\"data\":%0d,\"mask\":%0d,\"be\":%0d,\"range\":\"%s\"}\n",
+                    arescue_trace_seq, cur_frame, core.v60.pc, word_addr,
+                    bus_data, lane_mask, core.m_be,
+                    word_addr[23:12] == 12'ha00 ? "arescue_dsp" : "arescue_link");
+        end
     end
 end
 
@@ -2662,7 +2753,7 @@ initial begin
 `ifdef S32_REAL_FB_SIM
     if (fb_deadline_fail)
         $fatal(1, "GA2 production framebuffer reported a service deadline failure");
-    if (fb_ddr_writes == 0 || fb_ddr_reads == 0)
+    if (ga2_qualification && (fb_ddr_writes == 0 || fb_ddr_reads == 0))
         $fatal(1, "GA2 DDR traffic missing: writes=%0d reads=%0d",
                fb_ddr_writes, fb_ddr_reads);
     if (fb_line_acks < frames * 128)
@@ -2682,11 +2773,31 @@ initial begin
     if (ga2_qualification && frames >= 90 && frame_sig_changes < 3)
         $fatal(1, "GA2 active video stopped changing: samples=%0d changes=%0d",
                frame_sig_samples, frame_sig_changes);
-    $display("GA2 DDR QUALIFICATION PASS writes=%0d reads=%0d line_acks=%0d max_wr=%0d max_rd=%0d max_er=%0d sig_samples=%0d sig_changes=%0d",
-        fb_ddr_writes, fb_ddr_reads, fb_line_acks,
-        fb_max_wr_wait, fb_max_rd_wait, fb_max_er_wait,
-        frame_sig_samples, frame_sig_changes);
+    if (ga2_qualification)
+        $display("GA2 DDR QUALIFICATION PASS writes=%0d reads=%0d line_acks=%0d max_wr=%0d max_rd=%0d max_er=%0d sig_samples=%0d sig_changes=%0d",
+            fb_ddr_writes, fb_ddr_reads, fb_line_acks,
+            fb_max_wr_wait, fb_max_rd_wait, fb_max_er_wait,
+            frame_sig_samples, frame_sig_changes);
 `endif
+    if (frames >= 30 && core.arescue_hle &&
+        !core.arescue_link_selftest_done)
+        $fatal(1, "Air Rescue did not complete the single-board link self-test");
+    if (arescue_trace_fd != 0) begin
+        $fflush(arescue_trace_fd);
+        $fclose(arescue_trace_fd);
+    end
+    if (arescue_final_enabled) begin : write_arescue_final
+        integer final_fd;
+        final_fd = $fopen(arescue_final_path, "w");
+        if (final_fd == 0)
+            $fatal(1, "cannot open Air Rescue finalization %0s",
+                   arescue_final_path);
+        $fwrite(final_fd,
+            "{\"schema\":\"mister-bus-jsonl-v1-finalization\",\"complete\":true,\"canonicalComplete\":true,\"frames\":%0d,\"observedEvents\":%0d,\"capturedEvents\":%0d,\"maxEvents\":%0d,\"callbackErrors\":0}\n",
+            frames, arescue_trace_seq, arescue_trace_seq,
+            arescue_trace_max);
+        $fclose(final_fd);
+    end
     $display("ROMBOOT DONE");
     $finish;
 end

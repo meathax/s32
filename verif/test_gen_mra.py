@@ -41,6 +41,11 @@ class BoardDescriptorTests(unittest.TestCase):
         self.assertEqual(GAMES["alien3"][:2], bytes.fromhex("080c"))
         self.assertEqual(GAMES["jpark"][:2], bytes.fromhex("0804"))
 
+    def test_dbzvrvs_selects_standard_analog_board_and_fd1149_profile(self) -> None:
+        self.assertEqual(GAMES["dbzvrvs"][:3], bytes.fromhex("082005"))
+        self.assertEqual(GAMES["dbzvrvs"][4], 0x00)
+        self.assertNotIn("dbzvrvs", IGNORED_PARENTS)
+
     def test_football_family_uses_standard_board_and_jleague_protection(self) -> None:
         self.assertEqual(GAMES["svf"][:3], bytes.fromhex("000000"))
         self.assertEqual(GAMES["jleague"][:3], bytes.fromhex("000006"))
@@ -148,6 +153,21 @@ class ButtonMetadataTests(unittest.TestCase):
             "Shoot,-,-,-,-,-,Start,Coin,Test,Service,Pause",
             "A,Start,Select,R,L,Y",
         ))
+
+    def test_arescue_names_panel_buttons_by_function(self) -> None:
+        self.assertEqual(BUTTONS["arescue"], (
+            "Fire,Secondary,-,-,-,-,Start,Coin,Test,Service,Pause",
+            "A,B,Start,Select,R,L,Y",
+        ))
+
+    def test_dbzvrvs_names_panel_switches_by_function(self) -> None:
+        names, defaults = BUTTONS["dbzvrvs"]
+        self.assertEqual(names.split(","),
+                         ["Left Punch", "Right Punch", "Jump", "-", "-", "-",
+                          "Start", "Coin", "Test", "Service", "Pause"])
+        self.assertEqual(defaults.split(","),
+                         ["A", "B", "X", "Start", "Select", "R", "L", "Y"])
+        self.assertEqual(BUTTON_COUNTS["dbzvrvs"], 3)
 
     def test_slip_stream_maps_pedals_and_gear_to_a_b_x(self) -> None:
         names, defaults = BUTTONS["slipstrm"]
@@ -302,7 +322,7 @@ class OptimizedLayoutTests(unittest.TestCase):
         """
         mra_dir = Path(__file__).parents[1] / "releases"
         paths = sorted(mra_dir.rglob("*.mra"), key=lambda path: path.name)
-        self.assertEqual(len(paths), 32, str(mra_dir))
+        self.assertEqual(len(paths), 38, str(mra_dir))
         for path in paths:
             root = ElementTree.parse(path).getroot()
             self.assertEqual(len(root.findall("nvram")), 1, path.name)
@@ -313,9 +333,9 @@ class OptimizedLayoutTests(unittest.TestCase):
     def test_every_mra_commits_descriptor_after_region_downloads(self) -> None:
         mra_dir = Path(__file__).parents[1] / "releases"
         paths = sorted(mra_dir.rglob("*.mra"))
-        # Air Rescue is intentionally excluded because its second PCB is not
-        # part of the production core.
-        self.assertEqual(len(paths), 32)
+        # Air Rescue is included as a title-gated one-board reduction; its
+        # second PCB is intentionally not modeled.
+        self.assertEqual(len(paths), 38)
         for path in paths:
             root = ElementTree.parse(path).getroot()
             roms = root.findall("rom")
@@ -329,9 +349,13 @@ class OptimizedLayoutTests(unittest.TestCase):
             self.assertEqual(len(descriptor), 64, path.name)
             self.assertTrue(any(index >= 4 for index in indexes), path.name)
 
-    def test_air_rescue_is_not_emitted(self) -> None:
-        names = {path.name for path in (Path(__file__).parents[1] / "releases").glob("*.mra")}
-        self.assertFalse(any("Air Rescue" in name for name in names))
+    def test_air_rescue_reduced_profile_is_emitted(self) -> None:
+        path = Path(__file__).parents[1] / "releases" / "Air Rescue (World).mra"
+        self.assertTrue(path.is_file())
+        root = ElementTree.parse(path).getroot()
+        self.assertEqual(root.findtext("setname"), "arescue")
+        descriptor = bytes.fromhex(root.find("rom[@index='0']/part").text or "")
+        self.assertEqual(descriptor[:5], bytes.fromhex("0801088100"))
 
     def test_rad_mobile_ships_both_regions_with_the_radm_port_layout(self) -> None:
         mra_dir = Path(__file__).parents[1] / "releases"

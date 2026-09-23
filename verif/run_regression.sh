@@ -116,6 +116,9 @@ iverilog -g2012 -DSIMULATION -s tb_fb_if_throughput -o /tmp/s32_fbif_throughput 
 vvp /tmp/s32_fbif_throughput | grep -q "FB THROUGHPUT PASS" && \
   echo "FB THROUGHPUT: PASS" || { echo "FB THROUGHPUT: FAIL"; exit 1; }
 echo "[10/35] mixer directed + pixel latency + 512-case independent differential test"
+iverilog -g2012 -s tb_mixer_tie_order -o /tmp/s32_mix_tie \
+  rtl/video/s32_mixer.sv verif/common/tb_mixer_tie_order.sv
+vvp /tmp/s32_mix_tie | grep -q "MIXER TIE ORDER PASS" && echo "MIXER TIE ORDER: PASS" || { echo "MIXER TIE ORDER: FAIL"; exit 1; }
 iverilog -g2012 -o /tmp/s32_mix rtl/video/s32_linebuf.sv rtl/video/s32_mixer.sv \
   rtl/video/s32_palette.sv verif/common/tb_mixer.sv
 vvp /tmp/s32_mix | grep -q "MIXER PASS" && echo "MIXER: PASS" || { echo "MIXER: FAIL"; exit 1; }
@@ -213,6 +216,9 @@ iverilog -g2012 -o /tmp/s32_linebuf \
   rtl/video/s32_linebuf.sv verif/common/tb_linebuf.sv
 vvp /tmp/s32_linebuf | grep -q "LINEBUF PASS" && echo "LINEBUF: PASS" || { echo "LINEBUF: FAIL"; exit 1; }
 echo "[23/35] tilemap VRAM fetches and deadline-safe scanline scheduling"
+iverilog -g2012 -s tb_tilemap_regcap -o /tmp/s32_tilemap_regcap \
+  rtl/video/s32_tilemap_regcap.sv verif/common/tb_tilemap_regcap.sv
+vvp /tmp/s32_tilemap_regcap | grep -q "TILEMAP REGCAP PASS" && echo "TILEMAP REGCAP: PASS" || { echo "TILEMAP REGCAP: FAIL"; exit 1; }
 iverilog -g2012 -DSIMULATION -o /tmp/s32_tilemap_vram \
   rtl/video/s32_big_dpram.sv rtl/video/s32_vram.sv \
   rtl/video/s32_tilemap.sv verif/common/tb_tilemap_vram.sv
@@ -223,10 +229,19 @@ vvp /tmp/s32_tile_scheduler | grep -q "TILE SCHEDULER PASS" && echo "TILE SCHEDU
 iverilog -g2012 -DSIMULATION -s tb_tile_backpressure -o /tmp/s32_tile_backpressure \
   rtl/video/s32_tilemap.sv verif/common/tb_tile_backpressure.sv
 vvp /tmp/s32_tile_backpressure | grep -q "TILE BACKPRESSURE PASS" && echo "TILE BACKPRESSURE: PASS" || { echo "TILE BACKPRESSURE: FAIL"; exit 1; }
+iverilog -g2012 -s tb_video_retime -o /tmp/s32_video_retime \
+  rtl/video/s32_video_retime.sv verif/common/tb_video_retime.sv
+vvp /tmp/s32_video_retime | grep -q "VIDEO RETIME PASS" && echo "VIDEO RETIME: PASS" || { echo "VIDEO RETIME: FAIL"; exit 1; }
 echo "[24/35] byte-wide true-dual-port BRAM timing / hold / collision semantics"
 iverilog -g2012 -s tb_byte_dpram -o /tmp/s32_byte_dpram \
   rtl/video/s32_big_dpram.sv verif/common/tb_byte_dpram.sv
 vvp /tmp/s32_byte_dpram | grep -q "BYTE DPRAM PASS" && echo "BYTE DPRAM: PASS" || { echo "BYTE DPRAM: FAIL"; exit 1; }
+iverilog -g2012 -s tb_big_dpram -o /tmp/s32_big_dpram \
+  rtl/video/s32_big_dpram.sv verif/common/tb_big_dpram.sv
+vvp /tmp/s32_big_dpram | grep -q "BIG DPRAM PASS" && echo "BIG DPRAM: PASS" || { echo "BIG DPRAM: FAIL"; exit 1; }
+iverilog -g2012 -s tb_dpram_mixed_collision -o /tmp/s32_dpram_mixed_collision \
+  rtl/video/s32_big_dpram.sv verif/common/tb_dpram_mixed_collision.sv
+vvp /tmp/s32_dpram_mixed_collision | grep -q "DPRAM MIXED COLLISION PASS" && echo "DPRAM MIXED COLLISION: PASS" || { echo "DPRAM MIXED COLLISION: FAIL"; exit 1; }
 echo "[25/35] V25 mailbox BRAM + production default FIFO profile"
 iverilog -g2012 -s tb_v25_dpram -o /tmp/s32_v25_dpram \
   rtl/s32_pkg.sv rtl/video/s32_big_dpram.sv rtl/prot/s32_prot.sv \

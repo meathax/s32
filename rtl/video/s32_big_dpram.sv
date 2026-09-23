@@ -20,6 +20,34 @@
 //  megafunction parameters. Revisit with the actual Intel altsyncram HDL
 //  template/documentation (MegaWizard-generated reference) in hand before
 //  trying again; do not hand-author another attempt blind.
+//
+//  Mixed-port collisions (sprite_ram, video_ram)
+//  ---------------------------------------------
+//  Both renderer RAMs run port A on clk_sys (V60 writes) and port B on
+//  clk_ram (renderer fetch), with read_during_write_mode_mixed_ports =
+//  DONT_CARE.  On a Cyclone V M10K that setting means a port-B read of the
+//  address port A is writing in the same cycle returns UNDEFINED bits, not
+//  old or new data.  On the System 32 PCB the CPU and the video/sprite chips
+//  share one SRAM through the bus controller, so their accesses are
+//  serialised and this case cannot occur: the hazard is introduced by the
+//  dual-port BRAM, not by the board.  A single corrupted 16-bit word is one
+//  wrong sprite descriptor or tile word for one frame.
+//
+//  The behavioural branch below always returned clean old data, so no
+//  simulation could ever observe the defect.  MIXED_COLLISION_FWD now
+//  resolves the collision by forwarding the port-A word to port B, which is
+//  the write-first result a serialised board access would produce, and
+//  SIM_COLLISION_POISON lets a bench model the undefined read so the fix is
+//  falsifiable.
+//
+//  Limits: clk_sys is a phase-related divide-by-two of clk_ram, so wren_a is
+//  observed high on two consecutive clock_b edges and the forward makes the
+//  write visible up to one clk_ram cycle before the M10K commits it.  That is
+//  still a legal serialisation (renderer sees the new word) and is
+//  deterministic, which the undefined read is not.  A partial-byteena write
+//  colliding with a port-B read still leaves the UNWRITTEN lane sourced from
+//  the M10K's undefined output; closing that requires moving port A onto
+//  clk_ram so the pair can use the deterministic same-clock OLD_DATA mode.
 //============================================================================
 
 module s32_big_dpram #(
@@ -33,7 +61,17 @@ module s32_big_dpram #(
     // not build the unused BIDIR_DUAL_PORT write-control pipeline for those
     // clients; the internal portb_we_reg otherwise becomes a long timing
     // launch point from the M10K to every renderer fetch register.
-    parameter bit     PORT_B_READ_ONLY = 1'b0
+    parameter bit     PORT_B_READ_ONLY = 1'b0,
+    // Resolve a mixed-port same-address collision on the read-only B port by
+    // forwarding the port-A word.  Defaults on for exactly the two DONT_CARE
+    // renderer clients.  The design must never instantiate this at 0; the
+    // override exists so a bench can run the unresolved path as a control.
+    parameter bit     MIXED_COLLISION_FWD = PORT_B_READ_ONLY,
+    // Simulation only.  Model the M10K's undefined mixed-port read as a word
+    // that is neither the old nor the new value, so a bench proves the
+    // collision was resolved rather than that it happened to land on a legal
+    // word.  Ignored by the synthesis branch.
+    parameter bit     SIM_COLLISION_POISON = 1'b0
 ) (
     input                       clock_a,
     input      [ADDR_WIDTH-1:0] address_a,
@@ -50,6 +88,11 @@ module s32_big_dpram #(
     output               [15:0] q_b
 );
 
+// Raw port-B output of the storage array, before mixed-port collision
+// resolution.  This is the net that carries undefined bits on a same-address
+// mixed-port access in real silicon.
+wire [15:0] q_b_ram;
+
 `ifdef ALTERA_RESERVED_QIS
 altsyncram ram (
     .clock0(clock_a),
@@ -64,7 +107,7 @@ altsyncram ram (
     .data_b(data_b),
     .byteena_b(byteena_b),
     .wren_b(wren_b),
-    .q_b(q_b),
+    .q_b(q_b_ram),
 
     .aclr0(1'b0),
     .aclr1(1'b0),
@@ -114,7 +157,7 @@ reg [15:0] mem [0:NUM_WORDS-1];
 reg [15:0] q_a_r;
 reg [15:0] q_b_r;
 assign q_a = q_a_r;
-assign q_b = q_b_r;
+assign q_b_ram = q_b_r;
 
 integer __ram_init;
 initial begin
@@ -138,13 +181,44 @@ always @(posedge clock_a) begin
 end
 
 always @(posedge clock_b) begin
-    q_b_r <= mem[address_b];
+    if (SIM_COLLISION_POISON && wren_a && (address_a == address_b))
+        // Stands in for the M10K's undefined mixed-port read.  Deliberately
+        // neither mem[address_b] nor data_a so a bench cannot pass by reading
+        // a legal word out of luck.
+        q_b_r <= 16'hBAD0;
+    else
+        q_b_r <= mem[address_b];
     if (wren_b) begin
         if (byteena_b[0]) mem[address_b][7:0]  <= data_b[7:0];
         if (byteena_b[1]) mem[address_b][15:8] <= data_b[15:8];
     end
 end
 `endif
+
+// Mixed-port collision resolution, shared by the vendor primitive and the
+// behavioural model so simulation and hardware carry the same semantics.
+// The comparison is a register input, not an addition to the q_b_ram ->
+// consumer path, so only the output multiplexer lands on the renderer's
+// 96 MHz fetch cone.
+generate
+if (MIXED_COLLISION_FWD) begin : g_mixed_fwd
+    reg        coll_r;
+    reg [15:0] coll_data_r;
+    reg  [1:0] coll_be_r;
+    always @(posedge clock_b) begin
+        coll_r      <= wren_a && (address_a == address_b);
+        coll_data_r <= data_a;
+        coll_be_r   <= byteena_a;
+    end
+    assign q_b = coll_r
+               ? {coll_be_r[1] ? coll_data_r[15:8] : q_b_ram[15:8],
+                  coll_be_r[0] ? coll_data_r[7:0]  : q_b_ram[7:0]}
+               : q_b_ram;
+end
+else begin : g_mixed_raw
+    assign q_b = q_b_ram;
+end
+endgenerate
 
 endmodule
 
